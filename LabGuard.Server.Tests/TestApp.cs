@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using Microsoft.AspNetCore.Hosting;
@@ -25,6 +26,7 @@ public sealed class TestApp : WebApplicationFactory<Program>
     public const string Password = "correct horse";
 
     private readonly string _databasePath = Path.Combine(Path.GetTempPath(), $"lykantra-test-{Guid.NewGuid():N}.db");
+    private readonly string _channelPath = Path.Combine(Path.GetTempPath(), $"lykantra-test-{Guid.NewGuid():N}.pc-channel.dat");
     private readonly string _environment;
 
     private readonly bool _seedSampleLoginRequests;
@@ -42,6 +44,14 @@ public sealed class TestApp : WebApplicationFactory<Program>
 
     public CapturingLoggerProvider Logs { get; } = new();
 
+    public PcChannelStore Channel => Services.GetRequiredService<PcChannelStore>();
+
+    /// <summary>The registration secret a PC must send: the last 10 characters of the setup code.</summary>
+    public string SetupSecret => PcSetupCode.Normalize(Channel.SetupCode)[PcSetupCode.FingerprintLength..];
+
+    public JsonContent RegistrationBody(string? name, string? setupSecret) =>
+        JsonContent.Create(new { name, setupSecret });
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment(_environment);
@@ -49,6 +59,7 @@ public sealed class TestApp : WebApplicationFactory<Program>
             configuration.AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["ConnectionStrings:AppDb"] = $"Data Source={_databasePath}",
+                [PcChannelStore.FileConfigurationKey] = _channelPath,
                 ["Seed:AdminUsername"] = Username,
                 ["Seed:AdminPassword"] = Password,
                 ["Seed:SampleLoginRequests"] = _seedSampleLoginRequests ? "true" : "false",
@@ -94,6 +105,9 @@ public sealed class TestApp : WebApplicationFactory<Program>
         {
             File.Delete(_databasePath + suffix);
         }
+
+        File.Delete(_channelPath);
+        File.Delete(_channelPath + ".tmp");
     }
 }
 
@@ -106,6 +120,7 @@ internal sealed class SimulatedConnectionFilter : IStartupFilter
     public const string LocalPortHeader = "X-Test-Local-Port";
     public const string RemoteIpHeader = "X-Test-Remote-Ip";
     public const string LocalIpHeader = "X-Test-Local-Ip";
+    public const string PlainHttpHeader = "X-Test-Plain-Http";
     /// <summary>Header value that makes an address null, as on a connection with no address information.</summary>
     public const string NoAddress = "none";
 
@@ -119,6 +134,12 @@ internal sealed class SimulatedConnectionFilter : IStartupFilter
             connection.LocalPort = int.TryParse(context.Request.Headers[LocalPortHeader], out var port) ? port : ports.AdminPort;
             connection.RemoteIpAddress = ReadAddress(context.Request.Headers[RemoteIpHeader]);
             connection.LocalIpAddress = ReadAddress(context.Request.Headers[LocalIpHeader]);
+            // The real PC port is HTTPS only, so simulate that unless a test asks for a plain connection.
+            if (connection.LocalPort == ports.ClientPort && !context.Request.Headers.ContainsKey(PlainHttpHeader))
+            {
+                context.Request.Scheme = "https";
+            }
+
             return nextMiddleware(context);
         });
         next(app);

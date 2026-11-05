@@ -1,6 +1,7 @@
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
+using LabGuard.Server.Network;
 using LabGuard.Server.Sessions;
 using Microsoft.EntityFrameworkCore;
 
@@ -17,6 +18,9 @@ public record PcResponse(
 
 public record PcSessionSummary(string Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
 
+public record SetupCodeResponse(string Code);
+public record RegenerateSetupCodeRequest;
+
 public static class PcEndpoints
 {
     // A PC counts as online while its last heartbeat is newer than this.
@@ -27,6 +31,12 @@ public static class PcEndpoints
         var group = app.MapGroup("/api/pcs");
         group.MapGet("/", ListAsync);
         group.MapDelete("/{id:int}", DeleteAsync);
+        group.MapGet("/setup-code", (HttpContext http, PcChannelStore channel) =>
+        {
+            http.Response.Headers.CacheControl = "no-store";
+            return Results.Ok(new SetupCodeResponse(channel.SetupCode));
+        });
+        group.MapPost("/setup-code/regenerate", RegenerateSetupCodeAsync);
         return app;
     }
 
@@ -64,6 +74,18 @@ public static class PcEndpoints
                     ? ToSummary(session, now)
                     : null);
         }));
+    }
+
+    // The JSON body is required so a cross-origin HTML form (which can't send JSON) can't trigger it.
+    private static async Task<IResult> RegenerateSetupCodeAsync(HttpContext http, PcChannelStore channel)
+    {
+        if (await AuthEndpoints.ReadBodyAsync<RegenerateSetupCodeRequest>(http.Request) is null)
+        {
+            return AuthEndpoints.InvalidRequest();
+        }
+
+        http.Response.Headers.CacheControl = "no-store";
+        return Results.Ok(new SetupCodeResponse(channel.RegenerateSecret()));
     }
 
     private static PcSessionSummary ToSummary(PcSession session, DateTimeOffset now) =>

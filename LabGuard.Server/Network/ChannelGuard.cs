@@ -25,7 +25,10 @@ public sealed class ChannelGuard(RequestDelegate next, ServerPorts ports, ILogge
 
         if (connection.LocalPort == ports.ClientPort)
         {
-            return isClientPath ? InvokeClientAsync(context) : Reject(context, StatusCodes.Status404NotFound);
+            // IsHttps fails closed if a setting ever adds a plain listener on this port.
+            return isClientPath && context.Request.IsHttps
+                ? InvokeClientAsync(context)
+                : Reject(context, StatusCodes.Status404NotFound);
         }
 
         var isLoopbackAdminConnection = connection.LocalPort == ports.AdminPort

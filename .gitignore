@@ -4,6 +4,7 @@ obj/
 *.db-shm
 *.db-wal
 pc-channel.dat
+pc-channel.dat.tmp
 *.pfx
 .vs/
 *.user

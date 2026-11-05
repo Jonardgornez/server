@@ -8,17 +8,27 @@ using LabGuard.Server.Requests;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Authentication;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Two separate ports: the admin web UI listens on loopback only, so no setting can expose it to the LAN,
 // while lab PCs reach /api/client/* on the client port. ChannelGuard keeps the two paths apart.
-var ports = ServerPorts.FromConfiguration(builder.Configuration);
-builder.Services.AddSingleton(ports);
+builder.Services.AddSingleton(services => ServerPorts.FromConfiguration(services.GetRequiredService<IConfiguration>()));
+// The PC port is HTTPS only, with a self-signed certificate that PCs pin by public key (see PcChannelStore).
+builder.Services.AddSingleton(services =>
+    PcChannelStore.Open(PcChannelStore.ResolvePath(
+        services.GetRequiredService<IConfiguration>(),
+        services.GetRequiredService<IHostEnvironment>().ContentRootPath)));
 builder.WebHost.ConfigureKestrel(options =>
 {
+    var ports = options.ApplicationServices.GetRequiredService<ServerPorts>();
     options.ListenLocalhost(ports.AdminPort);
-    options.ListenAnyIP(ports.ClientPort);
+    options.ListenAnyIP(ports.ClientPort, listen => listen.UseHttps(https =>
+    {
+        https.ServerCertificate = options.ApplicationServices.GetRequiredService<PcChannelStore>().Certificate;
+        https.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
+    }));
 });
 
 builder.Services.AddOpenApi();
@@ -35,6 +45,9 @@ builder.Services.AddDbContext<AppDbContext>((services, options) =>
 });
 
 var app = builder.Build();
+
+// Opened before anything else so an unreadable channel file stops startup with a clear message.
+app.Services.GetRequiredService<PcChannelStore>();
 
 using (var scope = app.Services.CreateScope())
 {

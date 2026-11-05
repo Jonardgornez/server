@@ -69,6 +69,19 @@ public class ChannelGuardTests
     }
 
     [Fact]
+    public async Task PcPort_RefusesAConnectionWithoutTls_EvenOnAClientPath()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/client/ping");
+        request.Headers.Add(SimulatedConnectionFilter.PlainHttpHeader, "1");
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task PcPort_ApiClientPathMatchIgnoresCase()
     {
         using var app = new TestApp();
@@ -104,7 +117,7 @@ public class ChannelGuardTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        const string json = """{"name":"PC-01"}""";
+        var json = $$"""{"name":"PC-01","setupSecret":"{{app.SetupSecret}}"}""";
         var padding = new string(' ', ChannelGuard.MaxClientBodyBytes - json.Length);
 
         var response = await client.PostAsync("/api/client/register", new StringContent(json + padding, Encoding.UTF8, "application/json"));
@@ -290,7 +303,7 @@ public class ChannelGuardTests
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/client/ping")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await ipv6.GetAsync("/api/client/ping")).StatusCode);
-        Assert.Equal(HttpStatusCode.Created, (await client.PostAsJsonAsync("/api/client/register", new { name = "PC-01" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await client.PostAsync("/api/client/register", app.RegistrationBody("PC-01", app.SetupSecret))).StatusCode);
     }
 
     [Fact]

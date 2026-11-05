@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using System.Threading.RateLimiting;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
+using LabGuard.Server.Network;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -13,7 +14,7 @@ using Microsoft.EntityFrameworkCore;
 namespace LabGuard.Server.Clients;
 
 public record PingResponse(string Service);
-public record RegisterPcRequest(string? Name);
+public record RegisterPcRequest(string? Name, string? SetupSecret);
 public record RegisterPcResponse(int Id, string Name, string Token);
 
 public static partial class ClientEndpoints
@@ -29,6 +30,7 @@ public static partial class ClientEndpoints
     private const int MaxTokenLength = 64;
     private const string BearerPrefix = "Bearer ";
     private const string NameTakenMessage = "That PC name is already registered.";
+    private const string WrongSetupCodeMessage = "That setup code isn't right.";
     private const int SqliteUniqueConstraintErrorCode = 2067;
 
     [GeneratedRegex(@"^[A-Za-z0-9._-]+\z")]
@@ -90,12 +92,18 @@ public static partial class ClientEndpoints
         return app;
     }
 
-    private static async Task<IResult> RegisterAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    private static async Task<IResult> RegisterAsync(HttpContext http, AppDbContext db, TimeProvider clock, PcChannelStore channel)
     {
         var request = await AuthEndpoints.ReadBodyAsync<RegisterPcRequest>(http.Request);
         if (request is null)
         {
             return AuthEndpoints.InvalidRequest();
+        }
+
+        // First, so nothing about the name (valid, taken) can be probed without the setup code.
+        if (!channel.SecretMatches(request.SetupSecret))
+        {
+            return Results.Json(new ErrorResponse(WrongSetupCodeMessage), statusCode: StatusCodes.Status403Forbidden);
         }
 
         var name = request.Name?.Trim() ?? "";

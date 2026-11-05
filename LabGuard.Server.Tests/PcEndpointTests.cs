@@ -271,7 +271,7 @@ public class PcEndpointTests
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
         using var pc = app.CreatePcClient();
-        var body = await JsonOf(await pc.PostAsJsonAsync("/api/client/register", new { name = "PC-01" }));
+        var body = await JsonOf(await pc.PostAsync("/api/client/register", app.RegistrationBody("PC-01", app.SetupSecret)));
         var token = body.GetProperty("token").GetString()!;
         app.Time.Advance(TimeSpan.FromSeconds(20));
 
@@ -286,7 +286,7 @@ public class PcEndpointTests
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
         using var pc = app.CreatePcClient();
-        var body = await JsonOf(await pc.PostAsJsonAsync("/api/client/register", new { name = "PC-01" }));
+        var body = await JsonOf(await pc.PostAsync("/api/client/register", app.RegistrationBody("PC-01", app.SetupSecret)));
         app.Time.Advance(TimeSpan.FromSeconds(60));
         await HeartbeatAsync(pc, body.GetProperty("token").GetString()!);
 
