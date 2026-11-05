@@ -21,8 +21,10 @@ public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, Defau
 
 public record SetupCodeResponse(string Code);
 public record RegenerateSetupCodeRequest;
+// Sent as {} by the admin lock and unlock routes; the body is required so a cross-origin form can't send it.
+public record PcAdminActionRequest;
 
-public static class PcEndpoints
+public static partial class PcEndpoints
 {
     // A PC counts as online while its last heartbeat is newer than this.
     public static readonly TimeSpan OnlineWindow = TimeSpan.FromSeconds(15);
@@ -38,6 +40,7 @@ public static class PcEndpoints
             return Results.Ok(new SetupCodeResponse(channel.SetupCode));
         });
         group.MapPost("/setup-code/regenerate", RegenerateSetupCodeAsync);
+        group.MapPost("/{id:int}/lock", LockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 
