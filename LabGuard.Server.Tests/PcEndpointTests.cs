@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
+using LabGuard.Server.Sessions;
 using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Tests;
@@ -119,6 +120,27 @@ public class PcEndpointTests
         var text = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain("token", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("hash", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task List_AdminUnlockSession_HasNullUsername()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        await AddAsync(app, "PC-01");
+        await app.WithDbAsync(async db =>
+        {
+            var pc = await db.Pcs.SingleAsync();
+            db.PcSessions.Add(SessionLifecycle.NewAdminUnlock(pc, app.Time.GetUtcNow()));
+            await db.SaveChangesAsync();
+            return 0;
+        });
+
+        var session = (await JsonOf(await client.GetAsync("/api/pcs")))[0].GetProperty("session");
+
+        Assert.Equal(JsonValueKind.Null, session.GetProperty("username").ValueKind);
+        Assert.Equal("open-time", session.GetProperty("time").GetProperty("mode").GetString());
+        Assert.Equal(JsonValueKind.Null, session.GetProperty("secondsRemaining").ValueKind);
     }
 
     [Fact]

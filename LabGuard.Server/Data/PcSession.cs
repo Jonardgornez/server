@@ -18,4 +18,7 @@ public class PcSession
     public int? DefaultTimeMinutes { get; set; }
     public DateTimeOffset? EndedAtUtc { get; set; }
     public string? EndReason { get; set; }
+
+    // True for a session the admin opened to unlock the PC. It has no account and never expires.
+    public bool IsAdminUnlock { get; set; }
 }

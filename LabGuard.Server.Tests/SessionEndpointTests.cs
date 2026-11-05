@@ -1002,6 +1002,20 @@ public class SessionEndpointTests
     }
 
     [Fact]
+    public async Task Heartbeat_ReportsIsAdminUnlockFalse_ForALoginSession()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+
+        var session = (await JsonOf(await HeartbeatAsync(client, pc, sessionId))).GetProperty("session");
+
+        Assert.False(session.GetProperty("isAdminUnlock").GetBoolean());
+    }
+
+    [Fact]
     public async Task Heartbeat_AtExpiry_EndsTheSessionWithTimeExpired()
     {
         using var app = new TestApp();

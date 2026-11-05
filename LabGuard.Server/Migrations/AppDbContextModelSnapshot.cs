@@ -146,6 +146,9 @@ namespace LabGuard.Server.Migrations
                     b.Property<long?>("ExpiresAtUtc")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("IsAdminUnlock")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("PcId")
                         .HasColumnType("INTEGER");
 

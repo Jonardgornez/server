@@ -16,7 +16,8 @@ public record PcResponse(
     DateTimeOffset LastSeenAt,
     PcSessionSummary? Session);
 
-public record PcSessionSummary(string Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
+// Username is null for an admin unlock, which has no account.
+public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
 
 public record SetupCodeResponse(string Code);
 public record RegenerateSetupCodeRequest;
@@ -89,7 +90,7 @@ public static class PcEndpoints
     }
 
     private static PcSessionSummary ToSummary(PcSession session, DateTimeOffset now) =>
-        new(session.Username, session.StartedAtUtc, SessionLifecycle.ToTime(session.DefaultTimeMinutes), SessionLifecycle.SecondsRemaining(session, now));
+        new(session.IsAdminUnlock ? null : session.Username, session.StartedAtUtc, SessionLifecycle.ToTime(session.DefaultTimeMinutes), SessionLifecycle.SecondsRemaining(session, now));
 
     private static async Task<IResult> DeleteAsync(int id, AppDbContext db, TimeProvider clock, CancellationToken cancellationToken)
     {
