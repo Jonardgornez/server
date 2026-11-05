@@ -90,10 +90,14 @@ public class PcLockEndpointTests
     private static Task<HttpResponseMessage> LockAsync(HttpClient admin, int pcId) =>
         admin.PostAsJsonAsync($"/api/pcs/{pcId}/lock", new { });
 
+    private static Task<HttpResponseMessage> UnlockAsync(HttpClient admin, int pcId) =>
+        admin.PostAsJsonAsync($"/api/pcs/{pcId}/unlock", new { });
+
     // Every admin route refuses anonymous callers, the PC port, and any request without a JSON body.
 
     [Theory]
     [InlineData("/api/pcs/1/lock")]
+    [InlineData("/api/pcs/1/unlock")]
     public async Task AdminRoutes_WithoutCookie_Return401(string path)
     {
         using var app = new TestApp();
@@ -106,6 +110,7 @@ public class PcLockEndpointTests
 
     [Theory]
     [InlineData("/api/pcs/1/lock")]
+    [InlineData("/api/pcs/1/unlock")]
     public async Task AdminRoutes_FromThePcPort_Return404(string path)
     {
         using var app = new TestApp();
@@ -123,6 +128,11 @@ public class PcLockEndpointTests
     [InlineData("/api/pcs/{id}/lock", "application/json", "")]
     [InlineData("/api/pcs/{id}/lock", "application/json", "null")]
     [InlineData("/api/pcs/{id}/lock", "application/json", "{not json")]
+    [InlineData("/api/pcs/{id}/unlock", "text/plain", "{}")]
+    [InlineData("/api/pcs/{id}/unlock", "application/x-www-form-urlencoded", "")]
+    [InlineData("/api/pcs/{id}/unlock", "application/json", "")]
+    [InlineData("/api/pcs/{id}/unlock", "application/json", "null")]
+    [InlineData("/api/pcs/{id}/unlock", "application/json", "{not json")]
     public async Task AdminRoutes_WithoutAJsonBody_Return400AndChangeNothing(string path, string contentType, string body)
     {
         using var app = new TestApp();
@@ -235,6 +245,137 @@ public class PcLockEndpointTests
         await LockAsync(admin, pcA.Id);
 
         Assert.Null((await StoredSessionAsync(app, sessionB)).EndedAtUtc);
+    }
+
+    // Unlock
+
+    [Fact]
+    public async Task Unlock_OnlinePc_OpensAnAdminUnlockSession()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app, "PC-07");
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var session = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync());
+        Assert.True(session.IsAdminUnlock);
+        Assert.Equal(pc.Id, session.PcId);
+        Assert.Equal("PC-07", session.PcName);
+        Assert.Equal(0, session.UserAccountId);
+        Assert.Equal("Admin unlock", session.Username);
+        Assert.Equal(app.Time.GetUtcNow().ToUnixTimeMilliseconds(), session.StartedAtUtc.ToUnixTimeMilliseconds());
+        Assert.Null(session.ExpiresAtUtc);
+        Assert.Null(session.DefaultTimeMinutes);
+        Assert.Null(session.EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task Unlock_MissingPc_Returns404()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+
+        var response = await UnlockAsync(admin, 999);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("PC not found.", (await JsonOf(response)).GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task Unlock_OfflinePc_Returns409AndOpensNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app, seenAgo: TimeSpan.FromSeconds(15));
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("This PC is offline.", (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Equal(0, await app.WithDbAsync(db => db.PcSessions.CountAsync()));
+    }
+
+    [Fact]
+    public async Task Unlock_PcWithARunningLogin_Returns409AndKeepsTheLogin()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("This PC is already in use.", (await JsonOf(response)).GetProperty("error").GetString());
+        var session = await StoredSessionAsync(app, sessionId);
+        Assert.False(session.IsAdminUnlock);
+        Assert.Null(session.EndedAtUtc);
+        Assert.Equal(1, await app.WithDbAsync(db => db.PcSessions.CountAsync()));
+    }
+
+    [Fact]
+    public async Task Unlock_PcAlreadyUnlocked_Returns409()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        Assert.Equal(HttpStatusCode.NoContent, (await UnlockAsync(admin, pc.Id)).StatusCode);
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("This PC is already in use.", (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Equal(1, await app.WithDbAsync(db => db.PcSessions.CountAsync()));
+    }
+
+    [Fact]
+    public async Task Unlock_ExpiredLogin_IsClosedAsTimeExpiredAndThePcUnlocks()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app, minutes: 1);
+        var loginId = await LoggedInSessionIdAsync(client, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(55));
+        await HeartbeatAsync(client, pc, loginId);
+        app.Time.Advance(TimeSpan.FromSeconds(10));
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var login = await StoredSessionAsync(app, loginId);
+        Assert.Equal(SessionLifecycle.TimeExpired, login.EndReason);
+        Assert.Equal(login.ExpiresAtUtc, login.EndedAtUtc);
+        Assert.Equal(1, await app.WithDbAsync(db => db.PcSessions.CountAsync(s => s.IsAdminUnlock && s.EndedAtUtc == null)));
+    }
+
+    [Fact]
+    public async Task Unlock_LosingARaceWithALogin_Returns409AndOpensNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        // Stands in for a login that starts just before the unlock is saved: this trigger makes that PC busy
+        // inside the same insert, so the unique index rejects the unlock.
+        await app.WithDbAsync(db => db.Database.ExecuteSqlRawAsync($"""
+            CREATE TRIGGER LoginWinsTheRace BEFORE INSERT ON PcSessions
+            WHEN NEW.IsAdminUnlock = 1 AND NEW.PcId = {pc.Id}
+            BEGIN
+                INSERT INTO PcSessions (PcId, PcName, UserAccountId, Username, StartedAtUtc, IsAdminUnlock)
+                VALUES (NEW.PcId, 'PC-01', 1, 'student', NEW.StartedAtUtc, 0);
+            END
+            """));
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("This PC is already in use.", (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Equal(0, await app.WithDbAsync(db => db.PcSessions.CountAsync(s => s.IsAdminUnlock)));
     }
 
     [Fact]

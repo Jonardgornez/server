@@ -166,7 +166,7 @@ public static partial class ClientEndpoints
         return address is { IsIPv4MappedToIPv6: true } ? address.MapToIPv4() : address;
     }
 
-    private static bool IsUniqueViolation(DbUpdateException exception) =>
+    internal static bool IsUniqueViolation(DbUpdateException exception) =>
         exception.InnerException is SqliteException { SqliteExtendedErrorCode: SqliteUniqueConstraintErrorCode };
 
     private static IResult NameTaken() =>

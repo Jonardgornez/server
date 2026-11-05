@@ -41,6 +41,7 @@ public static partial class PcEndpoints
         });
         group.MapPost("/setup-code/regenerate", RegenerateSetupCodeAsync);
         group.MapPost("/{id:int}/lock", LockAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/{id:int}/unlock", UnlockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 
