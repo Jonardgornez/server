@@ -22,7 +22,7 @@ public static partial class ClientEndpoints
     public const int MaxNameLength = 32;
     public const int MaxRegistrationsPerMinute = 10;
     public const string RegistrationRateLimitPolicy = "pc-registration";
-    // A PC sends 12 heartbeats a minute, so this leaves plenty of room.
+    // A PC sends 30 heartbeats a minute (one every 2 seconds), so 120 a minute still leaves room.
     public const int MaxTrafficPerMinute = 120;
     public const string TrafficRateLimitPolicy = "pc-traffic";
 
