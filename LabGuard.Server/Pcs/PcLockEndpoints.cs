@@ -81,6 +81,56 @@ public static partial class PcEndpoints
         }
     }
 
+    private static async Task<IResult> LockAllAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    {
+        if (await AuthEndpoints.ReadBodyAsync<PcAdminActionRequest>(http.Request) is null)
+        {
+            return AuthEndpoints.InvalidRequest();
+        }
+
+        // Expired sessions are recorded as time-expired first, so only the sessions still running are counted as admin locks.
+        var ct = http.RequestAborted;
+        var now = clock.GetUtcNow();
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SessionLifecycle.EndExpiredAsync(db, now, ct);
+        var locked = await SessionLifecycle.EndAllAsync(db, SessionLifecycle.AdminLock, now, ct);
+        await transaction.CommitAsync(ct);
+        return Results.Ok(new AffectedPcsResponse(locked));
+    }
+
+    private static async Task<IResult> UnlockAllAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    {
+        if (await AuthEndpoints.ReadBodyAsync<PcAdminActionRequest>(http.Request) is null)
+        {
+            return AuthEndpoints.InvalidRequest();
+        }
+
+        var ct = http.RequestAborted;
+        var now = clock.GetUtcNow();
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SessionLifecycle.EndExpiredAsync(db, now, ct);
+        var pcs = await db.Pcs.AsNoTracking().ToListAsync(ct);
+        var busyPcIds = (await db.PcSessions
+            .AsNoTracking()
+            .Where(s => s.EndedAtUtc == null)
+            .Select(s => s.PcId)
+            .ToListAsync(ct))
+            .ToHashSet();
+
+        // A PC that gets a session in the meantime is skipped by the unique index, so the others still open.
+        var unlocked = 0;
+        foreach (var pc in pcs)
+        {
+            if (IsOnline(pc.LastSeenUtc, now) && !busyPcIds.Contains(pc.Id) && await TryOpenAdminUnlockAsync(db, pc, now, ct))
+            {
+                unlocked++;
+            }
+        }
+
+        await transaction.CommitAsync(ct);
+        return Results.Ok(new AffectedPcsResponse(unlocked));
+    }
+
     private static IResult PcNotFound() =>
         Results.Json(new ErrorResponse("PC not found."), statusCode: StatusCodes.Status404NotFound);
 

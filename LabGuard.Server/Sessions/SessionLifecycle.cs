@@ -57,6 +57,22 @@ public static class SessionLifecycle
                 .SetProperty(s => s.EndedAtUtc, s => s.ExpiresAtUtc)
                 .SetProperty(s => s.EndReason, TimeExpired), cancellationToken);
 
+    // Closes every PC's expired session, recording when each one ran out.
+    public static Task<int> EndExpiredAsync(AppDbContext db, DateTimeOffset now, CancellationToken cancellationToken) =>
+        db.PcSessions
+            .Where(s => s.EndedAtUtc == null && s.ExpiresAtUtc != null && s.ExpiresAtUtc <= now)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(s => s.EndedAtUtc, s => s.ExpiresAtUtc)
+                .SetProperty(s => s.EndReason, TimeExpired), cancellationToken);
+
+    // Ends every active session on every PC in one statement.
+    public static Task<int> EndAllAsync(AppDbContext db, string reason, DateTimeOffset now, CancellationToken cancellationToken) =>
+        db.PcSessions
+            .Where(s => s.EndedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(s => s.EndedAtUtc, now)
+                .SetProperty(s => s.EndReason, reason), cancellationToken);
+
     public static bool HasExpired(PcSession session, DateTimeOffset now) =>
         session.ExpiresAtUtc is { } expiresAt && expiresAt <= now;
 
