@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
+using LabGuard.Server.Sessions;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -1015,8 +1016,109 @@ public class SessionEndpointTests
         Assert.False(session.GetProperty("isAdminUnlock").GetBoolean());
     }
 
+
+    // Creates an admin unlock on the PC through the admin route and returns the new session's id.
+    private static async Task<int> AdminUnlockAsync(TestApp app, HttpClient admin, TestPc pc)
+    {
+        var response = await admin.PostAsJsonAsync($"/api/pcs/{pc.Id}/unlock", new { });
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        return await app.WithDbAsync(db => db.PcSessions.AsNoTracking().Where(s => s.IsAdminUnlock && s.EndedAtUtc == null).Select(s => s.Id).SingleAsync());
+    }
+
+    [Fact]
+    public async Task Heartbeat_AdminUnlock_IsAdoptedByAnOnlinePcThatDoesNotKnowIt()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var unlockId = await AdminUnlockAsync(app, admin, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(2));
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc));
+
+        var session = body.GetProperty("session");
+        Assert.Equal(unlockId, session.GetProperty("sessionId").GetInt32());
+        Assert.True(session.GetProperty("isAdminUnlock").GetBoolean());
+        Assert.Null((await StoredSessionAsync(app, unlockId)).EndedAtUtc);
+    }
+
+    [Theory]
+    [InlineData(15)]
+    [InlineData(60)]
+    public async Task Heartbeat_AdminUnlock_IsEndedAsConnectionLost_WhenAnOfflinePcDoesNotKnowIt(int secondsOffline)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var unlockId = await AdminUnlockAsync(app, admin, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(secondsOffline));
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc));
+
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("session").ValueKind);
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("endedReason").ValueKind);
+        var stored = await StoredSessionAsync(app, unlockId);
+        Assert.Equal(SessionLifecycle.ConnectionLost, stored.EndReason);
+        Assert.Equal(app.Time.GetUtcNow().ToUnixTimeMilliseconds(), stored.EndedAtUtc!.Value.ToUnixTimeMilliseconds());
+    }
+
+    [Fact]
+    public async Task Heartbeat_AdminUnlock_IsEndedAsConnectionLost_WhenTheLastSeenTimeIsInTheFuture()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var unlockId = await AdminUnlockAsync(app, admin, pc);
+        // A last-seen time in the future (as after the server clock moved back) counts as offline.
+        var future = app.Time.GetUtcNow().AddSeconds(5);
+        await app.WithDbAsync(db => db.Pcs.Where(p => p.Id == pc.Id).ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LastSeenUtc, future)));
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc));
+
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("session").ValueKind);
+        Assert.Equal(SessionLifecycle.ConnectionLost, (await StoredSessionAsync(app, unlockId)).EndReason);
+    }
+
+    [Fact]
+    public async Task Heartbeat_AdminUnlock_IsKeptWhenAnOfflinePcReportsItsId_AfterANetworkBlip()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var unlockId = await AdminUnlockAsync(app, admin, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(2));
+        await HeartbeatAsync(client, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(20));
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc, unlockId));
+
+        Assert.Equal(unlockId, body.GetProperty("session").GetProperty("sessionId").GetInt32());
+        Assert.Null((await StoredSessionAsync(app, unlockId)).EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task Heartbeat_OfflinePcWithALoginSession_KeepsIt()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(60));
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc));
+
+        Assert.Equal(sessionId, body.GetProperty("session").GetProperty("sessionId").GetInt32());
+        Assert.Null((await StoredSessionAsync(app, sessionId)).EndedAtUtc);
+    }
+
     [Fact]
     public async Task Heartbeat_AtExpiry_EndsTheSessionWithTimeExpired()
+
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();

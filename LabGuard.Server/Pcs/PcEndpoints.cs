@@ -49,7 +49,7 @@ public static partial class PcEndpoints
     }
 
     // A last-seen time in the future (the server clock moved back) counts as offline.
-    private static bool IsOnline(DateTimeOffset lastSeen, DateTimeOffset now) =>
+    internal static bool IsOnline(DateTimeOffset lastSeen, DateTimeOffset now) =>
         lastSeen <= now && now - lastSeen < OnlineWindow;
 
     private static async Task<IResult> ListAsync(AppDbContext db, TimeProvider clock, CancellationToken cancellationToken)

@@ -73,6 +73,14 @@ public static class SessionLifecycle
                 .SetProperty(s => s.EndedAtUtc, now)
                 .SetProperty(s => s.EndReason, reason), cancellationToken);
 
+    // Ends one session by its id, so a racing login on the same PC can't be ended by mistake.
+    public static Task<int> EndSessionAsync(AppDbContext db, int sessionId, string reason, DateTimeOffset now, CancellationToken cancellationToken) =>
+        db.PcSessions
+            .Where(s => s.Id == sessionId && s.EndedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(s => s.EndedAtUtc, now)
+                .SetProperty(s => s.EndReason, reason), cancellationToken);
+
     public static bool HasExpired(PcSession session, DateTimeOffset now) =>
         session.ExpiresAtUtc is { } expiresAt && expiresAt <= now;
 

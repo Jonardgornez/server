@@ -90,6 +90,30 @@ public class SessionLifecycleTests
         Assert.Equal("logout", rows[2].EndReason);
     }
 
+    [Fact]
+    public async Task EndSessionAsync_EndsOnlyTheNamedSession()
+    {
+        using var app = new TestApp();
+        var now = app.Time.GetUtcNow();
+        var (first, second) = await app.WithDbAsync(async db =>
+        {
+            var a = SessionOn(1, now.AddMinutes(-5));
+            var b = SessionOn(2, now.AddMinutes(-5));
+            db.PcSessions.AddRange(a, b);
+            await db.SaveChangesAsync();
+            return (a.Id, b.Id);
+        });
+
+        var affected = await app.WithDbAsync(db => SessionLifecycle.EndSessionAsync(db, first, SessionLifecycle.ConnectionLost, now, CancellationToken.None));
+
+        Assert.Equal(1, affected);
+        var rows = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().OrderBy(s => s.Id).ToListAsync());
+        Assert.Equal(SessionLifecycle.ConnectionLost, rows[0].EndReason);
+        Assert.Equal(now.ToUnixTimeMilliseconds(), rows[0].EndedAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.Equal(second, rows[1].Id);
+        Assert.Null(rows[1].EndedAtUtc);
+    }
+
     private static PcSession SessionOn(int pcId, DateTimeOffset startedAt, DateTimeOffset? expiresAt = null, DateTimeOffset? endedAt = null) => new()
     {
         PcId = pcId,
