@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="LabGuard.Server.Tests/LabGuard.Server.Tests.csproj" />
+  <Project Path="LabGuard.Server/LabGuard.Server.csproj" />
+</Solution>

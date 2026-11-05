@@ -1,0 +1,9 @@
+bin/
+obj/
+*.db
+*.db-shm
+*.db-wal
+pc-channel.dat
+*.pfx
+.vs/
+*.user
