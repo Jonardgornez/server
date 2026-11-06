@@ -116,26 +116,31 @@ public static partial class PcEndpoints
         }
     }
 
-    private static async Task<IResult> LockAllAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    // Most PCs one bulk request may name. The lab has 60, so this only keeps a single request bounded.
+    private const int MaxIdsPerRequest = 1000;
+
+    private static async Task<IResult> LockManyAsync(HttpContext http, AppDbContext db, TimeProvider clock)
     {
-        if (await AuthEndpoints.ReadBodyAsync<PcAdminActionRequest>(http.Request) is null)
+        var pcIds = await ReadPcIdsAsync(http.Request);
+        if (pcIds is null)
         {
             return AuthEndpoints.InvalidRequest();
         }
 
-        // Expired sessions are recorded as time-expired first, so only the sessions still running are counted as admin locks.
+        // The same rules as the single lock, for every listed PC, in one transaction.
         var ct = http.RequestAborted;
         var now = clock.GetUtcNow();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SessionLifecycle.EndExpiredAsync(db, now, ct);
-        var locked = await SessionLifecycle.EndAllAsync(db, SessionLifecycle.AdminLock, now, ct);
+        var locked = await LockPcsAsync(db, pcIds, now, ct);
         await transaction.CommitAsync(ct);
         return Results.Ok(new AffectedPcsResponse(locked));
     }
 
-    private static async Task<IResult> UnlockAllAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    private static async Task<IResult> UnlockManyAsync(HttpContext http, AppDbContext db, TimeProvider clock)
     {
-        if (await AuthEndpoints.ReadBodyAsync<PcAdminActionRequest>(http.Request) is null)
+        var pcIds = await ReadPcIdsAsync(http.Request);
+        if (pcIds is null)
         {
             return AuthEndpoints.InvalidRequest();
         }
@@ -144,19 +149,19 @@ public static partial class PcEndpoints
         var now = clock.GetUtcNow();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SessionLifecycle.EndExpiredAsync(db, now, ct);
-        var pcs = await db.Pcs.AsNoTracking().ToListAsync(ct);
-        var busyPcIds = (await db.PcSessions
+        var pcs = await db.Pcs.AsNoTracking().Where(p => pcIds.Contains(p.Id)).ToListAsync(ct);
+        var activeSessions = (await db.PcSessions
             .AsNoTracking()
-            .Where(s => s.EndedAtUtc == null)
-            .Select(s => s.PcId)
+            .Where(s => s.EndedAtUtc == null && pcIds.Contains(s.PcId))
             .ToListAsync(ct))
-            .ToHashSet();
+            .ToDictionary(s => s.PcId);
 
-        // A PC that gets a session in the meantime is skipped by the unique index, so the others still open.
+        // Offline PCs are skipped. A PC that loses a race for a session is skipped too, and the others still open.
         var unlocked = 0;
         foreach (var pc in pcs)
         {
-            if (IsOnline(pc.LastSeenUtc, now) && !busyPcIds.Contains(pc.Id) && await TryOpenAdminUnlockAsync(db, pc, now, ct))
+            if (IsOnline(pc.LastSeenUtc, now)
+                && await UnlockPcAsync(db, pc, activeSessions.GetValueOrDefault(pc.Id), now, ct))
             {
                 unlocked++;
             }
@@ -164,6 +169,13 @@ public static partial class PcEndpoints
 
         await transaction.CommitAsync(ct);
         return Results.Ok(new AffectedPcsResponse(unlocked));
+    }
+
+    // Null for a missing or malformed body, an empty list or one over the limit. Duplicate ids count once.
+    private static async Task<int[]?> ReadPcIdsAsync(HttpRequest request)
+    {
+        var ids = (await AuthEndpoints.ReadBodyAsync<PcIdsRequest>(request))?.Ids;
+        return ids is { Length: > 0 and <= MaxIdsPerRequest } ? ids.Distinct().ToArray() : null;
     }
 
     private static IResult PcNotFound() =>

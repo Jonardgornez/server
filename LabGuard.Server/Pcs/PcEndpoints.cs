@@ -22,8 +22,10 @@ public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, Defau
 
 public record SetupCodeResponse(string Code);
 public record RegenerateSetupCodeRequest;
-// Sent as {} by the admin lock and unlock routes; the body is required so a cross-origin form can't send it.
+// Sent as {} by the single lock and unlock routes; the body is required so a cross-origin form can't send it.
 public record PcAdminActionRequest;
+// Sent by the bulk lock and unlock routes. A missing, empty or over-long list is refused.
+public record PcIdsRequest(int[]? Ids);
 public record AffectedPcsResponse(int Affected);
 
 public static partial class PcEndpoints
@@ -44,8 +46,8 @@ public static partial class PcEndpoints
         group.MapPost("/setup-code/regenerate", RegenerateSetupCodeAsync);
         group.MapPost("/{id:int}/lock", LockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/unlock", UnlockAsync).AddEndpointFilter<PcStorageErrorFilter>();
-        group.MapPost("/lock-all", LockAllAsync).AddEndpointFilter<PcStorageErrorFilter>();
-        group.MapPost("/unlock-all", UnlockAllAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/lock", LockManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/unlock", UnlockManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 

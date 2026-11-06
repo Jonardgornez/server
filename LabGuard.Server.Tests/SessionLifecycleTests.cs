@@ -66,31 +66,6 @@ public class SessionLifecycleTests
     }
 
     [Fact]
-    public async Task EndAllAsync_EndsEveryActiveSession_AndCountsThem()
-    {
-        using var app = new TestApp();
-        var now = app.Time.GetUtcNow();
-        await app.WithDbAsync(async db =>
-        {
-            db.PcSessions.AddRange(
-                SessionOn(1, now.AddMinutes(-5)),
-                SessionOn(2, now.AddMinutes(-5), expiresAt: now.AddMinutes(1)),
-                SessionOn(3, now.AddMinutes(-5), endedAt: now.AddMinutes(-2)));
-            await db.SaveChangesAsync();
-            return 0;
-        });
-
-        var affected = await app.WithDbAsync(db => SessionLifecycle.EndAllAsync(db, SessionLifecycle.AdminLock, now, CancellationToken.None));
-
-        Assert.Equal(2, affected);
-        var rows = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().OrderBy(s => s.PcId).ToListAsync());
-        Assert.Equal(SessionLifecycle.AdminLock, rows[0].EndReason);
-        Assert.Equal(now.ToUnixTimeMilliseconds(), rows[0].EndedAtUtc!.Value.ToUnixTimeMilliseconds());
-        Assert.Equal(SessionLifecycle.AdminLock, rows[1].EndReason);
-        Assert.Equal("logout", rows[2].EndReason);
-    }
-
-    [Fact]
     public async Task EndSessionAsync_EndsOnlyTheNamedSession()
     {
         using var app = new TestApp();

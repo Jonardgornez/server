@@ -100,8 +100,8 @@ public class PcLockEndpointTests
     [Theory]
     [InlineData("/api/pcs/1/lock")]
     [InlineData("/api/pcs/1/unlock")]
-    [InlineData("/api/pcs/lock-all")]
-    [InlineData("/api/pcs/unlock-all")]
+    [InlineData("/api/pcs/lock")]
+    [InlineData("/api/pcs/unlock")]
     public async Task AdminRoutes_WithoutCookie_Return401(string path)
     {
         using var app = new TestApp();
@@ -115,8 +115,8 @@ public class PcLockEndpointTests
     [Theory]
     [InlineData("/api/pcs/1/lock")]
     [InlineData("/api/pcs/1/unlock")]
-    [InlineData("/api/pcs/lock-all")]
-    [InlineData("/api/pcs/unlock-all")]
+    [InlineData("/api/pcs/lock")]
+    [InlineData("/api/pcs/unlock")]
     public async Task AdminRoutes_FromThePcPort_Return404(string path)
     {
         using var app = new TestApp();
@@ -139,16 +139,16 @@ public class PcLockEndpointTests
     [InlineData("/api/pcs/{id}/unlock", "application/json", "")]
     [InlineData("/api/pcs/{id}/unlock", "application/json", "null")]
     [InlineData("/api/pcs/{id}/unlock", "application/json", "{not json")]
-    [InlineData("/api/pcs/lock-all", "text/plain", "{}")]
-    [InlineData("/api/pcs/lock-all", "application/x-www-form-urlencoded", "")]
-    [InlineData("/api/pcs/lock-all", "application/json", "")]
-    [InlineData("/api/pcs/lock-all", "application/json", "null")]
-    [InlineData("/api/pcs/lock-all", "application/json", "{not json")]
-    [InlineData("/api/pcs/unlock-all", "text/plain", "{}")]
-    [InlineData("/api/pcs/unlock-all", "application/x-www-form-urlencoded", "")]
-    [InlineData("/api/pcs/unlock-all", "application/json", "")]
-    [InlineData("/api/pcs/unlock-all", "application/json", "null")]
-    [InlineData("/api/pcs/unlock-all", "application/json", "{not json")]
+    [InlineData("/api/pcs/lock", "text/plain", "{}")]
+    [InlineData("/api/pcs/lock", "application/x-www-form-urlencoded", "")]
+    [InlineData("/api/pcs/lock", "application/json", "")]
+    [InlineData("/api/pcs/lock", "application/json", "null")]
+    [InlineData("/api/pcs/lock", "application/json", "{not json")]
+    [InlineData("/api/pcs/unlock", "text/plain", "{}")]
+    [InlineData("/api/pcs/unlock", "application/x-www-form-urlencoded", "")]
+    [InlineData("/api/pcs/unlock", "application/json", "")]
+    [InlineData("/api/pcs/unlock", "application/json", "null")]
+    [InlineData("/api/pcs/unlock", "application/json", "{not json")]
     public async Task AdminRoutes_WithoutAJsonBody_Return400AndChangeNothing(string path, string contentType, string body)
     {
         using var app = new TestApp();
@@ -356,57 +356,185 @@ public class PcLockEndpointTests
         Assert.Null((await StoredPcAsync(app, pcB.Id)).LockedAtUtc);
     }
 
-    // Lock all and unlock all
+    // Bulk lock and unlock
 
-    [Fact]
-    public async Task LockAll_EndsEverySession_AndCountsOnlyTheOnesStillRunning()
+    private static async Task<int> AffectedAsync(HttpResponseMessage response)
+    {
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await JsonOf(response)).GetProperty("affected").GetInt32();
+    }
+
+    private static Task<HttpResponseMessage> LockManyAsync(HttpClient admin, params int[] ids) =>
+        admin.PostAsJsonAsync("/api/pcs/lock", new { ids });
+
+    private static Task<HttpResponseMessage> UnlockManyAsync(HttpClient admin, params int[] ids) =>
+        admin.PostAsJsonAsync("/api/pcs/unlock", new { ids });
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"ids\":null}")]
+    [InlineData("{\"ids\":[]}")]
+    [InlineData("{\"ids\":[\"one\"]}")]
+    [InlineData("{\"ids\":[1,null]}")]
+    public async Task BulkRoutes_WithAMissingOrEmptyList_Return400AndChangeNothing(string body)
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
-        using var clientOnline = app.CreatePcClient("192.168.1.50");
+        var pc = await AddPcAsync(app);
+
+        foreach (var path in new[] { "/api/pcs/lock", "/api/pcs/unlock" })
+        {
+            using var content = new StringContent(body, Encoding.UTF8, "application/json");
+            var response = await admin.PostAsync(path, content);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal(InvalidRequestMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        }
+
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+        Assert.Equal(0, await app.WithDbAsync(db => db.PcSessions.CountAsync()));
+    }
+
+    [Fact]
+    public async Task BulkRoutes_WithMoreThan1000Ids_Return400AndChangeNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        var tooMany = Enumerable.Range(1, 1001).ToArray();
+
+        foreach (var path in new[] { "/api/pcs/lock", "/api/pcs/unlock" })
+        {
+            var response = await admin.PostAsJsonAsync(path, new { ids = tooMany });
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal(InvalidRequestMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        }
+
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task BulkRoutes_With1000Ids_AreAccepted()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var ids = Enumerable.Range(1, 1000).ToArray();
+
+        Assert.Equal(0, await AffectedAsync(await LockManyAsync(admin, ids)));
+        Assert.Equal(0, await AffectedAsync(await UnlockManyAsync(admin, ids)));
+    }
+
+    [Fact]
+    public async Task LockMany_PausesRunningSessions_LocksOfflinePcs_AndCountsOnlyNewLocks()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var clientRunning = app.CreatePcClient("192.168.1.50");
         using var clientOffline = app.CreatePcClient("192.168.1.51");
         using var clientExpired = app.CreatePcClient("192.168.1.52");
-        var online = await AddPcAsync(app, "PC-01");
-        var offline = await AddPcAsync(app, "PC-02");
+        var running = await AddPcAsync(app, "PC-01");
+        var offline = await AddPcAsync(app, "PC-02", seenAgo: TimeSpan.FromMinutes(1));
         var expired = await AddPcAsync(app, "PC-03");
-        var unlocked = await AddPcAsync(app, "PC-04");
+        var idle = await AddPcAsync(app, "PC-04");
+        var alreadyLocked = await AddPcAsync(app, "PC-05");
         await AddAccountAsync(app);
         await AddAccountAsync(app, minutes: 1, username: "quick");
-        await LoggedInSessionIdAsync(clientOnline, online);
-        await LoggedInSessionIdAsync(clientOffline, offline);
+        var runningSessionId = await LoggedInSessionIdAsync(clientRunning, running);
+        var offlineSessionId = await LoggedInSessionIdAsync(clientOffline, offline);
         await LoggedInSessionIdAsync(clientExpired, expired, "quick");
-        Assert.Equal(HttpStatusCode.NoContent, (await UnlockAsync(admin, unlocked.Id)).StatusCode);
-        app.Time.Advance(TimeSpan.FromSeconds(60));
-        await HeartbeatAsync(clientOnline, online);
+        await LockAsync(admin, alreadyLocked.Id);
+        app.Time.Advance(TimeSpan.FromMinutes(2));
 
-        var response = await admin.PostAsJsonAsync("/api/pcs/lock-all", new { });
+        var affected = await AffectedAsync(await LockManyAsync(admin, running.Id, offline.Id, expired.Id, idle.Id, alreadyLocked.Id, running.Id, 999));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(3, (await JsonOf(response)).GetProperty("affected").GetInt32());
-        var sessions = (await app.WithDbAsync(db => db.PcSessions.AsNoTracking().ToListAsync())).ToDictionary(s => s.PcId);
-        Assert.Equal(SessionLifecycle.AdminLock, sessions[online.Id].EndReason);
-        Assert.Equal(SessionLifecycle.AdminLock, sessions[offline.Id].EndReason);
-        Assert.Equal(SessionLifecycle.TimeExpired, sessions[expired.Id].EndReason);
-        Assert.Equal(sessions[expired.Id].ExpiresAtUtc, sessions[expired.Id].EndedAtUtc);
-        Assert.Equal(SessionLifecycle.AdminLock, sessions[unlocked.Id].EndReason);
-        Assert.Equal(0, await app.WithDbAsync(db => db.PcSessions.CountAsync(s => s.EndedAtUtc == null)));
+        Assert.Equal(4, affected);
+        Assert.Null((await StoredSessionAsync(app, runningSessionId)).EndedAtUtc);
+        Assert.NotNull((await StoredSessionAsync(app, runningSessionId)).PausedAtUtc);
+        Assert.NotNull((await StoredSessionAsync(app, offlineSessionId)).PausedAtUtc);
+        var expiredSession = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.PcId == expired.Id));
+        Assert.Equal(SessionLifecycle.TimeExpired, expiredSession.EndReason);
+        var pcs = await app.WithDbAsync(db => db.Pcs.AsNoTracking().ToListAsync());
+        Assert.All(pcs, pc => Assert.NotNull(pc.LockedAtUtc));
     }
 
     [Fact]
-    public async Task LockAll_WithNothingRunning_ReturnsZero()
+    public async Task LockMany_SecondCall_CountsZero()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
-        await AddPcAsync(app);
+        var pc = await AddPcAsync(app);
 
-        var response = await admin.PostAsJsonAsync("/api/pcs/lock-all", new { });
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(0, (await JsonOf(response)).GetProperty("affected").GetInt32());
+        Assert.Equal(1, await AffectedAsync(await LockManyAsync(admin, pc.Id)));
+        Assert.Equal(0, await AffectedAsync(await LockManyAsync(admin, pc.Id)));
     }
 
     [Fact]
-    public async Task UnlockAll_OpensOnlyOnlinePcsWithoutARunningSession()
+    public async Task LockMany_AtSixtyPcs_LocksEveryPc()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pcs = new List<TestPc>();
+        for (var i = 0; i < 60; i++)
+        {
+            pcs.Add(await AddPcAsync(app, $"PC-{i:00}", seenAgo: i % 10 == 0 ? TimeSpan.FromSeconds(60) : TimeSpan.Zero));
+        }
+
+        var affected = await AffectedAsync(await LockManyAsync(admin, pcs.Select(p => p.Id).ToArray()));
+
+        Assert.Equal(60, affected);
+        Assert.Equal(60, await app.WithDbAsync(db => db.Pcs.CountAsync(p => p.LockedAtUtc != null)));
+    }
+
+    [Fact]
+    public async Task UnlockMany_DuplicatesCountOnce_AndUnknownIdsAreIgnored()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        await LockAsync(admin, pc.Id);
+
+        var affected = await AffectedAsync(await UnlockManyAsync(admin, pc.Id, pc.Id, 999, 0, -1));
+
+        Assert.Equal(1, affected);
+        Assert.Equal(1, await app.WithDbAsync(db => db.PcSessions.CountAsync(s => s.IsAdminUnlock)));
+    }
+
+    [Fact]
+    public async Task UnlockMany_WithMixedStates_ReleasesOpensAndSkipsPerPc()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var clientBusy = app.CreatePcClient("192.168.1.51");
+        using var clientPaused = app.CreatePcClient("192.168.1.52");
+        var lockedIdle = await AddPcAsync(app, "PC-01");
+        var idle = await AddPcAsync(app, "PC-02");
+        var lockedOffline = await AddPcAsync(app, "PC-03", seenAgo: TimeSpan.FromMinutes(1));
+        var busy = await AddPcAsync(app, "PC-04");
+        var lockedPaused = await AddPcAsync(app, "PC-05");
+        await AddAccountAsync(app);
+        await LoggedInSessionIdAsync(clientBusy, busy);
+        var pausedSessionId = await LoggedInSessionIdAsync(clientPaused, lockedPaused);
+        await LockAsync(admin, lockedIdle.Id);
+        await LockAsync(admin, lockedOffline.Id);
+        await LockAsync(admin, lockedPaused.Id);
+
+        var affected = await AffectedAsync(await UnlockManyAsync(admin, lockedIdle.Id, idle.Id, lockedOffline.Id, busy.Id, lockedPaused.Id, 999));
+
+        Assert.Equal(3, affected);
+        var pcs = (await app.WithDbAsync(db => db.Pcs.AsNoTracking().ToListAsync())).ToDictionary(p => p.Id);
+        Assert.Null(pcs[lockedIdle.Id].LockedAtUtc);
+        Assert.Null(pcs[lockedPaused.Id].LockedAtUtc);
+        Assert.NotNull(pcs[lockedOffline.Id].LockedAtUtc);
+        var resumed = await StoredSessionAsync(app, pausedSessionId);
+        Assert.Null(resumed.PausedAtUtc);
+        Assert.Null(resumed.EndedAtUtc);
+        Assert.Equal(2, await app.WithDbAsync(db => db.PcSessions.CountAsync(s => s.IsAdminUnlock)));
+        var busySession = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.PcId == busy.Id));
+        Assert.False(busySession.IsAdminUnlock);
+        Assert.Null(busySession.EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task UnlockMany_OpensOnlyOnlinePcsWithoutARunningSession()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -427,10 +555,9 @@ public class PcLockEndpointTests
         await HeartbeatAsync(clientExpired, expired);
         app.Time.Advance(TimeSpan.FromSeconds(10));
 
-        var response = await admin.PostAsJsonAsync("/api/pcs/unlock-all", new { });
+        var affected = await AffectedAsync(await UnlockManyAsync(admin, free.Id, busy.Id, offline.Id, expired.Id));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(2, (await JsonOf(response)).GetProperty("affected").GetInt32());
+        Assert.Equal(2, affected);
         var unlockedPcIds = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().Where(s => s.IsAdminUnlock).Select(s => s.PcId).ToListAsync());
         Assert.Equal(new[] { free.Id, expired.Id }.Order(), unlockedPcIds.Order());
         var expiredLogin = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.PcId == expired.Id && !s.IsAdminUnlock));
@@ -441,7 +568,7 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task UnlockAll_AtSixtyPcs_OpensEveryFreeOnlinePc()
+    public async Task UnlockMany_AtSixtyPcs_OpensEveryFreeOnlinePc()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -464,10 +591,9 @@ public class PcLockEndpointTests
             return 0;
         });
 
-        var response = await admin.PostAsJsonAsync("/api/pcs/unlock-all", new { });
+        var affected = await AffectedAsync(await UnlockManyAsync(admin, pcs.Select(p => p.Id).ToArray()));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(42, (await JsonOf(response)).GetProperty("affected").GetInt32());
+        Assert.Equal(42, affected);
         var unlockedPcIds = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().Where(s => s.IsAdminUnlock).Select(s => s.PcId).ToListAsync());
         Assert.Equal(42, unlockedPcIds.Distinct().Count());
         var skipped = pcs.Where((_, i) => i % 10 == 0 || i % 5 == 2).Select(p => p.Id);
@@ -475,7 +601,7 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task UnlockAll_SkipsAPcThatLosesARace_AndOpensTheRest()
+    public async Task UnlockMany_SkipsAPcThatLosesARace_AndOpensTheRest()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -492,10 +618,9 @@ public class PcLockEndpointTests
             END
             """));
 
-        var response = await admin.PostAsJsonAsync("/api/pcs/unlock-all", new { });
+        var affected = await AffectedAsync(await UnlockManyAsync(admin, first.Id, raced.Id, last.Id));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(2, (await JsonOf(response)).GetProperty("affected").GetInt32());
+        Assert.Equal(2, affected);
         var unlockedPcIds = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().Where(s => s.IsAdminUnlock).Select(s => s.PcId).ToListAsync());
         Assert.Equal(new[] { first.Id, last.Id }.Order(), unlockedPcIds.Order());
         Assert.Equal(0, await app.WithDbAsync(db => db.PcSessions.CountAsync(s => s.PcId == raced.Id && s.EndedAtUtc == null)));
