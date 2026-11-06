@@ -147,6 +147,12 @@ public static partial class ClientEndpoints
             return new AttemptReservation(NotRegistered());
         }
 
+        // Refused before any counting or hashing, so a locked PC neither uses up an attempt nor reveals the credentials.
+        if (pc.LockedAtUtc is not null)
+        {
+            return new AttemptReservation(LockedByAdministrator());
+        }
+
         var now = clock.GetUtcNow();
         if (LockedResponse(pc.LoginLockedUntilUtc, now, http) is { } locked)
         {
@@ -270,6 +276,14 @@ public static partial class ClientEndpoints
                 if (!await GiveBackAttemptAsync(db, reservation, ct))
                 {
                     return NotRegistered();
+                }
+
+                // An admin lock that landed after the password check must not get a session that runs unpaused.
+                // Committed, so the attempt stays given back.
+                if (await db.Pcs.AnyAsync(p => p.Id == pc.Id && p.LockedAtUtc != null, ct))
+                {
+                    await transaction.CommitAsync(ct);
+                    return LockedByAdministrator();
                 }
 
                 var accountUpdated = await db.UserAccounts
@@ -423,6 +437,9 @@ public static partial class ClientEndpoints
             password);
         return account is not null && result != PasswordVerificationResult.Failed;
     }
+
+    private static IResult LockedByAdministrator() =>
+        Results.Json(new ErrorResponse("This PC is locked by the administrator."), statusCode: StatusCodes.Status403Forbidden);
 
     private static IResult? LockedResponse(DateTimeOffset? lockedUntilUtc, DateTimeOffset now, HttpContext http)
     {

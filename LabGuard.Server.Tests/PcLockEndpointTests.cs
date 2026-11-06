@@ -8,6 +8,7 @@ using LabGuard.Server.Sessions;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace LabGuard.Server.Tests;
 
@@ -15,6 +16,7 @@ public class PcLockEndpointTests
 {
     private const string StudentPassword = "student pass 1";
     private const string InvalidRequestMessage = "Invalid request.";
+    private const string LockedMessage = "This PC is locked by the administrator.";
 
     private sealed record TestPc(int Id, string Token);
 
@@ -552,5 +554,79 @@ public class PcLockEndpointTests
 
         Assert.Equal(JsonValueKind.Null, body.GetProperty("session").ValueKind);
         Assert.Equal("admin-lock", body.GetProperty("endedReason").GetString());
+    }
+
+    // Login while locked
+
+    [Theory]
+    [InlineData(StudentPassword)]
+    [InlineData("wrong guess")]
+    public async Task Login_WhileLocked_IsRefusedWithoutCountingAnAttempt(string password)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        await LockDirectlyAsync(app, pc.Id);
+
+        var response = await PostAsync(client, "/api/client/login", pc.Token, JsonContent.Create(new { username = "student", password }));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(LockedMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        var stored = await StoredPcAsync(app, pc.Id);
+        Assert.Equal(0, stored.FailedLoginCount);
+        Assert.Null(stored.LoginLockedUntilUtc);
+        Assert.Equal(0, await app.WithDbAsync(db => db.PcSessions.CountAsync()));
+    }
+
+    [Fact]
+    public async Task Login_LockLandingDuringThePasswordCheck_IsRefusedAndGivesTheAttemptBack()
+    {
+        var hasher = new HookedPasswordHasher();
+        using var app = new TestApp(configureServices: services => UseHasher(services, hasher));
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        hasher.BeforeVerify = () => LockDirectlyAsync(app, pc.Id).GetAwaiter().GetResult();
+
+        var response = await LoginAsync(client, pc);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(LockedMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Equal(0, (await StoredPcAsync(app, pc.Id)).FailedLoginCount);
+        Assert.Equal(0, await app.WithDbAsync(db => db.PcSessions.CountAsync()));
+    }
+
+    private static async Task LockDirectlyAsync(TestApp app, int pcId)
+    {
+        var now = app.Time.GetUtcNow();
+        await app.WithDbAsync(db => db.Pcs
+            .Where(p => p.Id == pcId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LockedAtUtc, now)));
+    }
+
+    private static Task<Pc> StoredPcAsync(TestApp app, int pcId) =>
+        app.WithDbAsync(db => db.Pcs.AsNoTracking().SingleAsync(p => p.Id == pcId));
+
+    private static void UseHasher(IServiceCollection services, IPasswordHasher<UserAccount> hasher)
+    {
+        services.RemoveAll<IPasswordHasher<UserAccount>>();
+        services.AddSingleton(hasher);
+    }
+
+    // Runs a hook before each password check, so a test can change the PC while a login is verifying.
+    private sealed class HookedPasswordHasher : IPasswordHasher<UserAccount>
+    {
+        private readonly PasswordHasher<UserAccount> _inner = new();
+
+        public Action? BeforeVerify { get; set; }
+
+        public string HashPassword(UserAccount user, string password) => _inner.HashPassword(user, password);
+
+        public PasswordVerificationResult VerifyHashedPassword(UserAccount user, string hashedPassword, string providedPassword)
+        {
+            BeforeVerify?.Invoke();
+            return _inner.VerifyHashedPassword(user, hashedPassword, providedPassword);
+        }
     }
 }
