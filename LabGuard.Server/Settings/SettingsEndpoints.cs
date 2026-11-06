@@ -7,13 +7,23 @@ namespace LabGuard.Server.Settings;
 
 public record ApprovalSettings(string Mode, int Minutes);
 public record NoticeSettings(bool IsEnabled, string Text);
-public record SettingsResponse(ApprovalSettings DefaultApproval, NoticeSettings Notice, int IdleTimeoutMinutes, string DefaultViewMode);
+public record SettingsResponse(
+    ApprovalSettings DefaultApproval,
+    NoticeSettings Notice,
+    int IdleTimeoutMinutes,
+    string DefaultViewMode,
+    int PowerCountdownSeconds);
 
 // Every member is nullable, so a missing field gets a clear 400 instead of a binding failure.
 // Minutes is a double so a fractional value reaches validation instead of failing JSON parsing.
 public record ApprovalRequest(string? Mode, double? Minutes);
 public record NoticeRequest(bool? IsEnabled, string? Text);
-public record SettingsRequest(ApprovalRequest? DefaultApproval, NoticeRequest? Notice, double? IdleTimeoutMinutes, string? DefaultViewMode);
+public record SettingsRequest(
+    ApprovalRequest? DefaultApproval,
+    NoticeRequest? Notice,
+    double? IdleTimeoutMinutes,
+    string? DefaultViewMode,
+    double? PowerCountdownSeconds);
 
 public static class SettingsEndpoints
 {
@@ -92,6 +102,11 @@ public static class SettingsEndpoints
             return $"Idle timeout must be a whole number of minutes from {ServerSettings.MinIdleTimeoutMinutes} to {ServerSettings.MaxIdleTimeoutMinutes}.";
         }
 
+        if (WholeNumberOrNull(request.PowerCountdownSeconds, ServerSettings.MinPowerCountdownSeconds, ServerSettings.MaxPowerCountdownSeconds) is not { } powerCountdown)
+        {
+            return $"Power countdown must be a whole number of seconds from {ServerSettings.MinPowerCountdownSeconds} to {ServerSettings.MaxPowerCountdownSeconds}.";
+        }
+
         if (request.DefaultViewMode is not (ServerSettings.NotifiedViewMode or ServerSettings.AnonymousViewMode))
         {
             return $"Default view mode must be \"{ServerSettings.NotifiedViewMode}\" or \"{ServerSettings.AnonymousViewMode}\".";
@@ -102,6 +117,7 @@ public static class SettingsEndpoints
         settings.NoticeEnabled = isEnabled;
         settings.NoticeText = noticeText;
         settings.IdleTimeoutMinutes = idleMinutes;
+        settings.PowerCountdownSeconds = powerCountdown;
         settings.DefaultViewMode = request.DefaultViewMode;
         return null;
     }
@@ -116,5 +132,6 @@ public static class SettingsEndpoints
             new ApprovalSettings(settings.DefaultApprovalMode, settings.DefaultApprovalMinutes),
             new NoticeSettings(settings.NoticeEnabled, settings.NoticeText),
             settings.IdleTimeoutMinutes,
-            settings.DefaultViewMode);
+            settings.DefaultViewMode,
+            settings.PowerCountdownSeconds);
 }

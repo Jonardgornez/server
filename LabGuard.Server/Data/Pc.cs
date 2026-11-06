@@ -21,6 +21,12 @@ public class Pc
     // "shutdown" or "restart": the action of the stored request or its delivery. Null on rows written before restarts
     // existed, which count as shutdowns. Read only while a request or delivery is stored.
     public string? PowerAction { get; set; }
+    // The countdown the delivery was given, kept with it so a later change to the setting never alters a shutdown or restart
+    // under way. Null on rows delivered before it was stored, which use the default.
+    public int? PowerCountdownSeconds { get; set; }
+    // Set when an administrator cancels a delivered shutdown or restart while the PC is online. Cleared when the PC
+    // acknowledges the cancel, or with the delivery, so a cancel never outlives its delivery.
+    public DateTimeOffset? PowerCancelRequestedAtUtc { get; set; }
 
     // Lockout for user logins attempted from this PC.
     public int FailedLoginCount { get; set; }

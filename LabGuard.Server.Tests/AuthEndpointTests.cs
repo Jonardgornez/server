@@ -55,6 +55,7 @@ public class AuthEndpointTests
             notice = new { isEnabled = true, text = "Notice" },
             idleTimeoutMinutes = minutes,
             defaultViewMode = "notified",
+            powerCountdownSeconds = 30,
         });
 
     // Seeding

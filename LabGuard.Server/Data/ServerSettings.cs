@@ -9,6 +9,9 @@ public class ServerSettings
     public const int MaxNoticeLength = 300;
     public const int MinIdleTimeoutMinutes = 5;
     public const int MaxIdleTimeoutMinutes = 480;
+    public const int DefaultPowerCountdownSeconds = 30;
+    public const int MinPowerCountdownSeconds = 5;
+    public const int MaxPowerCountdownSeconds = 3600;
     public const string DefaultNoticeText = "This computer may be monitored by the administrator.";
     public const string NotifiedViewMode = "notified";
     public const string AnonymousViewMode = "anonymous";
@@ -20,4 +23,5 @@ public class ServerSettings
     public string NoticeText { get; set; } = DefaultNoticeText;
     public int IdleTimeoutMinutes { get; set; } = 30;
     public string DefaultViewMode { get; set; } = NotifiedViewMode;
+    public int PowerCountdownSeconds { get; set; } = DefaultPowerCountdownSeconds;
 }

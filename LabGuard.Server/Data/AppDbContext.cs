@@ -76,6 +76,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(p => p.ShutdownRequestedAtUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.ShutdownDeliveredAtUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.PowerAction).HasMaxLength(16);
+            entity.Property(p => p.PowerCancelRequestedAtUtc).HasConversion(unixMilliseconds);
         });
 
         modelBuilder.Entity<PcSession>(entity =>
@@ -108,6 +109,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(s => s.DefaultApprovalMode).HasMaxLength(16).IsRequired();
             entity.Property(s => s.NoticeText).HasMaxLength(ServerSettings.MaxNoticeLength).IsRequired();
             entity.Property(s => s.DefaultViewMode).HasMaxLength(16).IsRequired();
+            // The default is also the value an existing settings row gets when this column is added.
+            entity.Property(s => s.PowerCountdownSeconds).HasDefaultValue(ServerSettings.DefaultPowerCountdownSeconds);
         });
     }
 }

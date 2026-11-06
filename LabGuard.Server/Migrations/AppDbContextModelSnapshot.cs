@@ -116,6 +116,12 @@ namespace LabGuard.Server.Migrations
                         .HasMaxLength(16)
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("PowerCancelRequestedAtUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("PowerCountdownSeconds")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("RegisteredAtUtc")
                         .HasColumnType("INTEGER");
 
@@ -310,6 +316,11 @@ namespace LabGuard.Server.Migrations
                         .IsRequired()
                         .HasMaxLength(300)
                         .HasColumnType("TEXT");
+
+                    b.Property<int>("PowerCountdownSeconds")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(30);
 
                     b.HasKey("Id");
 

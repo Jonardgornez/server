@@ -35,13 +35,15 @@ public class SettingsEndpointTests
         bool? isEnabled = true,
         string? text = DefaultNotice,
         double? idleTimeoutMinutes = 30,
-        string? defaultViewMode = "notified") =>
+        string? defaultViewMode = "notified",
+        double? powerCountdownSeconds = 30) =>
         new
         {
             defaultApproval = new { mode, minutes },
             notice = new { isEnabled, text },
             idleTimeoutMinutes,
             defaultViewMode,
+            powerCountdownSeconds,
         };
 
     private static Task<HttpResponseMessage> GetSettingsAsync(HttpClient client) =>
@@ -93,6 +95,7 @@ public class SettingsEndpointTests
         Assert.Equal(DefaultNotice, body.GetProperty("notice").GetProperty("text").GetString());
         Assert.Equal(30, body.GetProperty("idleTimeoutMinutes").GetInt32());
         Assert.Equal("notified", body.GetProperty("defaultViewMode").GetString());
+        Assert.Equal(30, body.GetProperty("powerCountdownSeconds").GetInt32());
         Assert.Equal(1, await RowCountAsync(app));
     }
 
@@ -220,6 +223,40 @@ public class SettingsEndpointTests
         Assert.Equal(DefaultNotice, read.GetProperty("notice").GetProperty("text").GetString());
     }
 
+    [Theory]
+    [InlineData(5.0)]
+    [InlineData(3600.0)]
+    public async Task Put_AcceptsTheCountdownBoundaries_AndGetReturnsThem(double seconds)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+
+        var response = await PutSettingsAsync(admin, Payload(powerCountdownSeconds: seconds));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal((int)seconds, (await JsonOf(response)).GetProperty("powerCountdownSeconds").GetInt32());
+        Assert.Equal((int)seconds, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("powerCountdownSeconds").GetInt32());
+    }
+
+    [Theory]
+    [InlineData(4.0)]
+    [InlineData(3601.0)]
+    [InlineData(30.5)]
+    [InlineData(null)]
+    public async Task Put_WithAnInvalidPowerCountdown_Returns400WithTheLimits_AndChangesNothing(double? seconds)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+
+        var response = await PutSettingsAsync(admin, Payload(powerCountdownSeconds: seconds));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(
+            "Power countdown must be a whole number of seconds from 5 to 3600.",
+            (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Equal(30, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("powerCountdownSeconds").GetInt32());
+    }
+
     [Fact]
     public async Task Put_NoticeLongerThan300Characters_Returns400()
     {
@@ -248,6 +285,7 @@ public class SettingsEndpointTests
     [InlineData("{\"defaultApproval\":{\"mode\":\"time-limit\",\"minutes\":60}}")]
     [InlineData("{\"defaultApproval\":null,\"notice\":{\"isEnabled\":true,\"text\":\"x\"},\"idleTimeoutMinutes\":30,\"defaultViewMode\":\"notified\"}")]
     [InlineData("{\"defaultApproval\":{\"mode\":\"time-limit\",\"minutes\":60},\"notice\":{\"isEnabled\":true,\"text\":\"x\"},\"idleTimeoutMinutes\":\"thirty\",\"defaultViewMode\":\"notified\"}")]
+    [InlineData("{\"defaultApproval\":{\"mode\":\"time-limit\",\"minutes\":60},\"notice\":{\"isEnabled\":true,\"text\":\"x\"},\"idleTimeoutMinutes\":30,\"defaultViewMode\":\"notified\"}")]
     public async Task Put_WithAMissingOrUnreadableSection_Returns400WithAnError(string body)
     {
         using var app = new TestApp();
