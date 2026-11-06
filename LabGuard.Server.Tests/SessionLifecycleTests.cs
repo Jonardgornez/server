@@ -182,6 +182,81 @@ public class SessionLifecycleTests
         Assert.Null((await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync())).EndedAtUtc);
     }
 
+    [Fact]
+    public void ExpiryAfterResume_MovesTheExpiryByTheTimeSpentPaused()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+        var session = new PcSession { ExpiresAtUtc = now.AddMinutes(30), PausedAtUtc = now.AddMinutes(-20) };
+
+        Assert.Equal(now.AddMinutes(50), SessionLifecycle.ExpiryAfterResume(session, now));
+    }
+
+    [Fact]
+    public void ExpiryAfterResume_NeverMovesEarlier_WhenTheClockMovedBack()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+        var session = new PcSession { ExpiresAtUtc = now.AddMinutes(30), PausedAtUtc = now.AddMinutes(5) };
+
+        Assert.Equal(now.AddMinutes(30), SessionLifecycle.ExpiryAfterResume(session, now));
+    }
+
+    [Fact]
+    public void ExpiryAfterResume_KeepsOpenTime_AndAnUnpausedExpiry()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+
+        Assert.Null(SessionLifecycle.ExpiryAfterResume(new PcSession { PausedAtUtc = now.AddMinutes(-1) }, now));
+        Assert.Equal(now.AddMinutes(30), SessionLifecycle.ExpiryAfterResume(new PcSession { ExpiresAtUtc = now.AddMinutes(30) }, now));
+    }
+
+    [Fact]
+    public async Task PauseForPcsAsync_PausesOnlyRunningSessionsOfTheListedPcs_AndKeepsAnExistingPause()
+    {
+        using var app = new TestApp();
+        var now = app.Time.GetUtcNow();
+        var earlierPause = now.AddMinutes(-1);
+        await app.WithDbAsync(async db =>
+        {
+            db.PcSessions.AddRange(
+                SessionOn(1, now.AddMinutes(-5)),
+                SessionOn(2, now.AddMinutes(-5), pausedAt: earlierPause),
+                SessionOn(3, now.AddMinutes(-5)),
+                SessionOn(4, now.AddMinutes(-5), endedAt: now.AddMinutes(-2)));
+            await db.SaveChangesAsync();
+            return 0;
+        });
+
+        var affected = await app.WithDbAsync(db => SessionLifecycle.PauseForPcsAsync(db, [1, 2, 4], now, CancellationToken.None));
+
+        Assert.Equal(1, affected);
+        var rows = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().OrderBy(s => s.PcId).ToListAsync());
+        Assert.Equal(now.ToUnixTimeMilliseconds(), rows[0].PausedAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.Equal(earlierPause.ToUnixTimeMilliseconds(), rows[1].PausedAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.Null(rows[2].PausedAtUtc);
+        Assert.Null(rows[3].PausedAtUtc);
+    }
+
+    [Fact]
+    public async Task ResumeAsync_MovesTheExpiryForward_AndClearsThePause()
+    {
+        using var app = new TestApp();
+        var now = app.Time.GetUtcNow();
+        await app.WithDbAsync(async db =>
+        {
+            db.PcSessions.Add(SessionOn(1, now.AddMinutes(-10), expiresAt: now.AddMinutes(50), pausedAt: now.AddMinutes(-20)));
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        var session = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync());
+
+        var affected = await app.WithDbAsync(db => SessionLifecycle.ResumeAsync(db, session, now, CancellationToken.None));
+
+        Assert.Equal(1, affected);
+        var stored = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync());
+        Assert.Null(stored.PausedAtUtc);
+        Assert.Equal(now.AddMinutes(70).ToUnixTimeMilliseconds(), stored.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
+    }
+
     private static PcSession SessionOn(int pcId, DateTimeOffset startedAt, DateTimeOffset? expiresAt = null, DateTimeOffset? endedAt = null, DateTimeOffset? pausedAt = null) => new()
     {
         PcId = pcId,

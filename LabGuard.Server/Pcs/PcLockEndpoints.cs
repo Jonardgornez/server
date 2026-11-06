@@ -6,7 +6,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Pcs;
 
-// Admin lock and unlock of a PC's session. Every route requires a JSON body, so a cross-origin HTML form can't trigger it.
+// Admin lock and unlock of a PC. A lock freezes the PC until the admin unlocks it: a running session is paused, not ended.
+// Every route requires a JSON body, so a cross-origin HTML form can't trigger it.
 public static partial class PcEndpoints
 {
     private static async Task<IResult> LockAsync(int id, HttpContext http, AppDbContext db, TimeProvider clock)
@@ -16,17 +17,17 @@ public static partial class PcEndpoints
             return AuthEndpoints.InvalidRequest();
         }
 
+        // Closing expired sessions comes first: that write takes the database lock, as in UnlockAsync.
         var ct = http.RequestAborted;
+        var now = clock.GetUtcNow();
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SessionLifecycle.EndExpiredAsync(db, now, ct);
         if (!await db.Pcs.AnyAsync(p => p.Id == id, ct))
         {
             return PcNotFound();
         }
 
-        // A session that already ran out is recorded as time-expired; only the rest is ended as an admin lock.
-        var now = clock.GetUtcNow();
-        await using var transaction = await db.Database.BeginTransactionAsync(ct);
-        await SessionLifecycle.EndExpiredForPcAsync(db, id, now, ct);
-        await SessionLifecycle.EndForPcAsync(db, id, SessionLifecycle.AdminLock, now, ct);
+        await LockPcsAsync(db, [id], now, ct);
         await transaction.CommitAsync(ct);
         return Results.NoContent();
     }
@@ -44,7 +45,7 @@ public static partial class PcEndpoints
         var ct = http.RequestAborted;
         var now = clock.GetUtcNow();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
-        await SessionLifecycle.EndExpiredForPcAsync(db, id, now, ct);
+        await SessionLifecycle.EndExpiredAsync(db, now, ct);
         var pc = await db.Pcs.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
         if (pc is null)
         {
@@ -56,12 +57,45 @@ public static partial class PcEndpoints
             return ConflictResponse("This PC is offline.");
         }
 
-        // Committed either way, so closing an expired session is kept even when the unlock is refused.
-        var inUse = await db.PcSessions.AnyAsync(s => s.PcId == id && s.EndedAtUtc == null, ct);
-        var opened = !inUse && await TryOpenAdminUnlockAsync(db, pc, now, ct);
+        var active = await db.PcSessions.AsNoTracking().FirstOrDefaultAsync(s => s.PcId == id && s.EndedAtUtc == null, ct);
+        var unlocked = await UnlockPcAsync(db, pc, active, now, ct);
         await transaction.CommitAsync(ct);
 
-        return opened ? Results.NoContent() : InUseResponse();
+        return unlocked ? Results.NoContent() : InUseResponse();
+    }
+
+    // Locks each listed PC and pauses its running session. Returns how many PCs were newly locked.
+    private static async Task<int> LockPcsAsync(AppDbContext db, int[] pcIds, DateTimeOffset now, CancellationToken ct)
+    {
+        var newlyLocked = await db.Pcs
+            .Where(p => pcIds.Contains(p.Id) && p.LockedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LockedAtUtc, now), ct);
+        await SessionLifecycle.PauseForPcsAsync(db, pcIds, now, ct);
+        return newlyLocked;
+    }
+
+    // Returns false when the PC can't be opened: an active session holds it, or a login wins the race for it.
+    // A locked PC is released only once its session is resumed or an admin unlock is opened, so a failed open keeps the lock.
+    private static async Task<bool> UnlockPcAsync(AppDbContext db, Pc pc, PcSession? active, DateTimeOffset now, CancellationToken ct)
+    {
+        if (pc.LockedAtUtc is null)
+        {
+            return active is null && await TryOpenAdminUnlockAsync(db, pc, now, ct);
+        }
+
+        if (active is not null)
+        {
+            await SessionLifecycle.ResumeAsync(db, active, now, ct);
+        }
+        else if (!await TryOpenAdminUnlockAsync(db, pc, now, ct))
+        {
+            return false;
+        }
+
+        await db.Pcs
+            .Where(p => p.Id == pc.Id)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LockedAtUtc, (DateTimeOffset?)null), ct);
+        return true;
     }
 
     // Returns false when an active session already holds the PC. The unique index reports that, for example when a

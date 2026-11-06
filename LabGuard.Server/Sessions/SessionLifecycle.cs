@@ -81,6 +81,35 @@ public static class SessionLifecycle
                 .SetProperty(s => s.EndedAtUtc, now)
                 .SetProperty(s => s.EndReason, reason), cancellationToken);
 
+    // Pauses the running session of each listed PC that isn't paused yet, so a second lock keeps the first pause time.
+    public static Task<int> PauseForPcsAsync(AppDbContext db, int[] pcIds, DateTimeOffset now, CancellationToken cancellationToken) =>
+        db.PcSessions
+            .Where(s => pcIds.Contains(s.PcId) && s.EndedAtUtc == null && s.PausedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(s => s.PausedAtUtc, now), cancellationToken);
+
+    // Ends a pause. The expiry moves forward by the time spent paused, so the time left is what it was at the pause.
+    public static Task<int> ResumeAsync(AppDbContext db, PcSession session, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var expiresAt = ExpiryAfterResume(session, now);
+        return db.PcSessions
+            .Where(s => s.Id == session.Id && s.EndedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(s => s.ExpiresAtUtc, expiresAt)
+                .SetProperty(s => s.PausedAtUtc, (DateTimeOffset?)null), cancellationToken);
+    }
+
+    // The expiry once the pause ends. It only ever moves forward, so a clock that moved back gives no extra time.
+    public static DateTimeOffset? ExpiryAfterResume(PcSession session, DateTimeOffset now)
+    {
+        if (session.ExpiresAtUtc is not { } expiresAt)
+        {
+            return null;
+        }
+
+        var paused = session.PausedAtUtc is { } pausedAt && now > pausedAt ? now - pausedAt : TimeSpan.Zero;
+        return expiresAt + paused;
+    }
+
     // A paused session never expires: its time stays frozen until it is resumed.
     public static bool HasExpired(PcSession session, DateTimeOffset now) =>
         session.PausedAtUtc is null && session.ExpiresAtUtc is { } expiresAt && expiresAt <= now;

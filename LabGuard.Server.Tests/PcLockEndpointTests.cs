@@ -169,7 +169,7 @@ public class PcLockEndpointTests
     // Lock
 
     [Fact]
-    public async Task Lock_EndsTheActiveSession_AsAdminLock()
+    public async Task Lock_KeepsTheSession_AndPausesIt()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -183,8 +183,10 @@ public class PcLockEndpointTests
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         var session = await StoredSessionAsync(app, sessionId);
-        Assert.Equal(SessionLifecycle.AdminLock, session.EndReason);
-        Assert.Equal(app.Time.GetUtcNow().ToUnixTimeMilliseconds(), session.EndedAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.Null(session.EndedAtUtc);
+        Assert.Null(session.EndReason);
+        Assert.Equal(app.Time.GetUtcNow().ToUnixTimeMilliseconds(), session.PausedAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
     }
 
     [Fact]
@@ -200,6 +202,92 @@ public class PcLockEndpointTests
     }
 
     [Fact]
+    public async Task Lock_TwiceKeepsTheOriginalPauseTime()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+        await LockAsync(admin, pc.Id);
+        var firstPause = (await StoredSessionAsync(app, sessionId)).PausedAtUtc;
+        var firstLock = (await StoredPcAsync(app, pc.Id)).LockedAtUtc;
+        app.Time.Advance(TimeSpan.FromMinutes(1));
+
+        Assert.Equal(HttpStatusCode.NoContent, (await LockAsync(admin, pc.Id)).StatusCode);
+
+        Assert.Equal(firstPause, (await StoredSessionAsync(app, sessionId)).PausedAtUtc);
+        Assert.Equal(firstLock, (await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task Lock_TimeDoesNotRunOut_EvenPastTheExpiry()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app, minutes: 1);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(20));
+        await LockAsync(admin, pc.Id);
+        app.Time.Advance(TimeSpan.FromMinutes(5));
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc, sessionId));
+
+        Assert.Equal(sessionId, body.GetProperty("session").GetProperty("sessionId").GetInt32());
+        Assert.Equal(40, body.GetProperty("session").GetProperty("secondsRemaining").GetInt32());
+        Assert.Null((await StoredSessionAsync(app, sessionId)).EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task PcList_SecondsRemainingStaysTheSame_WhilePaused()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        await LoggedInSessionIdAsync(client, pc);
+        await LockAsync(admin, pc.Id);
+        app.Time.Advance(TimeSpan.FromMinutes(12));
+        await HeartbeatAsync(client, pc);
+
+        var response = await admin.GetAsync("/api/pcs");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var entries = await JsonOf(response);
+
+        Assert.True(entries[0].GetProperty("isLocked").GetBoolean());
+        Assert.Equal(600, entries[0].GetProperty("session").GetProperty("secondsRemaining").GetInt32());
+    }
+
+    [Fact]
+    public async Task Heartbeat_AfterLock_KeepsReturningThePausedSession_AndTheLock()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+        await LockAsync(admin, pc.Id);
+        app.Time.Advance(TimeSpan.FromSeconds(2));
+        var first = await JsonOf(await HeartbeatAsync(client, pc, sessionId));
+        app.Time.Advance(TimeSpan.FromSeconds(2));
+
+        var second = await JsonOf(await HeartbeatAsync(client, pc, sessionId));
+
+        Assert.Equal(sessionId, second.GetProperty("session").GetProperty("sessionId").GetInt32());
+        Assert.Equal(JsonValueKind.Null, second.GetProperty("endedReason").ValueKind);
+        Assert.True(second.GetProperty("isLocked").GetBoolean());
+        Assert.Equal(
+            first.GetProperty("session").GetProperty("secondsRemaining").GetInt32(),
+            second.GetProperty("session").GetProperty("secondsRemaining").GetInt32());
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
     public async Task Lock_MissingPc_Returns404()
     {
         using var app = new TestApp();
@@ -212,7 +300,7 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task Lock_OfflinePc_StillEndsItsSession()
+    public async Task Lock_OfflinePc_StillLocksAndPausesItsSession()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -224,7 +312,10 @@ public class PcLockEndpointTests
 
         Assert.Equal(HttpStatusCode.NoContent, (await LockAsync(admin, pc.Id)).StatusCode);
 
-        Assert.Equal(SessionLifecycle.AdminLock, (await StoredSessionAsync(app, sessionId)).EndReason);
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+        var session = await StoredSessionAsync(app, sessionId);
+        Assert.Null(session.EndedAtUtc);
+        Assert.NotNull(session.PausedAtUtc);
     }
 
     [Fact]
@@ -246,7 +337,7 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task Lock_OnlyEndsThatPcsSession()
+    public async Task Lock_OnlyPausesThatPcsSession()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -260,7 +351,9 @@ public class PcLockEndpointTests
 
         await LockAsync(admin, pcA.Id);
 
-        Assert.Null((await StoredSessionAsync(app, sessionB)).EndedAtUtc);
+        var session = await StoredSessionAsync(app, sessionB);
+        Assert.Null(session.PausedAtUtc);
+        Assert.Null((await StoredPcAsync(app, pcB.Id)).LockedAtUtc);
     }
 
     // Lock all and unlock all
@@ -540,7 +633,134 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task Heartbeat_AfterAdminLock_ReportsAdminLockForTheSentId()
+    public async Task Unlock_LockedIdlePc_OpensAnAdminUnlock_AndReleasesTheLock()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        await LockAsync(admin, pc.Id);
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var session = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync());
+        Assert.True(session.IsAdminUnlock);
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task Unlock_LockedPcWithAPausedLogin_ResumesWithTheSameSecondsRemaining()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+        app.Time.Advance(TimeSpan.FromMinutes(2));
+        await LockAsync(admin, pc.Id);
+        app.Time.Advance(TimeSpan.FromMinutes(20));
+        await HeartbeatAsync(client, pc, sessionId);
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var session = await StoredSessionAsync(app, sessionId);
+        Assert.Null(session.PausedAtUtc);
+        Assert.Null(session.EndedAtUtc);
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+        var body = await JsonOf(await HeartbeatAsync(client, pc, sessionId));
+        Assert.Equal(480, body.GetProperty("session").GetProperty("secondsRemaining").GetInt32());
+        Assert.False(body.GetProperty("isLocked").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Unlock_LockedPcWithAPausedAdminUnlock_ResumesIt()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        Assert.Equal(HttpStatusCode.NoContent, (await UnlockAsync(admin, pc.Id)).StatusCode);
+        var unlockId = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().Where(s => s.IsAdminUnlock).Select(s => s.Id).SingleAsync());
+        app.Time.Advance(TimeSpan.FromSeconds(10));
+        await LockAsync(admin, pc.Id);
+        app.Time.Advance(TimeSpan.FromMinutes(1));
+        await HeartbeatAsync(client, pc, unlockId);
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var session = await StoredSessionAsync(app, unlockId);
+        Assert.Null(session.EndedAtUtc);
+        Assert.Null(session.PausedAtUtc);
+        Assert.Equal(1, await app.WithDbAsync(db => db.PcSessions.CountAsync(s => s.EndedAtUtc == null)));
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task Unlock_OfflineLockedPc_Returns409AndStaysLocked()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app, seenAgo: TimeSpan.FromMinutes(1));
+        Assert.Equal(HttpStatusCode.NoContent, (await LockAsync(admin, pc.Id)).StatusCode);
+
+        var response = await UnlockAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("This PC is offline.", (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+        Assert.Equal(0, await app.WithDbAsync(db => db.PcSessions.CountAsync()));
+    }
+
+    [Fact]
+    public async Task Unlock_PauseLaterThanTheClock_NeverShortensTheSession()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+        var expiresAt = (await StoredSessionAsync(app, sessionId)).ExpiresAtUtc;
+        await LockAsync(admin, pc.Id);
+        // The clock moved back since the pause, so the pause now lies in the future. The fake clock can't go back, so the stored pause is moved forward instead.
+        var laterThanClock = app.Time.GetUtcNow().AddMinutes(5);
+        await app.WithDbAsync(db => db.PcSessions
+            .Where(s => s.Id == sessionId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(s => s.PausedAtUtc, laterThanClock)));
+        await HeartbeatAsync(client, pc);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await UnlockAsync(admin, pc.Id)).StatusCode);
+
+        Assert.Equal(expiresAt, (await StoredSessionAsync(app, sessionId)).ExpiresAtUtc);
+    }
+
+    [Fact]
+    public async Task StaleAdminUnlock_WhileLocked_IsEnded_AndThePcStaysLocked()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var response = await UnlockAsync(admin, pc.Id);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var unlockId = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().Where(s => s.IsAdminUnlock).Select(s => s.Id).SingleAsync());
+        app.Time.Advance(TimeSpan.FromSeconds(5));
+        await LockAsync(admin, pc.Id);
+        app.Time.Advance(TimeSpan.FromSeconds(60));
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc));
+
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("session").ValueKind);
+        Assert.Equal(SessionLifecycle.ConnectionLost, (await StoredSessionAsync(app, unlockId)).EndReason);
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+        Assert.True((await JsonOf(await HeartbeatAsync(client, pc))).GetProperty("isLocked").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Logout_WhileLocked_EndsTheSession_AndTheLockStays()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -550,10 +770,48 @@ public class PcLockEndpointTests
         var sessionId = await LoggedInSessionIdAsync(client, pc);
         await LockAsync(admin, pc.Id);
 
-        var body = await JsonOf(await HeartbeatAsync(client, pc, sessionId));
+        var response = await PostAsync(client, "/api/client/logout", pc.Token);
 
-        Assert.Equal(JsonValueKind.Null, body.GetProperty("session").ValueKind);
-        Assert.Equal("admin-lock", body.GetProperty("endedReason").GetString());
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var session = await StoredSessionAsync(app, sessionId);
+        Assert.Equal("logout", session.EndReason);
+        Assert.NotNull(session.EndedAtUtc);
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task DisablingTheAccount_WhileLocked_EndsTheSession_AndTheLockStays()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+        await LockAsync(admin, pc.Id);
+        var accountId = await app.WithDbAsync(db => db.UserAccounts.Select(u => u.Id).SingleAsync());
+
+        var response = await admin.PatchAsJsonAsync($"/api/accounts/{accountId}/status", new { isActive = false });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(SessionLifecycle.AccountDisabled, (await StoredSessionAsync(app, sessionId)).EndReason);
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task Login_AfterUnlock_IsAllowedAgain()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        await LockAsync(admin, pc.Id);
+        await UnlockAsync(admin, pc.Id);
+
+        var response = await LoginAsync(client, pc);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     // Login while locked
