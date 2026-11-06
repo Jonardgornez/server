@@ -18,6 +18,7 @@ public static class SessionLifecycle
     public const string PcRemoved = "pc-removed";
     public const string ConnectionLost = "connection-lost";
     public const string AdminShutdown = "shutdown";
+    public const string AdminReboot = "reboot";
 
     public const string AdminUnlockUsername = "Admin unlock";
     // Real account ids start at 1, so no account matches this and EndForAccountAsync never ends an admin unlock.

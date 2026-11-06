@@ -13,17 +13,17 @@ namespace LabGuard.Server.Tests;
 
 public class PcShutdownEndpointTests
 {
-    private const string StudentPassword = "student pass 1";
-    private const string InvalidRequestMessage = "Invalid request.";
-    private const string OfflineMessage = "This PC is offline.";
-    private const string ServerPcMessage = "This PC runs the server. Shut it down by hand.";
-    private const string AddressUnreadableMessage = "Couldn't check this PC's address. Try again.";
+    internal const string StudentPassword = "student pass 1";
+    internal const string InvalidRequestMessage = "Invalid request.";
+    internal const string OfflineMessage = "This PC is offline.";
+    internal const string ServerPcMessage = "This PC runs the server. Shut it down by hand.";
+    internal const string AddressUnreadableMessage = "Couldn't check this PC's address. Try again.";
     // Other PCs in these tests use a documentation address, never one of the test machine's own.
-    private const string OtherPcAddress = "203.0.113.5";
+    internal const string OtherPcAddress = "203.0.113.5";
 
-    private sealed record TestPc(int Id, string Token);
+    internal sealed record TestPc(int Id, string Token);
 
-    private static async Task<HttpClient> SignedInAsync(TestApp app)
+    internal static async Task<HttpClient> SignedInAsync(TestApp app)
     {
         var client = app.CreateBrowser();
         var response = await client.PostAsJsonAsync("/api/auth/login", new { username = TestApp.Username, password = TestApp.Password });
@@ -31,14 +31,14 @@ public class PcShutdownEndpointTests
         return client;
     }
 
-    private static async Task<JsonElement> JsonOf(HttpResponseMessage response)
+    internal static async Task<JsonElement> JsonOf(HttpResponseMessage response)
     {
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         return json.RootElement.Clone();
     }
 
     // A PC that has never reported its address; its first heartbeat sets the address and brings it online.
-    private static async Task<TestPc> AddPcAsync(TestApp app, string name = "PC-01", TimeSpan? seenAgo = null)
+    internal static async Task<TestPc> AddPcAsync(TestApp app, string name = "PC-01", TimeSpan? seenAgo = null)
     {
         var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
         var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
@@ -53,7 +53,7 @@ public class PcShutdownEndpointTests
         return new TestPc(id, token);
     }
 
-    private static async Task AddAccountAsync(TestApp app, int? minutes = 60, string username = "student")
+    internal static async Task AddAccountAsync(TestApp app, int? minutes = 60, string username = "student")
     {
         var hasher = app.Services.GetRequiredService<IPasswordHasher<UserAccount>>();
         await app.WithDbAsync(async db =>
@@ -66,7 +66,7 @@ public class PcShutdownEndpointTests
         });
     }
 
-    private static async Task<HttpResponseMessage> PostAsync(HttpClient client, string path, string? token, HttpContent? content = null)
+    internal static async Task<HttpResponseMessage> PostAsync(HttpClient client, string path, string? token, HttpContent? content = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = content };
         if (token is not null)
@@ -77,56 +77,56 @@ public class PcShutdownEndpointTests
         return await client.SendAsync(request);
     }
 
-    private static Task<HttpResponseMessage> LoginAsync(HttpClient client, TestPc pc, string username = "student") =>
+    internal static Task<HttpResponseMessage> LoginAsync(HttpClient client, TestPc pc, string username = "student") =>
         PostAsync(client, "/api/client/login", pc.Token, JsonContent.Create(new { username, password = StudentPassword }));
 
-    private static Task<HttpResponseMessage> HeartbeatAsync(HttpClient client, TestPc pc, int? sessionId = null) =>
+    internal static Task<HttpResponseMessage> HeartbeatAsync(HttpClient client, TestPc pc, int? sessionId = null) =>
         PostAsync(client, "/api/client/heartbeat", pc.Token, sessionId is null ? null : JsonContent.Create(new { sessionId }));
 
-    private static async Task<JsonElement> HeartbeatBodyAsync(HttpClient client, TestPc pc) =>
+    internal static async Task<JsonElement> HeartbeatBodyAsync(HttpClient client, TestPc pc) =>
         await JsonOf(await HeartbeatAsync(client, pc));
 
     // Null when the heartbeat carries no shutdown, otherwise the seconds it was given.
-    private static int? ShutdownSecondsOf(JsonElement heartbeat) =>
+    internal static int? ShutdownSecondsOf(JsonElement heartbeat) =>
         heartbeat.GetProperty("shutdownSeconds").ValueKind == JsonValueKind.Null
             ? null
             : heartbeat.GetProperty("shutdownSeconds").GetInt32();
 
-    private static async Task<int> LoggedInSessionIdAsync(HttpClient client, TestPc pc, string username = "student")
+    internal static async Task<int> LoggedInSessionIdAsync(HttpClient client, TestPc pc, string username = "student")
     {
         var response = await LoginAsync(client, pc, username);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return (await JsonOf(response)).GetProperty("sessionId").GetInt32();
     }
 
-    private static Task<Pc> StoredPcAsync(TestApp app, int pcId) =>
+    internal static Task<Pc> StoredPcAsync(TestApp app, int pcId) =>
         app.WithDbAsync(db => db.Pcs.AsNoTracking().SingleAsync(p => p.Id == pcId));
 
-    private static Task<PcSession> StoredSessionAsync(TestApp app, int id) =>
+    internal static Task<PcSession> StoredSessionAsync(TestApp app, int id) =>
         app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.Id == id));
 
-    private static Task<HttpResponseMessage> ShutdownAsync(HttpClient admin, int pcId) =>
+    internal static Task<HttpResponseMessage> ShutdownAsync(HttpClient admin, int pcId) =>
         admin.PostAsJsonAsync($"/api/pcs/{pcId}/shutdown", new { });
 
-    private static Task<HttpResponseMessage> ShutdownManyAsync(HttpClient admin, params int[] ids) =>
+    internal static Task<HttpResponseMessage> ShutdownManyAsync(HttpClient admin, params int[] ids) =>
         admin.PostAsJsonAsync("/api/pcs/shutdown", new { ids });
 
-    private static Task<HttpResponseMessage> LockAsync(HttpClient admin, int pcId) =>
+    internal static Task<HttpResponseMessage> LockAsync(HttpClient admin, int pcId) =>
         admin.PostAsJsonAsync($"/api/pcs/{pcId}/lock", new { });
 
-    private static async Task<int> AffectedAsync(HttpResponseMessage response)
+    internal static async Task<int> AffectedAsync(HttpResponseMessage response)
     {
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return (await JsonOf(response)).GetProperty("affected").GetInt32();
     }
 
     // Marks PCs as seen now, so they are online, without a heartbeat's side effects.
-    private static Task BringOnlineAsync(TestApp app, params int[] pcIds) =>
+    internal static Task BringOnlineAsync(TestApp app, params int[] pcIds) =>
         app.WithDbAsync(db => db.Pcs
             .Where(p => pcIds.Contains(p.Id))
             .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LastSeenUtc, app.Time.GetUtcNow())));
 
-    private static async Task<JsonElement> ListEntryAsync(HttpClient admin, string name)
+    internal static async Task<JsonElement> ListEntryAsync(HttpClient admin, string name)
     {
         var entries = await JsonOf(await admin.GetAsync("/api/pcs"));
         return entries.EnumerateArray().Single(entry => entry.GetProperty("name").GetString() == name);

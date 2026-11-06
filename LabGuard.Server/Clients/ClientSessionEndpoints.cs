@@ -15,8 +15,9 @@ public record PcLoginRequest(string? Username, string? Password);
 public record PcLoginResponse(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining);
 public record HeartbeatRequest(int? SessionId);
 // Notice is the administrator's on-screen notice text, or null when the notice is turned off.
-// ShutdownSeconds is set only on the one heartbeat that hands the PC a requested shutdown, and says how long it has to shut down.
-public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason, bool IsLocked, string? Notice, int? ShutdownSeconds);
+// ShutdownSeconds and RestartSeconds are set only on the one heartbeat that hands the PC a requested shutdown or restart,
+// and say how long it has to go down. Exactly one of them is set, so an older client that only reads ShutdownSeconds never shuts down for a restart.
+public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason, bool IsLocked, string? Notice, int? ShutdownSeconds, int? RestartSeconds);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -345,21 +346,31 @@ public static partial class ClientEndpoints
         }
 
         var now = clock.GetUtcNow();
-        var shutdownDeliveredAt = await db.Pcs
+        var delivery = await db.Pcs
             .Where(p => p.Id == pcId)
-            .Select(p => p.ShutdownDeliveredAtUtc)
+            .Select(p => new { p.ShutdownDeliveredAtUtc, p.PowerAction })
             .FirstOrDefaultAsync(ct);
-        // A PC the administrator is shutting down ends its session as an admin shutdown, not as a plain logout.
-        var reason = shutdownDeliveredAt is { } deliveredAt && PcShutdownRules.IsWithin(deliveredAt, now, PcShutdownRules.LogoutWindow)
-            ? SessionLifecycle.AdminShutdown
-            : SessionLifecycle.Logout;
+        var reason = LogoutReason(delivery?.ShutdownDeliveredAtUtc, delivery?.PowerAction, now);
         await SessionLifecycle.EndExpiredForPcAsync(db, pcId, now, ct);
         await SessionLifecycle.EndForPcAsync(db, pcId, reason, now, ct);
         return Results.NoContent();
     }
 
+    // A PC the administrator has just shut down or restarted ends its session as an admin action, not as a plain logout.
+    private static string LogoutReason(DateTimeOffset? deliveredAt, string? storedAction, DateTimeOffset now)
+    {
+        if (deliveredAt is not { } delivered || !PcShutdownRules.IsWithin(delivered, now, PcShutdownRules.LogoutWindow))
+        {
+            return SessionLifecycle.Logout;
+        }
+
+        return PcShutdownRules.ActionOf(storedAction) == PcShutdownRules.RestartAction
+            ? SessionLifecycle.AdminReboot
+            : SessionLifecycle.AdminShutdown;
+    }
+
     // The PC says it is closing. Its last heartbeat moves back to the edge of the online window, so it shows offline at once.
-    // Only ever moves backward, and leaves its sessions and its lock alone. A pending shutdown request is dropped too,
+    // Only ever moves backward, and leaves its sessions and its lock alone. A pending shutdown or restart request is dropped too,
     // since the PC is going away and would only get it on a heartbeat that comes after it has restarted.
     private static async Task<IResult> OfflineAsync(HttpContext http, AppDbContext db, TimeProvider clock)
     {
@@ -411,6 +422,7 @@ public static partial class ClientEndpoints
                 IsLocked = p.LockedAtUtc != null,
                 p.ShutdownRequestedAtUtc,
                 p.ShutdownDeliveredAtUtc,
+                p.PowerAction,
             })
             .FirstOrDefaultAsync(ct);
         if (known is null)
@@ -457,13 +469,14 @@ public static partial class ClientEndpoints
             return NotRegistered();
         }
 
-        var shutdownSeconds = await DeliverShutdownAsync(
+        var deliveredAction = await DeliverPowerActionAsync(
             db,
             tokenHash,
             address,
             wasOnline,
             localAddresses,
             known.ShutdownRequestedAtUtc,
+            known.PowerAction,
             known.ShutdownDeliveredAtUtc,
             now,
             ct);
@@ -484,7 +497,8 @@ public static partial class ClientEndpoints
             endedReason,
             known.IsLocked,
             settings.NoticeEnabled ? settings.NoticeText : null,
-            shutdownSeconds));
+            deliveredAction == PcShutdownRules.ShutdownAction ? PcShutdownRules.DeliveredSeconds : null,
+            deliveredAction == PcShutdownRules.RestartAction ? PcShutdownRules.DeliveredSeconds : null));
     }
 
     private static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)

@@ -112,6 +112,10 @@ namespace LabGuard.Server.Migrations
                         .HasColumnType("TEXT")
                         .UseCollation("NOCASE");
 
+                    b.Property<string>("PowerAction")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("RegisteredAtUtc")
                         .HasColumnType("INTEGER");
 

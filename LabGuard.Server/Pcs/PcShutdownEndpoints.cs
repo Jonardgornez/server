@@ -6,14 +6,26 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Pcs;
 
-// Admin shutdown of one PC or many. The server only records the request. The PC picks it up on its next heartbeat.
+// Admin shutdown and reboot of one PC or many. The server only records the request. The PC picks it up on its next heartbeat.
 public static partial class PcEndpoints
 {
-    private const string ServerPcShutdownMessage = "This PC runs the server. Shut it down by hand.";
     private const string AddressUnreadableMessage = "Couldn't check this PC's address. Try again.";
 
-    private static async Task<IResult> ShutdownAsync(
+    private static Task<IResult> ShutdownAsync(int id, HttpContext http, AppDbContext db, TimeProvider clock, ILocalAddressSource localAddresses) =>
+        RequestPowerActionAsync(id, PcShutdownRules.ShutdownAction, http, db, clock, localAddresses);
+
+    private static Task<IResult> RebootAsync(int id, HttpContext http, AppDbContext db, TimeProvider clock, ILocalAddressSource localAddresses) =>
+        RequestPowerActionAsync(id, PcShutdownRules.RestartAction, http, db, clock, localAddresses);
+
+    private static Task<IResult> ShutdownManyAsync(HttpContext http, AppDbContext db, TimeProvider clock, ILocalAddressSource localAddresses) =>
+        RequestPowerActionManyAsync(PcShutdownRules.ShutdownAction, http, db, clock, localAddresses);
+
+    private static Task<IResult> RebootManyAsync(HttpContext http, AppDbContext db, TimeProvider clock, ILocalAddressSource localAddresses) =>
+        RequestPowerActionManyAsync(PcShutdownRules.RestartAction, http, db, clock, localAddresses);
+
+    private static async Task<IResult> RequestPowerActionAsync(
         int id,
+        string action,
         HttpContext http,
         AppDbContext db,
         TimeProvider clock,
@@ -48,16 +60,17 @@ public static partial class PcEndpoints
 
         if (ServerPcRule.IsServerPc(pc.IpAddress, machineAddresses))
         {
-            return ConflictResponse(ServerPcShutdownMessage);
+            return ConflictResponse(ServerPcMessage(action));
         }
 
-        // A PC already pending is left as it is, so the request is not refreshed.
-        await RequestShutdownsAsync(db, [id], now, ct);
+        // A PC already pending is left as it is, so the request is not refreshed and its first action is kept.
+        await RequestPowerActionsAsync(db, [id], action, now, ct);
         await transaction.CommitAsync(ct);
         return Results.NoContent();
     }
 
-    private static async Task<IResult> ShutdownManyAsync(
+    private static async Task<IResult> RequestPowerActionManyAsync(
+        string action,
         HttpContext http,
         AppDbContext db,
         TimeProvider clock,
@@ -81,7 +94,7 @@ public static partial class PcEndpoints
         await SessionLifecycle.EndExpiredAsync(db, now, ct);
 
         // Offline PCs and the PC running this server are skipped. Unknown ids match nothing.
-        var shutdownIds = (await db.Pcs
+        var requestIds = (await db.Pcs
             .AsNoTracking()
             .Where(p => pcIds.Contains(p.Id))
             .Select(p => new { p.Id, p.LastSeenUtc, p.IpAddress })
@@ -89,15 +102,16 @@ public static partial class PcEndpoints
             .Where(p => IsOnline(p.LastSeenUtc, now) && !ServerPcRule.IsServerPc(p.IpAddress, machineAddresses))
             .Select(p => p.Id)
             .ToArray();
-        var requested = await RequestShutdownsAsync(db, shutdownIds, now, ct);
+        var requested = await RequestPowerActionsAsync(db, requestIds, action, now, ct);
         await transaction.CommitAsync(ct);
         return Results.Ok(new AffectedPcsResponse(requested));
     }
 
-    // Requests a shutdown for each listed PC that isn't already pending. A request that went stale is replaced.
-    // A PC shut down within the delivery window is skipped, so a fresh delivery isn't followed by a second request.
+    // Requests a shutdown or restart for each listed PC that isn't already pending. A request that went stale is replaced.
+    // A PC shut down or restarted within the delivery window is skipped, so a fresh delivery isn't followed by a second request.
+    // Replacing a request also forgets an older delivery, so the stored action always belongs to the stored request.
     // Returns how many PCs were newly requested.
-    private static Task<int> RequestShutdownsAsync(AppDbContext db, int[] pcIds, DateTimeOffset now, CancellationToken ct)
+    private static Task<int> RequestPowerActionsAsync(AppDbContext db, int[] pcIds, string action, DateTimeOffset now, CancellationToken ct)
     {
         var expiredBefore = now - PcShutdownRules.RequestWindow;
         var deliveredBefore = now - PcShutdownRules.DeliveryWindow;
@@ -105,6 +119,14 @@ public static partial class PcEndpoints
             .Where(p => pcIds.Contains(p.Id)
                 && (p.ShutdownRequestedAtUtc == null || p.ShutdownRequestedAtUtc <= expiredBefore)
                 && (p.ShutdownDeliveredAtUtc == null || p.ShutdownDeliveredAtUtc <= deliveredBefore))
-            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)now), ct);
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)now)
+                .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
+                .SetProperty(p => p.PowerAction, action), ct);
     }
+
+    private static string ServerPcMessage(string action) =>
+        action == PcShutdownRules.RestartAction
+            ? "This PC runs the server. Restart it by hand."
+            : "This PC runs the server. Shut it down by hand.";
 }
