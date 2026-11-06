@@ -19,6 +19,9 @@ public class PcSession
     public DateTimeOffset? EndedAtUtc { get; set; }
     public string? EndReason { get; set; }
 
+    // Set while the PC is locked. A paused session never expires; unlocking moves its expiry forward by the pause.
+    public DateTimeOffset? PausedAtUtc { get; set; }
+
     // True for a session the admin opened to unlock the PC. It has no account and never expires.
     public bool IsAdminUnlock { get; set; }
 }

@@ -54,6 +54,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(p => p.LastSeenUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.LoginLockedUntilUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.LastFailedLoginUtc).HasConversion(unixMilliseconds);
+            entity.Property(p => p.LockedAtUtc).HasConversion(unixMilliseconds);
         });
 
         modelBuilder.Entity<PcSession>(entity =>
@@ -63,6 +64,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(s => s.StartedAtUtc).HasConversion(unixMilliseconds);
             entity.Property(s => s.ExpiresAtUtc).HasConversion(unixMilliseconds);
             entity.Property(s => s.EndedAtUtc).HasConversion(unixMilliseconds);
+            entity.Property(s => s.PausedAtUtc).HasConversion(unixMilliseconds);
             entity.Property(s => s.EndReason).HasMaxLength(32);
             // At most one active (not ended) session per PC, enforced by the database.
             entity.HasIndex(s => s.PcId).IsUnique().HasFilter("\"EndedAtUtc\" IS NULL");

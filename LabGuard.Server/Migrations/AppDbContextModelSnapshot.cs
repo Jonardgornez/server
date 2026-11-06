@@ -100,6 +100,9 @@ namespace LabGuard.Server.Migrations
                     b.Property<long>("LastSeenUtc")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long?>("LockedAtUtc")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long?>("LoginLockedUntilUtc")
                         .HasColumnType("INTEGER");
 
@@ -147,6 +150,9 @@ namespace LabGuard.Server.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<bool>("IsAdminUnlock")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("PausedAtUtc")
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("PcId")
