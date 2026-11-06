@@ -4,6 +4,7 @@ using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using LabGuard.Server.Pcs;
+using LabGuard.Server.Screen;
 using LabGuard.Server.Sessions;
 using LabGuard.Server.Settings;
 using Microsoft.AspNetCore.Identity;
@@ -14,10 +15,19 @@ namespace LabGuard.Server.Clients;
 public record PcLoginRequest(string? Username, string? Password);
 public record PcLoginResponse(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining);
 public record HeartbeatRequest(int? SessionId);
+// ScreenView is set while an administrator has a live view of this PC open. The PC streams only then, and an older client ignores it.
+public record HeartbeatScreenView(string ViewId, string Mode);
 // Notice is the administrator's on-screen notice text, or null when the notice is turned off.
 // ShutdownSeconds and RestartSeconds are set only on the one heartbeat that hands the PC a requested shutdown or restart,
 // and say how long it has to go down. Exactly one of them is set, so an older client that only reads ShutdownSeconds never shuts down for a restart.
-public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason, bool IsLocked, string? Notice, int? ShutdownSeconds, int? RestartSeconds);
+public record HeartbeatResponse(
+    PcSessionInfo? Session,
+    string? EndedReason,
+    bool IsLocked,
+    string? Notice,
+    int? ShutdownSeconds,
+    int? RestartSeconds,
+    HeartbeatScreenView? ScreenView);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -400,7 +410,8 @@ public static partial class ClientEndpoints
         HttpContext http,
         AppDbContext db,
         TimeProvider clock,
-        ILocalAddressSource localAddresses)
+        ILocalAddressSource localAddresses,
+        ScreenStreamHub screens)
     {
         if (ReadBearerToken(http.Request) is not { } token)
         {
@@ -492,13 +503,15 @@ public static partial class ClientEndpoints
         }
 
         var settings = await ServerSettingsStore.GetAsync(db, ct);
+        var screenView = screens.CurrentFor(pcId) is { } viewer ? new HeartbeatScreenView(viewer.ViewId, viewer.Mode) : null;
         return Results.Ok(new HeartbeatResponse(
             active is null ? null : SessionLifecycle.ToInfo(active, now),
             endedReason,
             known.IsLocked,
             settings.NoticeEnabled ? settings.NoticeText : null,
             deliveredAction == PcShutdownRules.ShutdownAction ? PcShutdownRules.DeliveredSeconds : null,
-            deliveredAction == PcShutdownRules.RestartAction ? PcShutdownRules.DeliveredSeconds : null));
+            deliveredAction == PcShutdownRules.RestartAction ? PcShutdownRules.DeliveredSeconds : null,
+            screenView));
     }
 
     private static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)

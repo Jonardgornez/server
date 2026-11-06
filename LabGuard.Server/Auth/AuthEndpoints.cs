@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Claims;
 using System.Text.Json;
 using LabGuard.Server.Data;
+using LabGuard.Server.Screen;
 using LabGuard.Server.Settings;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -105,9 +106,11 @@ public static class AuthEndpoints
         }
     }
 
-    private static async Task<IResult> LogoutAsync(HttpContext http)
+    private static async Task<IResult> LogoutAsync(HttpContext http, ScreenStreamHub screens)
     {
         await http.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        // A live view belongs to the session that opened it, so it ends with the session.
+        await screens.CloseAllAsync(ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
         return Results.NoContent();
     }
 
@@ -119,7 +122,8 @@ public static class AuthEndpoints
         ClaimsPrincipal user,
         AppDbContext db,
         IPasswordHasher<AdminAccount> hasher,
-        TimeProvider clock)
+        TimeProvider clock,
+        ScreenStreamHub screens)
     {
         var request = await ReadBodyAsync<ChangePasswordRequest>(http.Request);
         if (request is null)
@@ -189,6 +193,8 @@ public static class AuthEndpoints
         }
 
         await http.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        // The new password invalidates every session, so every live view has to end too.
+        await screens.CloseAllAsync(ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
         return Results.NoContent();
     }
 
@@ -274,6 +280,6 @@ public static class AuthEndpoints
     private static IResult WrongCredentials() =>
         Results.Json(new ErrorResponse("Wrong username or password."), statusCode: StatusCodes.Status401Unauthorized);
 
-    private static IResult SignInRequired() =>
+    internal static IResult SignInRequired() =>
         Results.Json(new ErrorResponse("Please sign in."), statusCode: StatusCodes.Status401Unauthorized);
 }

@@ -77,9 +77,9 @@ public sealed class ChannelGuard(RequestDelegate next, ServerPorts ports, ILogge
         {
             await next(context);
         }
-        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        catch (Exception) when (context.RequestAborted.IsCancellationRequested)
         {
-            // The PC went away mid-request; nothing to report or send.
+            // The PC went away mid-request or dropped its WebSocket, so the error is a consequence, not a fault.
         }
         catch (Exception exception)
         {

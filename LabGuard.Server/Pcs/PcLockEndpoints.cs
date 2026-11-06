@@ -192,11 +192,11 @@ public static partial class PcEndpoints
         return ids is { Length: > 0 and <= MaxIdsPerRequest } ? ids.Distinct().ToArray() : null;
     }
 
-    private static IResult PcNotFound() =>
+    internal static IResult PcNotFound() =>
         Results.Json(new ErrorResponse("PC not found."), statusCode: StatusCodes.Status404NotFound);
 
     private static IResult InUseResponse() => ConflictResponse("This PC is already in use.");
 
-    private static IResult ConflictResponse(string message) =>
+    internal static IResult ConflictResponse(string message) =>
         Results.Json(new ErrorResponse(message), statusCode: StatusCodes.Status409Conflict);
 }

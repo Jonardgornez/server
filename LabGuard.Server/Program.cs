@@ -5,6 +5,7 @@ using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using LabGuard.Server.Pcs;
 using LabGuard.Server.Requests;
+using LabGuard.Server.Screen;
 using LabGuard.Server.Settings;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.Sqlite;
@@ -35,6 +36,7 @@ builder.WebHost.ConfigureKestrel(options =>
 builder.Services.AddOpenApi();
 builder.Services.AddAdminAuth();
 builder.Services.AddClientRateLimiting();
+builder.Services.AddScreenViewing();
 builder.Services.AddSingleton<DummyLoginCredential>();
 builder.Services.AddSingleton<ILocalAddressSource, NetworkInterfaceAddressSource>();
 builder.Services.AddDbContext<AppDbContext>((services, options) =>
@@ -71,6 +73,7 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseMiddleware<ChannelGuard>();
+app.UseWebSockets();
 app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -89,6 +92,7 @@ app.MapAccountEndpoints();
 app.MapLoginRequestEndpoints();
 app.MapRegistrationRequestEndpoints();
 app.MapPcEndpoints();
+app.MapScreenViewEndpoints();
 app.MapSettingsEndpoints();
 app.MapServerInfoEndpoints();
 app.MapClientEndpoints();

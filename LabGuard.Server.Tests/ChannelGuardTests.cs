@@ -34,6 +34,7 @@ public class ChannelGuardTests
     [InlineData("POST", "/api/auth/logout")]
     [InlineData("GET", "/api/pcs")]
     [InlineData("DELETE", "/api/pcs/1")]
+    [InlineData("GET", "/api/pcs/1/screen/live")]
     [InlineData("GET", "/api/accounts")]
     [InlineData("GET", "/api/login-requests")]
     [InlineData("GET", "/api/health")]
@@ -132,6 +133,7 @@ public class ChannelGuardTests
     [InlineData("POST", "/api/client/register-requests")]
     [InlineData("POST", "/api/client/heartbeat")]
     [InlineData("POST", "/api/client/offline")]
+    [InlineData("GET", "/api/client/screen/stream")]
     [InlineData("GET", "/API/CLIENT/ping")]
     public async Task AdminPort_ReturnsEmpty404ForApiClientPaths(string method, string path)
     {
@@ -235,6 +237,8 @@ public class ChannelGuardTests
     {
         { "POST", "/api/auth/login" },
         { "GET", "/api/pcs" },
+        { "GET", "/api/pcs/1/screen/live" },
+        { "GET", "/api/client/screen/stream" },
         { "GET", "/api/health" },
         { "GET", "/openapi/v1.json" },
     };
@@ -293,6 +297,27 @@ public class ChannelGuardTests
         using var app = new TestApp();
         await AssertBare404Async(app, "POST", "/api/auth/login", localPort: 54321, remote: "192.168.1.77");
         Assert.Equal(0, await app.WithDbAsync(db => db.Pcs.CountAsync()));
+    }
+
+    [Fact]
+    public async Task AdminPort_DoesNotServeThePcScreenStream_EvenAsAWebSocket()
+    {
+        using var app = new TestApp();
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        var (_, token) = await LiveViewClient.AddPcAsync(app);
+
+        var status = await LiveViewClient.RefusedStatusAsync(() =>
+        {
+            var socket = app.Server.CreateWebSocketClient();
+            socket.ConfigureRequest = request =>
+            {
+                request.Headers["Authorization"] = $"Bearer {token}";
+                request.Headers["Cookie"] = cookie;
+            };
+            return socket.ConnectAsync(new Uri("ws://localhost/api/client/screen/stream?viewId=x"), CancellationToken.None);
+        });
+
+        Assert.Equal(404, status);
     }
 
     [Fact]

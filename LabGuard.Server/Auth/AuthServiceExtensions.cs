@@ -87,8 +87,9 @@ public static class AuthServiceExtensions
         {
             // Re-issue on every request so the idle limit is measured from the last activity,
             // not from the half-way point the sliding expiry would otherwise wait for.
-            // Background refreshes skip this, so they can't keep an idle session alive.
-            context.ShouldRenew = context.Request.Headers[BackgroundRefreshHeader] != "1";
+            // Background refreshes and endpoints marked NoSessionRenewal skip this, so they can't keep an idle session alive.
+            context.ShouldRenew = context.Request.Headers[BackgroundRefreshHeader] != "1"
+                && context.HttpContext.GetEndpoint()?.Metadata.GetMetadata<NoSessionRenewalAttribute>() is null;
         }
         else
         {
@@ -100,13 +101,26 @@ public static class AuthServiceExtensions
     // Measured from the last request that renewed the session. A session with no saved limit is refused.
     private static bool IsIdleTooLong(CookieValidatePrincipalContext context)
     {
-        if (!int.TryParse(context.Principal?.FindFirstValue(IdleTimeoutMinutesClaim), CultureInfo.InvariantCulture, out var idleMinutes)
-            || context.Properties.IssuedUtc is not { } lastRenewedUtc)
+        var deadline = SessionDeadlineUtc(context.Principal, context.Properties);
+        var now = context.HttpContext.RequestServices.GetRequiredService<TimeProvider>().GetUtcNow();
+        return deadline is not { } endsAt || now > endsAt;
+    }
+
+    // When the session ends if nothing renews it: the idle limit counted from the last renewal, or the cookie's own expiry if that is sooner.
+    // Null for a session with no saved limit or no issue time, which the caller refuses.
+    public static DateTimeOffset? SessionDeadlineUtc(ClaimsPrincipal? principal, AuthenticationProperties? properties)
+    {
+        if (!int.TryParse(principal?.FindFirstValue(IdleTimeoutMinutesClaim), CultureInfo.InvariantCulture, out var idleMinutes)
+            || properties?.IssuedUtc is not { } lastRenewedUtc)
         {
-            return true;
+            return null;
         }
 
-        var now = context.HttpContext.RequestServices.GetRequiredService<TimeProvider>().GetUtcNow();
-        return now - lastRenewedUtc > TimeSpan.FromMinutes(idleMinutes);
+        var idleDeadline = lastRenewedUtc.AddMinutes(idleMinutes);
+        return properties.ExpiresUtc is { } cookieExpiry && cookieExpiry < idleDeadline ? cookieExpiry : idleDeadline;
     }
 }
+
+// Marks an endpoint whose requests must not renew the admin session, such as the live screen view.
+// A WebSocket can't send the background-refresh header, so this marker is what keeps a stream from extending the idle limit.
+public sealed class NoSessionRenewalAttribute : Attribute;
