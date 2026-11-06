@@ -89,7 +89,7 @@ public static class SessionLifecycle
                 .SetProperty(s => s.PausedAtUtc, (DateTimeOffset?)null), cancellationToken);
     }
 
-    // The expiry once the pause ends. It only ever moves forward, so a clock that moved back gives no extra time.
+    // The expiry once the pause ends: exactly the time that was left when it paused, whatever the clock did meanwhile.
     public static DateTimeOffset? ExpiryAfterResume(PcSession session, DateTimeOffset now)
     {
         if (session.ExpiresAtUtc is not { } expiresAt)
@@ -97,8 +97,7 @@ public static class SessionLifecycle
             return null;
         }
 
-        var paused = session.PausedAtUtc is { } pausedAt && now > pausedAt ? now - pausedAt : TimeSpan.Zero;
-        return expiresAt + paused;
+        return session.PausedAtUtc is { } pausedAt ? now + (expiresAt - pausedAt) : expiresAt;
     }
 
     // A paused session never expires: its time stays frozen until it is resumed.

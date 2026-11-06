@@ -854,7 +854,7 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task Unlock_PauseLaterThanTheClock_NeverShortensTheSession()
+    public async Task Unlock_PauseLaterThanTheClock_GivesExactlyTheTimeLeft()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -862,7 +862,6 @@ public class PcLockEndpointTests
         var pc = await AddPcAsync(app);
         await AddAccountAsync(app, minutes: 10);
         var sessionId = await LoggedInSessionIdAsync(client, pc);
-        var expiresAt = (await StoredSessionAsync(app, sessionId)).ExpiresAtUtc;
         await LockAsync(admin, pc.Id);
         // The clock moved back since the pause, so the pause now lies in the future. The fake clock can't go back, so the stored pause is moved forward instead.
         var laterThanClock = app.Time.GetUtcNow().AddMinutes(5);
@@ -873,7 +872,9 @@ public class PcLockEndpointTests
 
         Assert.Equal(HttpStatusCode.NoContent, (await UnlockAsync(admin, pc.Id)).StatusCode);
 
-        Assert.Equal(expiresAt, (await StoredSessionAsync(app, sessionId)).ExpiresAtUtc);
+        // 10 minutes minus the 5 the pause appears to have been running: never more than was left.
+        var stored = await StoredSessionAsync(app, sessionId);
+        Assert.Equal(app.Time.GetUtcNow().AddMinutes(5).ToUnixTimeMilliseconds(), stored.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
     }
 
     [Fact]

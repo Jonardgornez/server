@@ -167,12 +167,12 @@ public class SessionLifecycleTests
     }
 
     [Fact]
-    public void ExpiryAfterResume_NeverMovesEarlier_WhenTheClockMovedBack()
+    public void ExpiryAfterResume_GivesExactlyTheTimeLeft_WhenTheClockMovedBack()
     {
         var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
         var session = new PcSession { ExpiresAtUtc = now.AddMinutes(30), PausedAtUtc = now.AddMinutes(5) };
 
-        Assert.Equal(now.AddMinutes(30), SessionLifecycle.ExpiryAfterResume(session, now));
+        Assert.Equal(now.AddMinutes(25), SessionLifecycle.ExpiryAfterResume(session, now));
     }
 
     [Fact]
