@@ -109,7 +109,7 @@ public class PcEndpointTests
 
         var entry = (await JsonOf(response))[0];
         Assert.Equal(
-            new[] { "id", "ipAddress", "isOnline", "lastSeenAt", "name", "registeredAt", "session" },
+            new[] { "id", "ipAddress", "isLocked", "isOnline", "lastSeenAt", "name", "registeredAt", "session" },
             entry.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal).ToArray());
         Assert.Equal(id, entry.GetProperty("id").GetInt32());
         Assert.Equal("PC-07", entry.GetProperty("name").GetString());
@@ -120,6 +120,25 @@ public class PcEndpointTests
         var text = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain("token", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("hash", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task List_ShowsIsLocked_ForAnOfflineLockedPcToo()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        await AddAsync(app, "PC-01", seenAgo: TimeSpan.FromMinutes(5));
+        await AddAsync(app, "PC-02");
+        var now = app.Time.GetUtcNow();
+        await app.WithDbAsync(db => db.Pcs
+            .Where(p => p.Name == "PC-01")
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LockedAtUtc, now)));
+
+        var entries = await JsonOf(await client.GetAsync("/api/pcs"));
+
+        Assert.True(entries[0].GetProperty("isLocked").GetBoolean());
+        Assert.False(entries[0].GetProperty("isOnline").GetBoolean());
+        Assert.False(entries[1].GetProperty("isLocked").GetBoolean());
     }
 
     [Fact]

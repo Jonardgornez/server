@@ -597,6 +597,26 @@ public class PcLockEndpointTests
         Assert.Equal(0, await app.WithDbAsync(db => db.PcSessions.CountAsync()));
     }
 
+    [Fact]
+    public async Task Heartbeat_ReportsIsLocked_AndDoesNotClearTheLock()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        Assert.False((await JsonOf(await HeartbeatAsync(client, pc))).GetProperty("isLocked").GetBoolean());
+        await LockDirectlyAsync(app, pc.Id);
+        var lockedAt = (await StoredPcAsync(app, pc.Id)).LockedAtUtc;
+
+        for (var i = 0; i < 3; i++)
+        {
+            app.Time.Advance(TimeSpan.FromSeconds(2));
+            var body = await JsonOf(await HeartbeatAsync(client, pc));
+            Assert.True(body.GetProperty("isLocked").GetBoolean());
+        }
+
+        Assert.Equal(lockedAt, (await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
     private static async Task LockDirectlyAsync(TestApp app, int pcId)
     {
         var now = app.Time.GetUtcNow();

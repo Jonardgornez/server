@@ -12,7 +12,7 @@ namespace LabGuard.Server.Clients;
 public record PcLoginRequest(string? Username, string? Password);
 public record PcLoginResponse(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining);
 public record HeartbeatRequest(int? SessionId);
-public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason);
+public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason, bool IsLocked);
 
 // Login, logout and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -361,7 +361,7 @@ public static partial class ClientEndpoints
         var known = await db.Pcs
             .AsNoTracking()
             .Where(p => p.TokenHash == tokenHash)
-            .Select(p => new { p.Id, p.LastSeenUtc })
+            .Select(p => new { p.Id, p.LastSeenUtc, IsLocked = p.LockedAtUtc != null })
             .FirstOrDefaultAsync(ct);
         if (known is null)
         {
@@ -416,7 +416,8 @@ public static partial class ClientEndpoints
 
         return Results.Ok(new HeartbeatResponse(
             active is null ? null : SessionLifecycle.ToInfo(active, now),
-            endedReason));
+            endedReason,
+            known.IsLocked));
     }
 
     private static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)
