@@ -31,4 +31,17 @@ public class LocalAddressSourceTests
 
         Assert.Null(source.ReadOrNull());
     }
+
+    [Fact]
+    public void ReadOrNull_WhenTheReadFailsAnyOtherWay_IsNull()
+    {
+        ILocalAddressSource source = new ThrowingAddressSource();
+
+        Assert.Null(source.ReadOrNull());
+    }
+
+    private sealed class ThrowingAddressSource : ILocalAddressSource
+    {
+        public IReadOnlyList<IPAddress> Read() => throw new PlatformNotSupportedException();
+    }
 }

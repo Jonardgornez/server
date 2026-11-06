@@ -6,7 +6,7 @@ namespace LabGuard.Server.Network;
 // The addresses this computer has. A small service so tests can replace it with fixed addresses.
 public interface ILocalAddressSource
 {
-    // Throws NetworkInformationException when the adapters can't be read. Use ReadOrNull to handle that.
+    // Can throw when the adapters can't be read, for example if one goes away during the read. Use ReadOrNull to handle that.
     IReadOnlyList<IPAddress> Read();
 }
 
@@ -19,8 +19,9 @@ public static class LocalAddressSourceExtensions
         {
             return source.Read();
         }
-        catch (NetworkInformationException)
+        catch (Exception)
         {
+            // Any failure counts as "can't read": shutdowns are refused, and the PC list must still load.
             return null;
         }
     }
