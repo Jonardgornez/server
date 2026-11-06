@@ -114,7 +114,75 @@ public class SessionLifecycleTests
         Assert.Null(rows[1].EndedAtUtc);
     }
 
-    private static PcSession SessionOn(int pcId, DateTimeOffset startedAt, DateTimeOffset? expiresAt = null, DateTimeOffset? endedAt = null) => new()
+    [Fact]
+    public void HasExpired_IsFalseForAPausedSession_EvenPastItsExpiry()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+        var expired = new PcSession { ExpiresAtUtc = now.AddMinutes(-1) };
+        var paused = new PcSession { ExpiresAtUtc = now.AddMinutes(-1), PausedAtUtc = now.AddMinutes(-5) };
+
+        Assert.True(SessionLifecycle.HasExpired(expired, now));
+        Assert.False(SessionLifecycle.HasExpired(paused, now));
+    }
+
+    [Fact]
+    public void SecondsRemaining_WhilePaused_IsMeasuredFromThePauseMoment()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+        var session = new PcSession { ExpiresAtUtc = now.AddSeconds(90.5), PausedAtUtc = now };
+
+        Assert.Equal(91, SessionLifecycle.SecondsRemaining(session, now));
+        Assert.Equal(91, SessionLifecycle.SecondsRemaining(session, now.AddMinutes(10)));
+    }
+
+    [Fact]
+    public void SecondsRemaining_WhilePausedPastExpiry_IsZeroAndOpenTimeIsNull()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+        var pastExpiry = new PcSession { ExpiresAtUtc = now, PausedAtUtc = now.AddSeconds(5) };
+        var openTime = new PcSession { PausedAtUtc = now };
+
+        Assert.Equal(0, SessionLifecycle.SecondsRemaining(pastExpiry, now));
+        Assert.Null(SessionLifecycle.SecondsRemaining(openTime, now));
+    }
+
+    [Fact]
+    public async Task EndExpiredAsync_LeavesPausedSessionsRunning()
+    {
+        using var app = new TestApp();
+        var now = app.Time.GetUtcNow();
+        await app.WithDbAsync(async db =>
+        {
+            db.PcSessions.Add(SessionOn(1, now.AddMinutes(-5), expiresAt: now.AddMinutes(-1), pausedAt: now.AddMinutes(-2)));
+            await db.SaveChangesAsync();
+            return 0;
+        });
+
+        var affected = await app.WithDbAsync(db => SessionLifecycle.EndExpiredAsync(db, now, CancellationToken.None));
+
+        Assert.Equal(0, affected);
+        Assert.Null((await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync())).EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task EndExpiredForPcAsync_LeavesAPausedSessionRunning()
+    {
+        using var app = new TestApp();
+        var now = app.Time.GetUtcNow();
+        await app.WithDbAsync(async db =>
+        {
+            db.PcSessions.Add(SessionOn(1, now.AddMinutes(-5), expiresAt: now.AddMinutes(-1), pausedAt: now.AddMinutes(-2)));
+            await db.SaveChangesAsync();
+            return 0;
+        });
+
+        var affected = await app.WithDbAsync(db => SessionLifecycle.EndExpiredForPcAsync(db, 1, now, CancellationToken.None));
+
+        Assert.Equal(0, affected);
+        Assert.Null((await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync())).EndedAtUtc);
+    }
+
+    private static PcSession SessionOn(int pcId, DateTimeOffset startedAt, DateTimeOffset? expiresAt = null, DateTimeOffset? endedAt = null, DateTimeOffset? pausedAt = null) => new()
     {
         PcId = pcId,
         PcName = $"PC-{pcId}",
@@ -123,6 +191,7 @@ public class SessionLifecycleTests
         StartedAtUtc = startedAt,
         ExpiresAtUtc = expiresAt,
         EndedAtUtc = endedAt,
+        PausedAtUtc = pausedAt,
         EndReason = endedAt is null ? null : "logout",
     };
 }

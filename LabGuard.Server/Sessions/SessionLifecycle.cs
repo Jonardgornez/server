@@ -49,18 +49,18 @@ public static class SessionLifecycle
                 .SetProperty(s => s.EndedAtUtc, now)
                 .SetProperty(s => s.EndReason, reason), cancellationToken);
 
-    // Closes the PC's session if its time has run out, recording the moment it ran out.
+    // Closes the PC's session if its time has run out, recording the moment it ran out. A paused session is never closed.
     public static Task<int> EndExpiredForPcAsync(AppDbContext db, int pcId, DateTimeOffset now, CancellationToken cancellationToken) =>
         db.PcSessions
-            .Where(s => s.PcId == pcId && s.EndedAtUtc == null && s.ExpiresAtUtc != null && s.ExpiresAtUtc <= now)
+            .Where(s => s.PcId == pcId && s.EndedAtUtc == null && s.PausedAtUtc == null && s.ExpiresAtUtc != null && s.ExpiresAtUtc <= now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(s => s.EndedAtUtc, s => s.ExpiresAtUtc)
                 .SetProperty(s => s.EndReason, TimeExpired), cancellationToken);
 
-    // Closes every PC's expired session, recording when each one ran out.
+    // Closes every PC's expired session, recording when each one ran out. Paused sessions are left alone.
     public static Task<int> EndExpiredAsync(AppDbContext db, DateTimeOffset now, CancellationToken cancellationToken) =>
         db.PcSessions
-            .Where(s => s.EndedAtUtc == null && s.ExpiresAtUtc != null && s.ExpiresAtUtc <= now)
+            .Where(s => s.EndedAtUtc == null && s.PausedAtUtc == null && s.ExpiresAtUtc != null && s.ExpiresAtUtc <= now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(s => s.EndedAtUtc, s => s.ExpiresAtUtc)
                 .SetProperty(s => s.EndReason, TimeExpired), cancellationToken);
@@ -81,8 +81,9 @@ public static class SessionLifecycle
                 .SetProperty(s => s.EndedAtUtc, now)
                 .SetProperty(s => s.EndReason, reason), cancellationToken);
 
+    // A paused session never expires: its time stays frozen until it is resumed.
     public static bool HasExpired(PcSession session, DateTimeOffset now) =>
-        session.ExpiresAtUtc is { } expiresAt && expiresAt <= now;
+        session.PausedAtUtc is null && session.ExpiresAtUtc is { } expiresAt && expiresAt <= now;
 
     public static DefaultTimeResponse ToTime(int? minutes) =>
         minutes is { } value
@@ -90,9 +91,10 @@ public static class SessionLifecycle
             : new DefaultTimeResponse(AccountEndpoints.OpenTimeMode, null);
 
     // Rounded up, so the client never shows 0 while there is still time; null for open time.
+    // A paused session is measured at the moment it was paused, so its count stays the same.
     public static int? SecondsRemaining(PcSession session, DateTimeOffset now) =>
         session.ExpiresAtUtc is { } expiresAt
-            ? (int)Math.Max(0, Math.Ceiling((expiresAt - now).TotalSeconds))
+            ? (int)Math.Max(0, Math.Ceiling((expiresAt - (session.PausedAtUtc ?? now)).TotalSeconds))
             : null;
 
     public static PcSessionInfo ToInfo(PcSession session, DateTimeOffset now) =>
