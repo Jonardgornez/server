@@ -22,6 +22,41 @@ public class ScreenSocketTests
     }
 
     [Fact]
+    public async Task WaitForPeerCloseAsync_ReturnsAsSoonAsThePeerAnswers()
+    {
+        var socket = new FakeWebSocket();
+        var screen = new ScreenSocket(socket, ShortTimeout);
+        var receive = screen.ReceiveAsync(Generous, CancellationToken.None);
+
+        var wait = screen.WaitForPeerCloseAsync(TimeSpan.FromSeconds(30));
+        Assert.False(wait.IsCompleted);
+        socket.EnqueueClose();
+
+        Assert.Null(await receive);
+        await wait.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task WaitForPeerCloseAsync_APeerThatNeverAnswers_EndsAtTheTimeoutWithoutThrowing()
+    {
+        var screen = new ScreenSocket(new FakeWebSocket(), ShortTimeout);
+
+        await screen.WaitForPeerCloseAsync(ShortTimeout).WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task WaitForPeerCloseAsync_AMessageDoesNotCountAsAnAnswer()
+    {
+        var socket = new FakeWebSocket();
+        var screen = new ScreenSocket(socket, ShortTimeout);
+        socket.EnqueueMessage(WebSocketMessageType.Text, "ack"u8.ToArray());
+
+        Assert.NotNull(await screen.ReceiveAsync(Generous, CancellationToken.None));
+
+        Assert.False(screen.WaitForPeerCloseAsync(TimeSpan.FromSeconds(30)).IsCompleted);
+    }
+
+    [Fact]
     public async Task SendAsync_AStalledPeer_FailsWithinTheTimeoutInsteadOfBlocking()
     {
         var socket = new FakeWebSocket { StallSends = true };

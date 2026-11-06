@@ -192,6 +192,11 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, TimeProvider clock)
             await Task.WhenAll(
                 viewer.Browser.CloseAsync(status, reason),
                 pc?.CloseAsync(status, reason) ?? Task.CompletedTask);
+
+            // Cancelling the lifetime resets the connection, so each peer first gets a moment to receive the close code.
+            await Task.WhenAll(
+                viewer.Browser.WaitForPeerCloseAsync(ScreenProtocol.CloseHandshakeTimeout),
+                pc?.WaitForPeerCloseAsync(ScreenProtocol.CloseHandshakeTimeout) ?? Task.CompletedTask);
         }
         finally
         {

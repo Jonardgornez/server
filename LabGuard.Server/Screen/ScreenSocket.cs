@@ -12,6 +12,7 @@ public sealed class ScreenSocket(WebSocket socket, TimeSpan sendTimeout, TimeSpa
 
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly Lifetime _abort = new();
+    private readonly TaskCompletionSource _receiveEnded = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly byte[] _receiveChunk = new byte[ReceiveChunkBytes];
     private readonly TimeSpan _messageStallTimeout = messageStallTimeout ?? ScreenProtocol.MessageStallTimeout;
 
@@ -69,6 +70,20 @@ public sealed class ScreenSocket(WebSocket socket, TimeSpan sendTimeout, TimeSpa
         }
     }
 
+    // Waits, up to the timeout, for the peer to answer a close frame or for the socket to end. Ending the connection before that
+    // resets it, and a reset can discard the close frame still on its way, so the peer would never learn why the socket closed.
+    public async Task WaitForPeerCloseAsync(TimeSpan timeout)
+    {
+        try
+        {
+            await _receiveEnded.Task.WaitAsync(timeout);
+        }
+        catch (TimeoutException)
+        {
+            // The peer didn't answer in time, so the socket is ended anyway.
+        }
+    }
+
     // Stops the socket now, with no close handshake. Used for a connection that was replaced, and to end any receive on it.
     public void Abort()
     {
@@ -80,6 +95,17 @@ public sealed class ScreenSocket(WebSocket socket, TimeSpan sendTimeout, TimeSpa
     // A message over its type's limit is closed with 1009, and a started message that stalls is aborted. Both give null.
     // The limit is checked on every chunk, so an oversized first chunk is refused at once.
     public async Task<ScreenMessage?> ReceiveAsync(MessageLimits limits, CancellationToken cancellationToken)
+    {
+        var message = await ReceiveMessageAsync(limits, cancellationToken);
+        if (message is null)
+        {
+            _receiveEnded.TrySetResult();
+        }
+
+        return message;
+    }
+
+    private async Task<ScreenMessage?> ReceiveMessageAsync(MessageLimits limits, CancellationToken cancellationToken)
     {
         using var linked = _abort.Link(cancellationToken);
         if (linked is null)

@@ -37,6 +37,7 @@ public static class ScreenProtocol
 
     public static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(5);
     public static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
+    public static readonly TimeSpan CloseHandshakeTimeout = TimeSpan.FromSeconds(1);
     // A message that has started must finish within this time. A partial message that goes silent is aborted.
     public static readonly TimeSpan MessageStallTimeout = TimeSpan.FromSeconds(5);
     // A PC may reconnect at most once per window. The PC client backs off at least this long.
