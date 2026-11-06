@@ -9,6 +9,9 @@ public sealed class ScreenViewer : IDisposable
 {
     private readonly Lock _sync = new();
     private readonly Lifetime _lifetime = new();
+
+    // Held around each state change and its send, so states reach the browser in the order they were recorded.
+    public SemaphoreSlim StateGate { get; } = new(1, 1);
     private ScreenSocket? _pc;
     private int _framesInFlight;
     private string? _lastState;

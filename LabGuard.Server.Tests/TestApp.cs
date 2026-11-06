@@ -129,6 +129,8 @@ public sealed class TestApp : WebApplicationFactory<Program>
                 ["Seed:AdminUsername"] = Username,
                 ["Seed:AdminPassword"] = Password,
                 ["Seed:SampleLoginRequests"] = _seedSampleLoginRequests ? "true" : "false",
+                ["Screen:AllowedOrigins:0"] = "http://localhost:5173",
+                ["Screen:AllowedOrigins:1"] = "http://localhost:4173",
             }));
         builder.ConfigureLogging(logging => logging.AddProvider(Logs));
         builder.ConfigureTestServices(services =>

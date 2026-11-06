@@ -43,10 +43,10 @@ public sealed class ScreenViewMonitor(
     {
         var now = clock.GetUtcNow();
         var viewers = hub.Snapshot();
-        foreach (var viewer in viewers.Where(viewer => now >= viewer.SessionDeadline))
-        {
-            await hub.CloseAsync(viewer, ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
-        }
+        // Closed concurrently, so one slow close doesn't hold back enforcement on the others.
+        await Task.WhenAll(viewers
+            .Where(viewer => now >= viewer.SessionDeadline)
+            .Select(viewer => hub.CloseAsync(viewer, ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason)));
 
         var watched = viewers.Where(viewer => now < viewer.SessionDeadline).ToArray();
         if (watched.Length == 0)
@@ -63,13 +63,10 @@ public sealed class ScreenViewMonitor(
             .Select(p => new { p.Id, p.LastSeenUtc })
             .ToDictionaryAsync(p => p.Id, p => p.LastSeenUtc, cancellationToken);
 
-        foreach (var viewer in watched)
-        {
-            // A PC that is missing was removed, and one that isn't online is offline. Both use the same close code.
-            if (!lastSeenByPc.TryGetValue(viewer.PcId, out var lastSeen) || !PcEndpoints.IsOnline(lastSeen, now))
-            {
-                await hub.CloseAsync(viewer, ScreenProtocol.PcOfflineCloseStatus, "The PC is offline or was removed.");
-            }
-        }
+        // A PC that is missing was removed, and one that isn't online is offline. Both use the same close code.
+        var offline = watched
+            .Where(viewer => !lastSeenByPc.TryGetValue(viewer.PcId, out var lastSeen) || !PcEndpoints.IsOnline(lastSeen, now));
+        await Task.WhenAll(offline.Select(viewer =>
+            hub.CloseAsync(viewer, ScreenProtocol.PcOfflineCloseStatus, "The PC is offline or was removed.")));
     }
 }

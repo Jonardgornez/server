@@ -187,11 +187,17 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, TimeProvider clock)
             }
         }
 
-        await Task.WhenAll(
-            viewer.Browser.CloseAsync(status, reason),
-            pc?.CloseAsync(status, reason) ?? Task.CompletedTask);
-        viewer.CancelLifetime();
-        await audit.EndAsync(viewer.AuditId, clock.GetUtcNow());
+        try
+        {
+            await Task.WhenAll(
+                viewer.Browser.CloseAsync(status, reason),
+                pc?.CloseAsync(status, reason) ?? Task.CompletedTask);
+        }
+        finally
+        {
+            viewer.CancelLifetime();
+            await audit.EndAsync(viewer.AuditId, clock.GetUtcNow());
+        }
     }
 
     // Ends every view. Each logout and password change calls this, and it bumps the epoch so a view still being opened is refused.
@@ -210,14 +216,22 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, TimeProvider clock)
     // Records the state if it changed, and sends it. Only a change is sent, so repeated states don't reach the browser.
     private async Task SetStateAsync(ScreenViewer viewer, string state, ScreenSocket? requiredPc)
     {
-        if (!viewer.TrySetState(state, requiredPc))
+        await viewer.StateGate.WaitAsync();
+        try
         {
-            return;
-        }
+            if (!viewer.TrySetState(state, requiredPc))
+            {
+                return;
+            }
 
-        if (!await viewer.Browser.SendAsync(ScreenProtocol.StateMessage(state), WebSocketMessageType.Text))
+            if (!await viewer.Browser.SendAsync(ScreenProtocol.StateMessage(state), WebSocketMessageType.Text))
+            {
+                await CloseStalledAsync(viewer);
+            }
+        }
+        finally
         {
-            await CloseStalledAsync(viewer);
+            viewer.StateGate.Release();
         }
     }
 

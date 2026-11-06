@@ -234,6 +234,39 @@ public class ScreenViewEndpointTests
     }
 
     [Fact]
+    public async Task IsSessionCurrent_TrueForTheVersionTheCookieCarries()
+    {
+        using var app = new TestApp();
+        var (adminId, version) = await app.WithDbAsync(async db =>
+        {
+            var admin = await db.AdminAccounts.AsNoTracking().SingleAsync();
+            return (admin.Id, admin.SessionVersion);
+        });
+
+        var current = await app.WithDbAsync(db => ScreenViewEndpoints.IsSessionCurrentAsync(db, adminId, version, CancellationToken.None));
+
+        Assert.True(current);
+    }
+
+    [Fact]
+    public async Task IsSessionCurrent_FalseOnceThePasswordHasChanged_AndForAnUnknownAdmin()
+    {
+        using var app = new TestApp();
+        var (adminId, version) = await app.WithDbAsync(async db =>
+        {
+            var admin = await db.AdminAccounts.AsNoTracking().SingleAsync();
+            return (admin.Id, admin.SessionVersion);
+        });
+        await app.WithDbAsync(db => db.AdminAccounts.Where(a => a.Id == adminId).ExecuteUpdateAsync(s => s.SetProperty(a => a.SessionVersion, version + 1)));
+
+        var changed = await app.WithDbAsync(db => ScreenViewEndpoints.IsSessionCurrentAsync(db, adminId, version, CancellationToken.None));
+        var unknown = await app.WithDbAsync(db => ScreenViewEndpoints.IsSessionCurrentAsync(db, 999, version, CancellationToken.None));
+
+        Assert.False(changed);
+        Assert.False(unknown);
+    }
+
+    [Fact]
     public async Task Live_WithoutAMode_IsNotified()
     {
         using var app = new TestApp();

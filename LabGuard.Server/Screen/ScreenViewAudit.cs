@@ -34,7 +34,8 @@ public sealed class ScreenViewAudit(IServiceScopeFactory scopes, ILogger<ScreenV
         {
             try
             {
-                await SetEndedAsync(id, endedAt);
+                // Sqlite doesn't stop a running statement when it is cancelled, so the wait itself is bounded too.
+                await SetEndedAsync(id, endedAt).WaitAsync(EndTimeout);
                 return;
             }
             catch (Exception exception)

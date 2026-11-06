@@ -191,6 +191,7 @@ public sealed class LiveViewSocketTests : IAsyncLifetime
                     ["Seed:AdminUsername"] = TestApp.Username,
                     ["Seed:AdminPassword"] = TestApp.Password,
                     ["Seed:SampleLoginRequests"] = "false",
+                    ["Screen:AllowedOrigins:0"] = "http://localhost:5173",
                 }));
         }
     }

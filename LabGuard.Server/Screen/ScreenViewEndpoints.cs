@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Net.WebSockets;
+using System.Security.Claims;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
@@ -18,7 +20,7 @@ public static class ScreenViewEndpoints
         services.AddSingleton<ScreenViewAudit>();
         services.AddSingleton(provider => new ScreenOrigins(
             provider.GetRequiredService<ServerPorts>(),
-            provider.GetRequiredService<IHostEnvironment>().IsDevelopment()));
+            provider.GetRequiredService<IConfiguration>()));
         services.AddSingleton<ScreenViewMonitor>();
         services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<ScreenViewMonitor>());
         return services;
@@ -80,7 +82,9 @@ public static class ScreenViewEndpoints
         }
 
         var session = await http.AuthenticateAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-        if (AuthServiceExtensions.SessionDeadlineUtc(session.Principal, session.Properties) is not { } sessionDeadline)
+        if (AuthServiceExtensions.SessionDeadlineUtc(session.Principal, session.Properties) is not { } sessionDeadline
+            || session.Principal is not { } principal
+            || !TryReadSessionIdentity(principal, out var adminId, out var sessionVersion))
         {
             return AuthEndpoints.SignInRequired();
         }
@@ -109,6 +113,13 @@ public static class ScreenViewEndpoints
 
             try
             {
+                // The middleware checked the session before the epoch was read, so a password change may have landed in between.
+                // This check runs after the viewer is published: a change after it finds the viewer and closes it.
+                if (!await IsSessionCurrentAsync(db, adminId, sessionVersion, ct))
+                {
+                    await hub.CloseAsync(viewer, ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
+                }
+
                 await ReceiveBrowserMessagesAsync(hub, viewer, ct);
             }
             finally
@@ -123,6 +134,21 @@ public static class ScreenViewEndpoints
         }
 
         return Results.Empty;
+    }
+
+    // True while the administrator's account still has the session version the cookie carries.
+    public static async Task<bool> IsSessionCurrentAsync(AppDbContext db, int adminId, int sessionVersion, CancellationToken cancellationToken) =>
+        await db.AdminAccounts
+            .AsNoTracking()
+            .Where(a => a.Id == adminId)
+            .Select(a => (int?)a.SessionVersion)
+            .FirstOrDefaultAsync(cancellationToken) == sessionVersion;
+
+    private static bool TryReadSessionIdentity(ClaimsPrincipal principal, out int adminId, out int sessionVersion)
+    {
+        var hasAdminId = int.TryParse(principal.FindFirstValue(ClaimTypes.NameIdentifier), CultureInfo.InvariantCulture, out adminId);
+        var hasVersion = int.TryParse(principal.FindFirstValue(AuthServiceExtensions.SessionVersionClaim), CultureInfo.InvariantCulture, out sessionVersion);
+        return hasAdminId && hasVersion;
     }
 
     // The browser's only message is "ack". Anything else is ignored, and an oversized message closes the socket.

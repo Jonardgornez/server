@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using LabGuard.Server.Screen;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Tests;
 
@@ -357,6 +358,23 @@ public class ClientScreenEndpointTests
 
         var received = await LiveViewClient.ReceiveAsync(live.Browser);
         Assert.Equal("fresh", LiveViewClient.LabelOf(received.Payload, 5));
+        await CloseViewAndAwaitAuditAsync(app, live.Browser);
+    }
+
+    // Ends the view and waits until its audit row is written, so nothing is still writing when the test host is torn down.
+    private static async Task CloseViewAndAwaitAuditAsync(TestApp app, WebSocket browser)
+    {
+        await browser.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
+        await LiveViewClient.ReceiveAsync(browser);
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            if (await app.WithDbAsync(db => db.ScreenViewEvents.CountAsync(e => e.EndedAtUtc == null)) == 0)
+            {
+                return;
+            }
+
+            await Task.Delay(100);
+        }
     }
 
     [Fact]
