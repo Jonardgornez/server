@@ -152,12 +152,14 @@ public sealed class LiveViewSocketTests : IAsyncLifetime
         first.Abort();
 
         Assert.Equal("{\"state\":\"waiting\"}", await LiveViewClient.ReceiveStateAsync(browser));
+        // Kestrel runs on the system clock, so the reconnect waits out the one-second attach cooldown.
+        await Task.Delay(TimeSpan.FromSeconds(1.1));
         using var second = NewPcSocket(token);
         await second.ConnectAsync(PcStreamUri(_clientPort, viewId), CancellationToken.None);
         Assert.Equal("{\"state\":\"live\"}", await LiveViewClient.ReceiveStateAsync(browser));
         await LiveViewClient.SendAsync(second, LiveViewClient.Frame("after-reconnect"));
         var received = await LiveViewClient.ReceiveAsync(browser);
-        Assert.Equal("after-reconnect", Encoding.ASCII.GetString(received.Payload, 3, 15));
+        Assert.Equal("after-reconnect", LiveViewClient.LabelOf(received.Payload, 15));
     }
 
     [Fact]

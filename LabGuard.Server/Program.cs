@@ -10,6 +10,7 @@ using LabGuard.Server.Settings;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using System.Net.WebSockets;
 using System.Security.Authentication;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -70,10 +71,14 @@ using (var scope = app.Services.CreateScope())
         app.Environment,
         services.GetRequiredService<TimeProvider>(),
         services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(LoginRequestSeeder)));
+    // No live view survives a restart, so any view row still open from a crash ends now.
+    await services.GetRequiredService<ScreenViewAudit>().CloseOrphanedAsync(
+        services.GetRequiredService<TimeProvider>().GetUtcNow(),
+        CancellationToken.None);
 }
 
 app.UseMiddleware<ChannelGuard>();
-app.UseWebSockets();
+app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = ScreenProtocol.KeepAliveInterval });
 app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();

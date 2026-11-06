@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
+using LabGuard.Server.Network;
 using LabGuard.Server.Pcs;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -15,6 +16,9 @@ public static class ScreenViewEndpoints
     {
         services.AddSingleton<ScreenStreamHub>();
         services.AddSingleton<ScreenViewAudit>();
+        services.AddSingleton(provider => new ScreenOrigins(
+            provider.GetRequiredService<ServerPorts>(),
+            provider.GetRequiredService<IHostEnvironment>().IsDevelopment()));
         services.AddSingleton<ScreenViewMonitor>();
         services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<ScreenViewMonitor>());
         return services;
@@ -36,15 +40,19 @@ public static class ScreenViewEndpoints
         AppDbContext db,
         TimeProvider clock,
         ScreenStreamHub hub,
-        ScreenViewAudit audit)
+        ScreenViewAudit audit,
+        ScreenOrigins origins)
     {
+        // Read before the session is checked. A logout or password change after this point refuses the open.
+        var epoch = hub.Epoch;
+
         if (!http.WebSockets.IsWebSocketRequest)
         {
             return AuthEndpoints.BadRequest("This address needs a WebSocket connection.");
         }
 
         // Stops another site from opening this view through the administrator's cookie (cross-site WebSocket hijacking).
-        if (!ScreenProtocol.IsLoopbackOrigin(http.Request.Headers.Origin.ToString()))
+        if (!origins.IsAllowed(http.Request.Headers.Origin.ToString()))
         {
             return Results.Json(new ErrorResponse("The live view can only be opened from this server's admin page."), statusCode: StatusCodes.Status403Forbidden);
         }
@@ -89,14 +97,29 @@ public static class ScreenViewEndpoints
             throw;
         }
 
-        var viewer = await hub.OpenAsync(id, viewMode, sessionDeadline, auditId, new ScreenSocket(socket, ScreenProtocol.SendTimeout));
+        var browser = new ScreenSocket(socket, ScreenProtocol.SendTimeout);
         try
         {
-            await ReceiveBrowserMessagesAsync(hub, viewer, ct);
+            var viewer = await hub.OpenAsync(id, viewMode, sessionDeadline, auditId, browser, epoch);
+            if (viewer is null)
+            {
+                await browser.CloseAsync(ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
+                return Results.Empty;
+            }
+
+            try
+            {
+                await ReceiveBrowserMessagesAsync(hub, viewer, ct);
+            }
+            finally
+            {
+                await hub.CloseAsync(viewer, WebSocketCloseStatus.NormalClosure, "The viewer closed.");
+                viewer.Dispose();
+            }
         }
         finally
         {
-            await hub.CloseAsync(viewer, WebSocketCloseStatus.NormalClosure, "The viewer closed.");
+            browser.Dispose();
         }
 
         return Results.Empty;
@@ -105,8 +128,13 @@ public static class ScreenViewEndpoints
     // The browser's only message is "ack". Anything else is ignored, and an oversized message closes the socket.
     private static async Task ReceiveBrowserMessagesAsync(ScreenStreamHub hub, ScreenViewer viewer, CancellationToken cancellationToken)
     {
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, viewer.Lifetime);
-        while (await viewer.Browser.ReceiveAsync(ScreenProtocol.MaxBrowserMessageBytes, linked.Token) is { } message)
+        using var linked = viewer.LinkLifetime(cancellationToken);
+        if (linked is null)
+        {
+            return;
+        }
+
+        while (await viewer.Browser.ReceiveAsync(ScreenProtocol.BrowserLimits, linked.Token) is { } message)
         {
             if (ScreenProtocol.IsBrowserAck(message.Type, message.Payload.Span))
             {

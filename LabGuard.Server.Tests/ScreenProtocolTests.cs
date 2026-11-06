@@ -30,48 +30,45 @@ public class ScreenProtocolTests
         Assert.Null(ScreenProtocol.ParseMode(text));
     }
 
-    [Theory]
-    [InlineData("http://localhost:5173")]
-    [InlineData("http://localhost")]
-    [InlineData("https://LOCALHOST:8443")]
-    [InlineData("http://127.0.0.1:5000")]
-    [InlineData("http://[::1]:5173")]
-    public void IsLoopbackOrigin_AcceptsLoopbackHostsOnAnyPort(string origin)
+    [Fact]
+    public void IsRelayableFrame_AcceptsAJpegWithAUsableSize()
     {
-        Assert.True(ScreenProtocol.IsLoopbackOrigin(origin));
+        Assert.True(ScreenProtocol.IsRelayableFrame(LiveViewClient.Frame("ok")));
+        Assert.True(ScreenProtocol.IsRelayableFrame(LiveViewClient.Frame("ok", width: 8192, height: 1953)));
     }
 
     [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData("null")]
-    [InlineData("https://evil.example")]
-    [InlineData("http://localhost.evil.example")]
-    [InlineData("http://localhost@evil.example")]
-    [InlineData("http://127.0.0.2:5173")]
-    [InlineData("http://192.168.1.5:5000")]
-    [InlineData("ws://evil.example")]
-    [InlineData("file://localhost/etc")]
-    public void IsLoopbackOrigin_RefusesEverythingElse(string? origin)
+    [InlineData(8193, 100)]
+    [InlineData(100, 8193)]
+    [InlineData(8192, 8192)]
+    [InlineData(1, 0)]
+    public void IsRelayableFrame_RefusesASideOverTheLimit_OrAnEmptySide(int width, int height)
     {
-        Assert.False(ScreenProtocol.IsLoopbackOrigin(origin));
+        // 8192 by 8192 is 64 megapixels, which is over the pixel limit even though each side is allowed.
+        Assert.False(ScreenProtocol.IsRelayableFrame(LiveViewClient.Frame("big", width: width, height: height)));
     }
 
     [Fact]
-    public void IsJpeg_NeedsTheStartOfMarker()
+    public void IsRelayableFrame_RefusesAFrameOver16Megapixels()
     {
-        Assert.True(ScreenProtocol.IsJpeg(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0 }));
-        Assert.False(ScreenProtocol.IsJpeg(new byte[] { 0xFF, 0xD8, 0x00, 0xE0 }));
-        Assert.False(ScreenProtocol.IsJpeg(new byte[] { 0x89, 0x50, 0x4E, 0x47 }));
-        Assert.False(ScreenProtocol.IsJpeg(new byte[] { 0xFF, 0xD8 }));
-        Assert.False(ScreenProtocol.IsJpeg([]));
+        Assert.False(ScreenProtocol.IsRelayableFrame(LiveViewClient.Frame("big", width: 5000, height: 4000)));
+        Assert.True(ScreenProtocol.IsRelayableFrame(LiveViewClient.Frame("edge", width: 4000, height: 4000)));
     }
 
     [Fact]
-    public void ClassifyPcMessage_RelaysJpegFramesOnly()
+    public void IsRelayableFrame_RefusesBytesWithoutAJpegHeader()
     {
-        Assert.Equal(PcMessageKind.Frame, ScreenProtocol.ClassifyPcMessage(WebSocketMessageType.Binary, new byte[] { 0xFF, 0xD8, 0xFF }));
+        Assert.False(ScreenProtocol.IsRelayableFrame(new byte[] { 0xFF, 0xD8, 0xFF }));
+        Assert.False(ScreenProtocol.IsRelayableFrame("NOT-A-FRAME"u8));
+        Assert.False(ScreenProtocol.IsRelayableFrame([]));
+    }
+
+    [Fact]
+    public void ClassifyPcMessage_RelaysRelayableFramesOnly()
+    {
+        Assert.Equal(PcMessageKind.Frame, ScreenProtocol.ClassifyPcMessage(WebSocketMessageType.Binary, LiveViewClient.Frame("ok")));
         Assert.Equal(PcMessageKind.Ignored, ScreenProtocol.ClassifyPcMessage(WebSocketMessageType.Binary, new byte[] { 0x00, 0xD8, 0xFF }));
+        Assert.Equal(PcMessageKind.Ignored, ScreenProtocol.ClassifyPcMessage(WebSocketMessageType.Binary, new byte[] { 0xFF, 0xD8, 0xFF }));
         Assert.Equal(PcMessageKind.Ignored, ScreenProtocol.ClassifyPcMessage(WebSocketMessageType.Binary, []));
     }
 
@@ -87,7 +84,7 @@ public class ScreenProtocolTests
     [Fact]
     public void ClassifyPcMessage_IgnoresTextThatLooksLikeAFrame()
     {
-        Assert.Equal(PcMessageKind.Ignored, ScreenProtocol.ClassifyPcMessage(WebSocketMessageType.Text, new byte[] { 0xFF, 0xD8, 0xFF }));
+        Assert.Equal(PcMessageKind.Ignored, ScreenProtocol.ClassifyPcMessage(WebSocketMessageType.Text, LiveViewClient.Frame("ok")));
     }
 
     [Theory]
@@ -107,6 +104,13 @@ public class ScreenProtocolTests
     }
 
     [Fact]
+    public void Limits_MatchTheContract()
+    {
+        Assert.Equal(new MessageLimits(16, 2 * 1024 * 1024), ScreenProtocol.PcLimits);
+        Assert.Equal(new MessageLimits(256, 256), ScreenProtocol.BrowserLimits);
+    }
+
+    [Fact]
     public void CloseCodes_MatchTheContract()
     {
         Assert.Equal(4001, (int)ScreenProtocol.ReplacedCloseStatus);
@@ -117,8 +121,14 @@ public class ScreenProtocolTests
     [Fact]
     public void StateMessages_AreTheDocumentedJson()
     {
-        Assert.Equal("{\"state\":\"waiting\"}", Encoding.UTF8.GetString(ScreenProtocol.WaitingMessage));
-        Assert.Equal("{\"state\":\"live\"}", Encoding.UTF8.GetString(ScreenProtocol.LiveMessage));
-        Assert.Equal("{\"state\":\"paused\"}", Encoding.UTF8.GetString(ScreenProtocol.PausedMessage));
+        Assert.Equal("{\"state\":\"waiting\"}", Encoding.UTF8.GetString(ScreenProtocol.StateMessage(ScreenProtocol.WaitingState).Span));
+        Assert.Equal("{\"state\":\"live\"}", Encoding.UTF8.GetString(ScreenProtocol.StateMessage(ScreenProtocol.LiveState).Span));
+        Assert.Equal("{\"state\":\"paused\"}", Encoding.UTF8.GetString(ScreenProtocol.StateMessage(ScreenProtocol.PausedState).Span));
+    }
+
+    [Fact]
+    public void StateMessage_RefusesAnUnknownState()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => ScreenProtocol.StateMessage("streaming"));
     }
 }

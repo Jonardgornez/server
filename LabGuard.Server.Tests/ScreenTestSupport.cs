@@ -14,16 +14,21 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace LabGuard.Server.Tests;
 
-/// <summary>A WebSocket that records what is sent and replays what a test queues. Sends can be made to stall.</summary>
+/// <summary>A WebSocket that records what is sent and replays what a test queues. Sends can be made to stall, and receives can be fragmented.</summary>
 internal sealed class FakeWebSocket : WebSocket
 {
-    private readonly Channel<(WebSocketMessageType Type, byte[] Payload)?> _incoming = Channel.CreateUnbounded<(WebSocketMessageType Type, byte[] Payload)?>();
+    private readonly record struct Incoming(WebSocketMessageType Type, byte[] Payload, bool EndOfMessage);
+
+    private readonly Channel<Incoming?> _incoming = Channel.CreateUnbounded<Incoming?>();
     private readonly List<(WebSocketMessageType Type, byte[] Payload)> _sent = [];
     private readonly object _sync = new();
-    private (byte[] Payload, int Offset, WebSocketMessageType Type)? _partial;
+    private readonly CancellationTokenSource _aborted = new();
+    private (Incoming Message, int Offset)? _partial;
     private WebSocketState _state = WebSocketState.Open;
 
     public bool StallSends { get; set; }
+
+    public bool Aborted { get; private set; }
 
     public IReadOnlyList<(WebSocketMessageType Type, byte[] Payload)> Sent
     {
@@ -38,7 +43,10 @@ internal sealed class FakeWebSocket : WebSocket
 
     public (WebSocketCloseStatus Status, string? Reason)? CloseSent { get; private set; }
 
-    public void EnqueueMessage(WebSocketMessageType type, byte[] payload) => _incoming.Writer.TryWrite((type, payload));
+    public void EnqueueMessage(WebSocketMessageType type, byte[] payload) => _incoming.Writer.TryWrite(new Incoming(type, payload, true));
+
+    // A piece of a message that is not its last. The next queued piece completes it, and nothing more means the peer has stalled.
+    public void EnqueueFragment(WebSocketMessageType type, byte[] payload) => _incoming.Writer.TryWrite(new Incoming(type, payload, false));
 
     public void EnqueueClose() => _incoming.Writer.TryWrite(null);
 
@@ -47,7 +55,16 @@ internal sealed class FakeWebSocket : WebSocket
     public override string? SubProtocol => null;
     public override WebSocketState State => _state;
 
-    public override void Abort() => _state = WebSocketState.Aborted;
+    public override void Abort()
+    {
+        lock (_sync)
+        {
+            Aborted = true;
+            _state = WebSocketState.Aborted;
+        }
+
+        _aborted.Cancel();
+    }
 
     public override Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
         CloseOutputAsync(closeStatus, statusDescription, cancellationToken);
@@ -65,23 +82,24 @@ internal sealed class FakeWebSocket : WebSocket
 
     public override async Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _aborted.Token);
         if (_partial is null)
         {
-            var next = await _incoming.Reader.ReadAsync(cancellationToken);
+            var next = await _incoming.Reader.ReadAsync(linked.Token);
             if (next is not { } message)
             {
                 return new WebSocketReceiveResult(0, WebSocketMessageType.Close, true, WebSocketCloseStatus.NormalClosure, "");
             }
 
-            _partial = (message.Payload, 0, message.Type);
+            _partial = (message, 0);
         }
 
-        var (payload, offset, type) = _partial.Value;
-        var count = Math.Min(buffer.Count, payload.Length - offset);
-        Array.Copy(payload, offset, buffer.Array!, buffer.Offset, count);
-        var endOfMessage = offset + count == payload.Length;
-        _partial = endOfMessage ? null : (payload, offset + count, type);
-        return new WebSocketReceiveResult(count, type, endOfMessage);
+        var (item, offset) = _partial.Value;
+        var count = Math.Min(buffer.Count, item.Payload.Length - offset);
+        Array.Copy(item.Payload, offset, buffer.Array!, buffer.Offset, count);
+        var finished = offset + count == item.Payload.Length;
+        _partial = finished ? null : (item, offset + count);
+        return new WebSocketReceiveResult(count, item.Type, item.EndOfMessage && finished);
     }
 
     public override async Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken)
@@ -205,17 +223,29 @@ internal static class LiveViewClient
     public static Task SendTextAsync(WebSocket socket, string text) =>
         SendAsync(socket, Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text);
 
-    /// <summary>A JPEG-looking frame: starts with FF D8 FF, then a label that tells the frames apart, then random bytes.</summary>
-    public static byte[] Frame(string label, int size = 64)
+    /// <summary>Bytes before a test frame's label: a baseline JPEG frame header that gives the size, 640 by 480 unless told otherwise.</summary>
+    public const int FrameHeaderLength = 15;
+
+    /// <summary>
+    /// A JPEG-looking frame: a SOF0 header with the given size, then a label that tells frames apart, then random bytes.
+    /// </summary>
+    public static byte[] Frame(string label, int size = 64, int width = 640, int height = 480)
     {
-        var frame = new byte[Math.Max(size, 3 + label.Length)];
-        frame[0] = 0xFF;
-        frame[1] = 0xD8;
-        frame[2] = 0xFF;
-        Encoding.ASCII.GetBytes(label).CopyTo(frame, 3);
-        RandomNumberGenerator.Fill(frame.AsSpan(3 + label.Length));
+        var frame = new byte[Math.Max(size, FrameHeaderLength + label.Length)];
+        byte[] header =
+        [
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08,
+            (byte)(height >> 8), (byte)height, (byte)(width >> 8), (byte)width,
+            0x01, 0x01, 0x11, 0x00,
+        ];
+        header.CopyTo(frame, 0);
+        Encoding.ASCII.GetBytes(label).CopyTo(frame, FrameHeaderLength);
+        RandomNumberGenerator.Fill(frame.AsSpan(FrameHeaderLength + label.Length));
         return frame;
     }
+
+    /// <summary>The label a test frame was built with, read back from a relayed frame.</summary>
+    public static string LabelOf(byte[] frame, int length) => Encoding.ASCII.GetString(frame, FrameHeaderLength, length);
 
     public static async Task<(int Id, string Token)> AddPcAsync(TestApp app, string name = "PC-01")
     {

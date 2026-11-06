@@ -26,27 +26,46 @@ public class ScreenViewerTests
     }
 
     [Fact]
-    public void TryTakeFrameCredit_AllowsTheWindowAndNoMore()
+    public void TryTakeFrameCredit_OnlyForTheAttachedPc_AndOnlyTwoAtATime()
     {
         var viewer = NewViewer();
+        var attached = NewSocket();
+        var stranger = NewSocket();
+        viewer.TryAttachPc(attached, out _);
 
-        Assert.True(viewer.TryTakeFrameCredit());
-        Assert.True(viewer.TryTakeFrameCredit());
-        Assert.False(viewer.TryTakeFrameCredit());
+        Assert.False(viewer.TryTakeFrameCredit(stranger));
+        Assert.True(viewer.TryTakeFrameCredit(attached));
+        Assert.True(viewer.TryTakeFrameCredit(attached));
+        Assert.False(viewer.TryTakeFrameCredit(attached));
     }
 
     [Fact]
-    public void ReturnFrameCredit_FreesOneSlot_AndNeverGoesBelowZero()
+    public void TryReturnFrameCredit_OnlyWhenOneIsOutstanding()
     {
         var viewer = NewViewer();
-        viewer.ReturnFrameCredit();
-        viewer.TryTakeFrameCredit();
-        viewer.TryTakeFrameCredit();
+        var pc = NewSocket();
+        viewer.TryAttachPc(pc, out _);
 
-        viewer.ReturnFrameCredit();
+        Assert.False(viewer.TryReturnFrameCredit());
+        viewer.TryTakeFrameCredit(pc);
+        Assert.True(viewer.TryReturnFrameCredit());
+        Assert.False(viewer.TryReturnFrameCredit());
+    }
 
-        Assert.True(viewer.TryTakeFrameCredit());
-        Assert.False(viewer.TryTakeFrameCredit());
+    [Fact]
+    public void TryAttachPc_StartsTheCreditWindowAgain()
+    {
+        var viewer = NewViewer();
+        var first = NewSocket();
+        var second = NewSocket();
+        viewer.TryAttachPc(first, out _);
+        viewer.TryTakeFrameCredit(first);
+        viewer.TryTakeFrameCredit(first);
+
+        viewer.TryAttachPc(second, out _);
+
+        Assert.True(viewer.TryTakeFrameCredit(second));
+        Assert.True(viewer.TryTakeFrameCredit(second));
     }
 
     [Fact]
@@ -60,7 +79,20 @@ public class ScreenViewerTests
         Assert.Null(replacedByFirst);
         Assert.True(viewer.TryAttachPc(second, out var replacedBySecond));
         Assert.Same(first, replacedBySecond);
-        Assert.Same(second, viewer.CurrentPc);
+        Assert.True(viewer.IsCurrentPc(second));
+        Assert.False(viewer.IsCurrentPc(first));
+    }
+
+    [Fact]
+    public void ReplacedSocket_CannotTakeCreditsOrChangeState()
+    {
+        var viewer = NewViewer();
+        var replaced = NewSocket();
+        viewer.TryAttachPc(replaced, out _);
+        viewer.TryAttachPc(NewSocket(), out _);
+
+        Assert.False(viewer.TryTakeFrameCredit(replaced));
+        Assert.False(viewer.TrySetState(ScreenProtocol.PausedState, replaced));
     }
 
     [Fact]
@@ -78,6 +110,29 @@ public class ScreenViewerTests
     }
 
     [Fact]
+    public void TrySetState_OnlyWhenTheStateChanges()
+    {
+        var viewer = NewViewer();
+
+        Assert.True(viewer.TrySetState(ScreenProtocol.WaitingState));
+        Assert.False(viewer.TrySetState(ScreenProtocol.WaitingState));
+        Assert.True(viewer.TrySetState(ScreenProtocol.LiveState));
+        Assert.True(viewer.TrySetState(ScreenProtocol.PausedState));
+        Assert.False(viewer.TrySetState(ScreenProtocol.PausedState));
+    }
+
+    [Fact]
+    public void TrySetState_NamedPcMustBeTheAttachedOne()
+    {
+        var viewer = NewViewer();
+        var pc = NewSocket();
+
+        Assert.False(viewer.TrySetState(ScreenProtocol.PausedState, pc));
+        viewer.TryAttachPc(pc, out _);
+        Assert.True(viewer.TrySetState(ScreenProtocol.PausedState, pc));
+    }
+
+    [Fact]
     public void TryClose_IsOnlyTrueOnce_AndHandsBackThePcSocket()
     {
         var viewer = NewViewer();
@@ -91,24 +146,37 @@ public class ScreenViewerTests
     }
 
     [Fact]
-    public void AfterClose_NothingCanAttachOrTakeCredit()
+    public void AfterClose_NothingCanAttachTakeCreditOrChangeState()
     {
         var viewer = NewViewer();
         viewer.TryClose(out _);
 
         Assert.False(viewer.TryAttachPc(NewSocket(), out _));
-        Assert.False(viewer.TryTakeFrameCredit());
+        Assert.False(viewer.TrySetState(ScreenProtocol.LiveState));
         Assert.Null(viewer.CurrentPc);
     }
 
     [Fact]
-    public void CancelLifetime_CancelsTheTokenThatStopsTheRelay()
+    public void CancelLifetime_CancelsEverySourceLinkedToIt()
     {
         var viewer = NewViewer();
-        Assert.False(viewer.Lifetime.IsCancellationRequested);
+        using var linked = viewer.LinkLifetime(CancellationToken.None);
+        Assert.NotNull(linked);
+        Assert.False(linked.IsCancellationRequested);
 
         viewer.CancelLifetime();
 
-        Assert.True(viewer.Lifetime.IsCancellationRequested);
+        Assert.True(linked.IsCancellationRequested);
+    }
+
+    [Fact]
+    public void Dispose_EndsTheLifetime_AndNoLinkIsMadeAfterwards()
+    {
+        var viewer = NewViewer();
+
+        viewer.Dispose();
+
+        Assert.Null(viewer.LinkLifetime(CancellationToken.None));
+        viewer.CancelLifetime();
     }
 }

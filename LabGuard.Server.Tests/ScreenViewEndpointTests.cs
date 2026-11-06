@@ -55,6 +55,19 @@ public class ScreenViewEndpointTests
         Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
     }
 
+    // The end of a view is written after its sockets close, so a test that has seen the close waits for the row.
+    private static async Task<List<ScreenViewEvent>> AwaitAuditAsync(TestApp app, Func<List<ScreenViewEvent>, bool> ready)
+    {
+        var rows = await AuditRowsAsync(app);
+        for (var attempt = 0; attempt < 50 && !ready(rows); attempt++)
+        {
+            await Task.Delay(100);
+            rows = await AuditRowsAsync(app);
+        }
+
+        return rows;
+    }
+
     private static async Task<List<ScreenViewEvent>> AuditRowsAsync(TestApp app) =>
         await app.WithDbAsync(db => db.ScreenViewEvents.AsNoTracking().OrderBy(e => e.Id).ToListAsync());
 
@@ -109,7 +122,10 @@ public class ScreenViewEndpointTests
     [InlineData("https://evil.example")]
     [InlineData("http://localhost.evil.example:5173")]
     [InlineData("http://192.168.1.5:5000")]
-    public async Task Live_FromAnOriginThatIsNotLoopback_IsRefused403(string? origin)
+    [InlineData("http://localhost")]
+    [InlineData("http://localhost:5999")]
+    [InlineData("http://127.0.0.1:5173")]
+    public async Task Live_FromAnOriginOffTheAllowList_IsRefused403(string? origin)
     {
         using var app = new TestApp();
         var (id, _) = await LiveViewClient.AddPcAsync(app);
@@ -122,10 +138,11 @@ public class ScreenViewEndpointTests
 
     [Theory]
     [InlineData("http://localhost:5173")]
+    [InlineData("http://localhost:4173")]
     [InlineData("http://localhost:5000")]
-    [InlineData("http://127.0.0.1:5173")]
-    [InlineData("http://[::1]:5173")]
-    public async Task Live_FromALoopbackOrigin_OnAnyPort_IsAccepted(string origin)
+    [InlineData("http://127.0.0.1:5000")]
+    [InlineData("http://[::1]:5000")]
+    public async Task Live_FromAnAllowedOrigin_IsAccepted(string origin)
     {
         using var app = new TestApp();
         var (id, _) = await LiveViewClient.AddPcAsync(app);
@@ -258,7 +275,7 @@ public class ScreenViewEndpointTests
 
         Assert.Equal(WebSocketMessageType.Close, browserClose.Type);
         Assert.Equal(WebSocketCloseStatus.NormalClosure, pcClose.CloseStatus);
-        var row = Assert.Single(await AuditRowsAsync(app));
+        var row = Assert.Single(await AwaitAuditAsync(app, rows => rows.All(r => r.EndedAtUtc is not null)));
         Assert.NotNull(row.EndedAtUtc);
     }
 
@@ -273,7 +290,7 @@ public class ScreenViewEndpointTests
         using var second = await OpenViewAsync(app, id, cookie);
 
         await AssertCloseAsync(first, (WebSocketCloseStatus)4001, "Replaced by another viewer.");
-        var rows = await AuditRowsAsync(app);
+        var rows = await AwaitAuditAsync(app, rows => rows.Count == 2 && rows[0].EndedAtUtc is not null);
         Assert.Equal(2, rows.Count);
         Assert.NotNull(rows[0].EndedAtUtc);
         Assert.Null(rows[1].EndedAtUtc);

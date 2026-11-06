@@ -25,7 +25,7 @@ public sealed class ScreenViewMonitor(
             {
                 await CheckOnceAsync(stoppingToken);
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
             {
                 logger.LogWarning("Couldn't check the live screen views: {ExceptionType}.", exception.GetType().Name);
             }

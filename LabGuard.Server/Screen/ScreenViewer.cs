@@ -3,14 +3,15 @@ using System.Text;
 
 namespace LabGuard.Server.Screen;
 
-// One administrator's live view of one PC: the browser socket, the PC's socket while it is connected, the frame credits
-// and the lifetime that stops the relay loops. Everything mutable is guarded by one lock, so a close and an attach can't interleave.
-public sealed class ScreenViewer
+// One administrator's live view of one PC: the browser socket, the PC's socket while it is connected, the frame credits,
+// the last state relayed and the lifetime that stops the relay loops. Everything mutable is guarded by one lock.
+public sealed class ScreenViewer : IDisposable
 {
     private readonly Lock _sync = new();
-    private readonly CancellationTokenSource _lifetime = new();
+    private readonly Lifetime _lifetime = new();
     private ScreenSocket? _pc;
     private int _framesInFlight;
+    private string? _lastState;
     private bool _isClosed;
 
     public ScreenViewer(string viewId, int pcId, string mode, int auditId, DateTimeOffset sessionDeadline, ScreenSocket browser)
@@ -31,7 +32,6 @@ public sealed class ScreenViewer
     // The time the administrator's session ends. The view closes then, because it never renews the session.
     public DateTimeOffset SessionDeadline { get; }
     public ScreenSocket Browser { get; }
-    public CancellationToken Lifetime => _lifetime.Token;
 
     public ScreenSocket? CurrentPc
     {
@@ -44,11 +44,27 @@ public sealed class ScreenViewer
         }
     }
 
+    public bool IsCurrentPc(ScreenSocket socket)
+    {
+        lock (_sync)
+        {
+            return ReferenceEquals(_pc, socket);
+        }
+    }
+
+    // A source linked to the view's lifetime. Null once the view is disposed. The caller disposes the one it gets.
+    public CancellationTokenSource? LinkLifetime(CancellationToken cancellationToken) => _lifetime.Link(cancellationToken);
+
+    public void CancelLifetime() => _lifetime.Cancel();
+
+    public void Dispose() => _lifetime.Dispose();
+
     // Constant time, so a PC can't learn the view id one character at a time.
     public bool ViewIdMatches(string? candidate) =>
         candidate is not null && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(ViewId), Encoding.UTF8.GetBytes(candidate));
 
-    // False once the view is closed. The socket it replaces is returned so the caller can close it.
+    // Attaches the PC's socket. The credit window starts again for the new connection. False once the view is closed.
+    // The socket it replaces is returned, so the caller can end it.
     public bool TryAttachPc(ScreenSocket socket, out ScreenSocket? replaced)
     {
         lock (_sync)
@@ -60,6 +76,7 @@ public sealed class ScreenViewer
             }
 
             _pc = socket;
+            _framesInFlight = 0;
             return true;
         }
     }
@@ -79,12 +96,12 @@ public sealed class ScreenViewer
         }
     }
 
-    // Takes one frame credit. False when the window is full or the view is closed; the frame is then dropped.
-    public bool TryTakeFrameCredit()
+    // Takes one frame credit for the attached PC only. False when the window is full, the view is closed, or the sender was replaced.
+    public bool TryTakeFrameCredit(ScreenSocket sender)
     {
         lock (_sync)
         {
-            if (_isClosed || _framesInFlight >= ScreenProtocol.MaxFramesInFlight)
+            if (_isClosed || !ReferenceEquals(_pc, sender) || _framesInFlight >= ScreenProtocol.MaxFramesInFlight)
             {
                 return false;
             }
@@ -94,14 +111,34 @@ public sealed class ScreenViewer
         }
     }
 
-    public void ReturnFrameCredit()
+    // Returns one credit. False when no credit was outstanding, so a stray or repeated ack isn't passed on.
+    public bool TryReturnFrameCredit()
     {
         lock (_sync)
         {
-            if (_framesInFlight > 0)
+            if (_framesInFlight == 0)
             {
-                _framesInFlight--;
+                return false;
             }
+
+            _framesInFlight--;
+            return true;
+        }
+    }
+
+    // Records a new state. True only when it differs from the last one relayed, so a repeated state is never sent twice.
+    // When a PC is named, the change counts only if that PC is still the attached one.
+    public bool TrySetState(string state, ScreenSocket? requiredPc = null)
+    {
+        lock (_sync)
+        {
+            if (_isClosed || (requiredPc is not null && !ReferenceEquals(_pc, requiredPc)) || state == _lastState)
+            {
+                return false;
+            }
+
+            _lastState = state;
+            return true;
         }
     }
 
@@ -122,6 +159,4 @@ public sealed class ScreenViewer
             return true;
         }
     }
-
-    public void CancelLifetime() => _lifetime.Cancel();
 }

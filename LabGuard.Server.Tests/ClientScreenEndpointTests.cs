@@ -17,6 +17,18 @@ public class ClientScreenEndpointTests
 
     private sealed record LiveView(int PcId, string Token, string ViewId, WebSocket Browser);
 
+    // The replaced connection is closed, so a send on it can fail. Only what the browser receives is checked.
+    private static async Task TrySendAsync(WebSocket socket, byte[] payload)
+    {
+        try
+        {
+            await LiveViewClient.SendAsync(socket, payload);
+        }
+        catch (Exception exception) when (exception is WebSocketException or IOException or ObjectDisposedException or OperationCanceledException)
+        {
+        }
+    }
+
     private static async Task<string> ViewIdFromHeartbeatAsync(TestApp app, string token)
     {
         var reply = await LiveViewClient.HeartbeatAsync(app, token);
@@ -208,7 +220,7 @@ public class ClientScreenEndpointTests
 
         var received = await LiveViewClient.ReceiveAsync(live.Browser);
         Assert.Equal(WebSocketMessageType.Binary, received.Type);
-        Assert.Equal("good", Encoding.ASCII.GetString(received.Payload, 3, 4));
+        Assert.Equal("good", LiveViewClient.LabelOf(received.Payload, 4));
     }
 
     [Fact]
@@ -231,7 +243,7 @@ public class ClientScreenEndpointTests
         using var app = new TestApp();
         var live = await OpenLiveViewAsync(app);
         using var pc = await ConnectPcAsync(app, live);
-        var tooBig = LiveViewClient.Frame("big", size: ScreenProtocol.MaxPcMessageBytes + 1);
+        var tooBig = LiveViewClient.Frame("big", size: ScreenProtocol.MaxPcBinaryBytes + 1);
 
         var sending = LiveViewClient.SendAsync(pc, tooBig);
         var close = await LiveViewClient.ReceiveAsync(pc);
@@ -258,8 +270,8 @@ public class ClientScreenEndpointTests
         await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("one"));
         await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("two"));
         await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("three"));
-        Assert.Equal("one", Encoding.ASCII.GetString((await LiveViewClient.ReceiveAsync(live.Browser)).Payload, 3, 3));
-        Assert.Equal("two", Encoding.ASCII.GetString((await LiveViewClient.ReceiveAsync(live.Browser)).Payload, 3, 3));
+        Assert.Equal("one", LiveViewClient.LabelOf((await LiveViewClient.ReceiveAsync(live.Browser)).Payload, 3));
+        Assert.Equal("two", LiveViewClient.LabelOf((await LiveViewClient.ReceiveAsync(live.Browser)).Payload, 3));
 
         await LiveViewClient.SendTextAsync(live.Browser, "ack");
         var ack = await LiveViewClient.ReceiveAsync(pc);
@@ -267,15 +279,18 @@ public class ClientScreenEndpointTests
 
         Assert.Equal("ack", ack.Text);
         var next = await LiveViewClient.ReceiveAsync(live.Browser);
-        Assert.Equal("four", Encoding.ASCII.GetString(next.Payload, 3, 4));
+        Assert.Equal("four", LiveViewClient.LabelOf(next.Payload, 4));
     }
 
     [Fact]
-    public async Task ScreenStream_BrowserAcksReachThePc_AndOtherBrowserTextDoesNot()
+    public async Task ScreenStream_BrowserAckWithAFrameOutstanding_ReachesThePc_AndOtherBrowserTextDoesNot()
     {
         using var app = new TestApp();
         var live = await OpenLiveViewAsync(app);
         using var pc = await ConnectPcAsync(app, live);
+
+        await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("one"));
+        await LiveViewClient.ReceiveAsync(live.Browser);
 
         await LiveViewClient.SendTextAsync(live.Browser, "hello");
         await LiveViewClient.SendTextAsync(live.Browser, "ack");
@@ -290,15 +305,16 @@ public class ClientScreenEndpointTests
         using var app = new TestApp();
         var live = await OpenLiveViewAsync(app);
         using var first = await ConnectPcAsync(app, live);
+        app.Time.Advance(TimeSpan.FromSeconds(1));
 
         using var second = await LiveViewClient.OpenPcAsync(app, live.Token, live.ViewId);
 
         var replaced = await LiveViewClient.ReceiveAsync(first);
         Assert.Equal((WebSocketCloseStatus)4001, replaced.CloseStatus);
-        Assert.Equal(BrowserLive, await LiveViewClient.ReceiveStateAsync(live.Browser));
+        // The view was already live, so the new connection changes no state and the browser hears nothing new.
         await LiveViewClient.SendAsync(second, LiveViewClient.Frame("from-second"));
         var frame = await LiveViewClient.ReceiveAsync(live.Browser);
-        Assert.Equal("from-second", Encoding.ASCII.GetString(frame.Payload, 3, 11));
+        Assert.Equal("from-second", LiveViewClient.LabelOf(frame.Payload, 11));
     }
 
     [Fact]
@@ -311,5 +327,62 @@ public class ClientScreenEndpointTests
         await pc.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
 
         Assert.Equal(BrowserWaiting, await LiveViewClient.ReceiveStateAsync(live.Browser));
+    }
+
+    [Fact]
+    public async Task ScreenStream_AReconnectWithinTheCooldown_IsRefusedWith429()
+    {
+        using var app = new TestApp();
+        var live = await OpenLiveViewAsync(app);
+        using var first = await ConnectPcAsync(app, live);
+
+        var status = await LiveViewClient.RefusedStatusAsync(() => LiveViewClient.OpenPcAsync(app, live.Token, live.ViewId));
+
+        Assert.Equal(429, status);
+    }
+
+    [Fact]
+    public async Task ScreenStream_TheReplacedConnection_CannotRelayAFrame()
+    {
+        using var app = new TestApp();
+        var live = await OpenLiveViewAsync(app);
+        using var stale = await ConnectPcAsync(app, live);
+        app.Time.Advance(TimeSpan.FromSeconds(1));
+        using var fresh = await LiveViewClient.OpenPcAsync(app, live.Token, live.ViewId);
+        Assert.Equal((WebSocketCloseStatus)4001, (await LiveViewClient.ReceiveAsync(stale)).CloseStatus);
+
+        var sending = TrySendAsync(stale, LiveViewClient.Frame("stale"));
+        await LiveViewClient.SendAsync(fresh, LiveViewClient.Frame("fresh"));
+        await sending.WaitAsync(LiveViewClient.Patience);
+
+        var received = await LiveViewClient.ReceiveAsync(live.Browser);
+        Assert.Equal("fresh", LiveViewClient.LabelOf(received.Payload, 5));
+    }
+
+    [Fact]
+    public async Task ScreenStream_AFrameWithAnOversizedHeader_IsDropped()
+    {
+        using var app = new TestApp();
+        var live = await OpenLiveViewAsync(app);
+        using var pc = await ConnectPcAsync(app, live);
+
+        await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("huge", width: 9000, height: 100));
+        await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("fine"));
+
+        var received = await LiveViewClient.ReceiveAsync(live.Browser);
+        Assert.Equal("fine", LiveViewClient.LabelOf(received.Payload, 4));
+    }
+
+    [Fact]
+    public async Task ScreenStream_ATextMessageOver16Bytes_ClosesThePcSocketWith1009()
+    {
+        using var app = new TestApp();
+        var live = await OpenLiveViewAsync(app);
+        using var pc = await ConnectPcAsync(app, live);
+
+        await LiveViewClient.SendTextAsync(pc, new string('x', 17));
+
+        var close = await LiveViewClient.ReceiveAsync(pc);
+        Assert.Equal(WebSocketCloseStatus.MessageTooBig, close.CloseStatus);
     }
 }
