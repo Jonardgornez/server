@@ -1,6 +1,8 @@
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using LabGuard.Server.Pcs;
+using LabGuard.Server.Sessions;
 using static LabGuard.Server.Tests.PcCancelPowerEndpointTests;
 using static LabGuard.Server.Tests.PcShutdownEndpointTests;
 
@@ -179,5 +181,81 @@ public class PcCountdownRunningHeartbeatEndpointTests
         await HeartbeatJsonAsync(client, pc, RunningJson);
 
         Assert.Null((await StoredPcAsync(app, pc.Id)).ShutdownDeliveredAtUtc);
+    }
+
+    // Online: a PC that says its countdown is not running has its delivery and cancel cleared at once.
+
+    [Fact]
+    public async Task Online_WithCountdownNotRunning_ClearsTheDeliveryAndTheCancel()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await DeliverAsync(admin, client, pc, PcShutdownRules.ShutdownAction);
+        await CancelAsync(admin, pc.Id);
+
+        var reply = await JsonOf(await HeartbeatJsonAsync(client, pc, "{\"powerCountdownRunning\":false}"));
+
+        Assert.False(PowerCancelledOf(reply));
+        var stored = await StoredPcAsync(app, pc.Id);
+        Assert.Null(stored.ShutdownDeliveredAtUtc);
+        Assert.Null(stored.PowerCancelRequestedAtUtc);
+        Assert.Equal(JsonValueKind.Null, (await ListEntryAsync(admin, "PC-01")).GetProperty("shutdownState").ValueKind);
+    }
+
+    [Fact]
+    public async Task Online_WithCountdownNotRunning_UnblocksANewRequestWhileCancelling()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await DeliverAsync(admin, client, pc, PcShutdownRules.ShutdownAction);
+        await CancelAsync(admin, pc.Id);
+        Assert.Equal(HttpStatusCode.Conflict, (await PowerAsync(admin, PcShutdownRules.RestartAction, pc.Id)).StatusCode);
+
+        await HeartbeatJsonAsync(client, pc, "{\"powerCountdownRunning\":false}");
+        var response = await PowerAsync(admin, PcShutdownRules.RestartAction, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).ShutdownRequestedAtUtc);
+    }
+
+    [Fact]
+    public async Task DeliveryMadeByThisHeartbeat_SurvivesACountdownNotRunningFlag()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await ShutdownAsync(admin, pc.Id);
+
+        var delivering = await JsonOf(await HeartbeatJsonAsync(client, pc, "{\"powerCountdownRunning\":false}"));
+
+        Assert.Equal(30, ShutdownSecondsOf(delivering));
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).ShutdownDeliveredAtUtc);
+    }
+
+    [Fact]
+    public async Task Logout_AfterADeliveryClearedAsNotCounting_IsPlainLogout()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app, minutes: null);
+        await HeartbeatAsync(client, pc);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+        await ShutdownAsync(admin, pc.Id);
+        await HeartbeatAsync(client, pc);
+        await HeartbeatJsonAsync(client, pc, "{\"powerCountdownRunning\":false}");
+
+        await PostAsync(client, "/api/client/logout", pc.Token);
+
+        Assert.Equal(SessionLifecycle.Logout, (await StoredSessionAsync(app, sessionId)).EndReason);
     }
 }

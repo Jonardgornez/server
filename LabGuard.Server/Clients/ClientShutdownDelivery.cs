@@ -62,6 +62,19 @@ public static partial class ClientEndpoints
             return new PowerHandOff(null, IsCancelled: false);
         }
 
+        // An online PC that says its countdown is not running never started the delivery, or it failed or stopped, so the
+        // delivery and any cancel are cleared at once rather than left blocking the PC until the window ends. The update matches
+        // the delivery read before this heartbeat, so a delivery made by this heartbeat is never cleared by it.
+        if (countdownRunning == false && power.DeliveredAtUtc is { } notCounting)
+        {
+            await db.Pcs
+                .Where(p => p.TokenHash == tokenHash && p.ShutdownDeliveredAtUtc == notCounting)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
+                    .SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)null), ct);
+            power = power with { DeliveredAtUtc = null, CancelRequestedAtUtc = null };
+        }
+
         power = await ForgetExpiredDeliveryAsync(db, tokenHash, power, now, ct);
 
         // The PC has acted on the cancel, so the cancel and its delivery are cleared. The update matches the cancel that was read,
