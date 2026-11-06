@@ -145,9 +145,10 @@ public static class SessionLifecycle
 
     // Rounded up, so the client never shows 0 while there is still time; null for open time.
     // A paused session is measured at the moment it was paused, so its count stays the same.
+    // Capped at the most a session can have, because a server clock moved back could report more and the client would refuse it.
     public static int? SecondsRemaining(PcSession session, DateTimeOffset now) =>
         session.ExpiresAtUtc is { } expiresAt
-            ? (int)Math.Max(0, Math.Ceiling((expiresAt - (session.PausedAtUtc ?? now)).TotalSeconds))
+            ? (int)Math.Clamp(Math.Ceiling((expiresAt - (session.PausedAtUtc ?? now)).TotalSeconds), 0, MaxTimeLeft.TotalSeconds)
             : null;
 
     // Edit time can leave more time than the session started with, and the client refuses a session whose

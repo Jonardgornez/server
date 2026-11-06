@@ -200,6 +200,7 @@ public class PasswordLeakTests
         await AssertNoPasswordValuesAsync(refused, await SecretsAsync(app));
 
         var secrets = await SecretsAsync(app);
+        Assert.NotEmpty(app.Logs.Entries);
         foreach (var entry in app.Logs.Entries)
         {
             foreach (var secret in secrets)
@@ -213,11 +214,17 @@ public class PasswordLeakTests
     private static async Task AssertNoPasswordValuesAsync(HttpResponseMessage response, string[] secrets)
     {
         var body = await response.Content.ReadAsStringAsync();
-        var text = body.Length == 0 ? "" : JsonDocument.Parse(body).RootElement.ToString();
+        var values = new List<string>();
+        if (body.Length > 0)
+        {
+            using var json = JsonDocument.Parse(body);
+            CollectNamesAndValues(json.RootElement, [], values);
+        }
+
         foreach (var secret in secrets)
         {
             Assert.DoesNotContain(secret, body);
-            Assert.DoesNotContain(secret, text);
+            Assert.All(values, value => Assert.DoesNotContain(secret, value));
         }
     }
 

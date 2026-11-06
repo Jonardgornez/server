@@ -376,6 +376,18 @@ public class SessionLifecycleTests
     }
 
     [Fact]
+    public void SecondsRemaining_IsCappedAtTheMostASessionCanHave_WhenTheClockMovedBack()
+    {
+        var now = new DateTimeOffset(2026, 11, 6, 10, 0, 0, TimeSpan.Zero);
+        var session = new PcSession { DefaultTimeMinutes = 60, ExpiresAtUtc = now.AddMinutes(1500) };
+
+        var info = SessionLifecycle.ToInfo(session, now);
+
+        Assert.Equal(86400, info.SecondsRemaining);
+        Assert.Equal(1440, info.Time.Minutes);
+    }
+
+    [Fact]
     public void ReportedMinutes_StayNullForOpenTime()
     {
         Assert.Null(SessionLifecycle.ReportedMinutes(null, null));
