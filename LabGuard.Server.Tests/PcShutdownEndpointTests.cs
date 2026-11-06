@@ -17,6 +17,7 @@ public class PcShutdownEndpointTests
     private const string InvalidRequestMessage = "Invalid request.";
     private const string OfflineMessage = "This PC is offline.";
     private const string ServerPcMessage = "This PC runs the server. Shut it down by hand.";
+    private const string AddressUnreadableMessage = "Couldn't check this PC's address. Try again.";
     // Other PCs in these tests use a documentation address, never one of the test machine's own.
     private const string OtherPcAddress = "203.0.113.5";
 
@@ -291,6 +292,79 @@ public class PcShutdownEndpointTests
         Assert.NotNull((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
     }
 
+    [Fact]
+    public async Task Shutdown_WithinTheDeliveryWindow_Returns204AndStoresNoRequest()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await ShutdownAsync(admin, pc.Id);
+        Assert.Equal(30, ShutdownSecondsOf(await HeartbeatBodyAsync(client, pc)));
+        var delivered = (await StoredPcAsync(app, pc.Id)).ShutdownDeliveredAtUtc;
+        app.Time.Advance(TimeSpan.FromSeconds(10));
+        await BringOnlineAsync(app, pc.Id);
+
+        var response = await ShutdownAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var stored = await StoredPcAsync(app, pc.Id);
+        Assert.Null(stored.ShutdownRequestedAtUtc);
+        Assert.Equal(delivered, stored.ShutdownDeliveredAtUtc);
+    }
+
+    [Fact]
+    public async Task Shutdown_AfterTheDeliveryWindow_StoresARequestAgain()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await ShutdownAsync(admin, pc.Id);
+        Assert.Equal(30, ShutdownSecondsOf(await HeartbeatBodyAsync(client, pc)));
+        app.Time.Advance(TimeSpan.FromSeconds(60));
+        await BringOnlineAsync(app, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await ShutdownAsync(admin, pc.Id)).StatusCode);
+
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).ShutdownRequestedAtUtc);
+    }
+
+    [Fact]
+    public async Task Shutdown_WhenTheAddressesCannotBeRead_Returns409AndChangesNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        app.LocalAddresses.Fail = true;
+
+        var response = await ShutdownAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(AddressUnreadableMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Null((await StoredPcAsync(app, pc.Id)).ShutdownRequestedAtUtc);
+    }
+
+    [Fact]
+    public async Task Shutdown_WithNoLocalAddresses_IsNotTreatedAsAFailedRead()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        app.LocalAddresses.SetAddresses([]);
+
+        var response = await ShutdownAsync(admin, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.NotNull((await StoredPcAsync(app, pc.Id)).ShutdownRequestedAtUtc);
+    }
+
     // Bulk shutdown
 
     [Theory]
@@ -376,6 +450,37 @@ public class PcShutdownEndpointTests
         Assert.Equal(0, await AffectedAsync(await ShutdownManyAsync(admin, first.Id, second.Id)));
     }
 
+    [Fact]
+    public async Task ShutdownMany_WithinTheDeliveryWindow_CountsZero()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await ShutdownManyAsync(admin, pc.Id);
+        Assert.Equal(30, ShutdownSecondsOf(await HeartbeatBodyAsync(client, pc)));
+        app.Time.Advance(TimeSpan.FromSeconds(10));
+        await BringOnlineAsync(app, pc.Id);
+
+        Assert.Equal(0, await AffectedAsync(await ShutdownManyAsync(admin, pc.Id)));
+        Assert.Null((await StoredPcAsync(app, pc.Id)).ShutdownRequestedAtUtc);
+    }
+
+    [Fact]
+    public async Task ShutdownMany_WhenTheAddressesCannotBeRead_RequestsNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        app.LocalAddresses.Fail = true;
+
+        Assert.Equal(0, await AffectedAsync(await ShutdownManyAsync(admin, pc.Id)));
+        Assert.Null((await StoredPcAsync(app, pc.Id)).ShutdownRequestedAtUtc);
+    }
+
     // Delivery on the heartbeat
 
     [Fact]
@@ -435,6 +540,8 @@ public class PcShutdownEndpointTests
         await HeartbeatAsync(client, pc);
         await ShutdownAsync(admin, pc.Id);
         app.Time.Advance(TimeSpan.FromSeconds(59));
+        // The PC is still online at 59 seconds, so it is not a PC that has just started.
+        await BringOnlineAsync(app, pc.Id);
 
         Assert.Equal(30, ShutdownSecondsOf(await HeartbeatBodyAsync(client, pc)));
     }
@@ -492,6 +599,121 @@ public class PcShutdownEndpointTests
         Assert.Null(ShutdownSecondsOf(back));
         Assert.Null(ShutdownSecondsOf(later));
         Assert.Null((await StoredPcAsync(app, pc.Id)).ShutdownDeliveredAtUtc);
+    }
+
+    [Fact]
+    public async Task Heartbeat_PcWentOfflineAfterTheRequestAndReturnsWithin60Seconds_DeliversNothingAndDropsTheRequest()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await ShutdownAsync(admin, pc.Id);
+        app.Time.Advance(TimeSpan.FromSeconds(20));
+
+        var back = await HeartbeatBodyAsync(client, pc);
+
+        Assert.Null(ShutdownSecondsOf(back));
+        var stored = await StoredPcAsync(app, pc.Id);
+        Assert.Null(stored.ShutdownRequestedAtUtc);
+        Assert.Null(stored.ShutdownDeliveredAtUtc);
+    }
+
+    [Fact]
+    public async Task Heartbeat_RequestMadeAfterAPcReturned_IsDelivered()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await ShutdownAsync(admin, pc.Id);
+        app.Time.Advance(TimeSpan.FromSeconds(20));
+        Assert.Null(ShutdownSecondsOf(await HeartbeatBodyAsync(client, pc)));
+
+        // The PC is back and online. A request made now is delivered on the next heartbeat, which finds the PC online.
+        Assert.Equal(HttpStatusCode.NoContent, (await ShutdownAsync(admin, pc.Id)).StatusCode);
+        app.Time.Advance(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(30, ShutdownSecondsOf(await HeartbeatBodyAsync(client, pc)));
+    }
+
+    [Fact]
+    public async Task Offline_ClearsAPendingRequest()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await ShutdownAsync(admin, pc.Id);
+
+        var response = await PostAsync(client, "/api/client/offline", pc.Token);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Null((await StoredPcAsync(app, pc.Id)).ShutdownRequestedAtUtc);
+        Assert.Null(ShutdownSecondsOf(await HeartbeatBodyAsync(client, pc)));
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1")]
+    [InlineData("::1")]
+    [InlineData(TestApp.MachineLanAddress)]
+    public async Task Heartbeat_LiveAddressIsThisMachine_DeliversNothingEvenWhenTheStoredAddressWasAnotherPc(string liveAddress)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var otherPc = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(otherPc, pc);
+        await ShutdownAsync(admin, pc.Id);
+        using var serverPc = app.CreatePcClient(liveAddress);
+
+        var body = await HeartbeatBodyAsync(serverPc, pc);
+
+        Assert.Null(ShutdownSecondsOf(body));
+        var stored = await StoredPcAsync(app, pc.Id);
+        Assert.Null(stored.ShutdownRequestedAtUtc);
+        Assert.Null(stored.ShutdownDeliveredAtUtc);
+    }
+
+    [Fact]
+    public async Task Heartbeat_WithoutALiveAddress_DeliversNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var otherPc = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(otherPc, pc);
+        await ShutdownAsync(admin, pc.Id);
+        using var noAddress = app.CreatePcClient(SimulatedConnectionFilter.NoAddress);
+
+        var body = await HeartbeatBodyAsync(noAddress, pc);
+
+        Assert.Null(ShutdownSecondsOf(body));
+        Assert.Null((await StoredPcAsync(app, pc.Id)).ShutdownDeliveredAtUtc);
+    }
+
+    [Fact]
+    public async Task Heartbeat_WhenTheAddressesCannotBeRead_DeliversNothing_AndTheRequestWaitsForALaterHeartbeat()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await ShutdownAsync(admin, pc.Id);
+        app.LocalAddresses.Fail = true;
+
+        Assert.Null(ShutdownSecondsOf(await HeartbeatBodyAsync(client, pc)));
+        var stored = await StoredPcAsync(app, pc.Id);
+        Assert.NotNull(stored.ShutdownRequestedAtUtc);
+        Assert.Null(stored.ShutdownDeliveredAtUtc);
+
+        // Once the addresses can be read again, the request is checked and delivered as usual.
+        app.LocalAddresses.Fail = false;
+        Assert.Equal(30, ShutdownSecondsOf(await HeartbeatBodyAsync(client, pc)));
     }
 
     // Shutdown state in the PC list
@@ -627,6 +849,23 @@ public class PcShutdownEndpointTests
         var entry = await ListEntryAsync(admin, "PC-01");
 
         Assert.Equal(expected, entry.GetProperty("isServerPc").GetBoolean());
+    }
+
+    [Fact]
+    public async Task List_WhenTheAddressesCannotBeRead_StillAnswer_AndNoPcIsShownAsTheServer()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(TestApp.MachineLanAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        app.LocalAddresses.Fail = true;
+
+        var response = await admin.GetAsync("/api/pcs");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var entry = (await JsonOf(response)).EnumerateArray().Single(e => e.GetProperty("name").GetString() == "PC-01");
+        Assert.False(entry.GetProperty("isServerPc").GetBoolean());
     }
 
     // Session end reason on logout

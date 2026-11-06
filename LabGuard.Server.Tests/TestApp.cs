@@ -227,9 +227,16 @@ internal sealed class SimulatedConnectionFilter : IStartupFilter
 /// <summary>Test-only: the addresses this machine is said to have, in place of the real network adapters.</summary>
 public sealed class FixedLocalAddressSource(IEnumerable<IPAddress> addresses) : ILocalAddressSource
 {
-    private readonly IReadOnlyList<IPAddress> _addresses = addresses.ToList();
+    private IReadOnlyList<IPAddress> _addresses = addresses.ToList();
 
-    public IReadOnlyList<IPAddress> Read() => _addresses;
+    /// <summary>When set, Read throws, as it does when the adapters can't be read.</summary>
+    public bool Fail { get; set; }
+
+    /// <summary>Replaces the addresses. An empty list is a machine with none, which is not a failed read.</summary>
+    public void SetAddresses(IEnumerable<IPAddress> addresses) => _addresses = addresses.ToList();
+
+    public IReadOnlyList<IPAddress> Read() =>
+        Fail ? throw new System.Net.NetworkInformation.NetworkInformationException() : _addresses;
 }
 
 /// <summary>A fake clock that can be told to fail, to force an unhandled error inside an endpoint.</summary>

@@ -2,6 +2,7 @@ using System.Globalization;
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
+using LabGuard.Server.Network;
 using LabGuard.Server.Pcs;
 using LabGuard.Server.Sessions;
 using LabGuard.Server.Settings;
@@ -358,7 +359,8 @@ public static partial class ClientEndpoints
     }
 
     // The PC says it is closing. Its last heartbeat moves back to the edge of the online window, so it shows offline at once.
-    // Only ever moves backward, and leaves its sessions and its lock alone.
+    // Only ever moves backward, and leaves its sessions and its lock alone. A pending shutdown request is dropped too,
+    // since the PC is going away and would only get it on a heartbeat that comes after it has restarted.
     private static async Task<IResult> OfflineAsync(HttpContext http, AppDbContext db, TimeProvider clock)
     {
         if (ReadBearerToken(http.Request) is not { } token)
@@ -377,10 +379,17 @@ public static partial class ClientEndpoints
         await db.Pcs
             .Where(p => p.Id == pcId && p.LastSeenUtc > offlineSince)
             .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LastSeenUtc, offlineSince), ct);
+        await db.Pcs
+            .Where(p => p.Id == pcId && p.ShutdownRequestedAtUtc != null)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)null), ct);
         return Results.NoContent();
     }
 
-    private static async Task<IResult> HeartbeatAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    private static async Task<IResult> HeartbeatAsync(
+        HttpContext http,
+        AppDbContext db,
+        TimeProvider clock,
+        ILocalAddressSource localAddresses)
     {
         if (ReadBearerToken(http.Request) is not { } token)
         {
@@ -411,6 +420,9 @@ public static partial class ClientEndpoints
 
         var pcId = known.Id;
 
+        // Read from the snapshot taken above, so it is the state before this heartbeat writes LastSeen.
+        var wasOnline = PcEndpoints.IsOnline(known.LastSeenUtc, now);
+
         // A missing, empty or malformed body is still a heartbeat, just without a session id.
         var request = await AuthEndpoints.ReadBodyAsync<HeartbeatRequest>(http.Request);
 
@@ -427,7 +439,7 @@ public static partial class ClientEndpoints
 
         // An admin unlock is adopted by a PC that was online before this heartbeat, or that reports its id (a network blip).
         // A PC that was offline and doesn't know the id, such as a rebooted one, must not open itself unattended.
-        if (active is { IsAdminUnlock: true } && request?.SessionId != active.Id && !PcEndpoints.IsOnline(known.LastSeenUtc, now))
+        if (active is { IsAdminUnlock: true } && request?.SessionId != active.Id && !wasOnline)
         {
             await SessionLifecycle.EndSessionAsync(db, active.Id, SessionLifecycle.ConnectionLost, now, ct);
             active = null;
@@ -448,6 +460,9 @@ public static partial class ClientEndpoints
         var shutdownSeconds = await DeliverShutdownAsync(
             db,
             tokenHash,
+            address,
+            wasOnline,
+            localAddresses,
             known.ShutdownRequestedAtUtc,
             known.ShutdownDeliveredAtUtc,
             now,

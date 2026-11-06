@@ -10,6 +10,7 @@ namespace LabGuard.Server.Pcs;
 public static partial class PcEndpoints
 {
     private const string ServerPcShutdownMessage = "This PC runs the server. Shut it down by hand.";
+    private const string AddressUnreadableMessage = "Couldn't check this PC's address. Try again.";
 
     private static async Task<IResult> ShutdownAsync(
         int id,
@@ -39,7 +40,13 @@ public static partial class PcEndpoints
             return ConflictResponse("This PC is offline.");
         }
 
-        if (ServerPcRule.IsServerPc(pc.IpAddress, localAddresses.Read()))
+        // Fails closed: without the addresses, this PC can't be shown not to be the server.
+        if (localAddresses.ReadOrNull() is not { } machineAddresses)
+        {
+            return ConflictResponse(AddressUnreadableMessage);
+        }
+
+        if (ServerPcRule.IsServerPc(pc.IpAddress, machineAddresses))
         {
             return ConflictResponse(ServerPcShutdownMessage);
         }
@@ -62,9 +69,14 @@ public static partial class PcEndpoints
             return AuthEndpoints.InvalidRequest();
         }
 
+        // Without the addresses no PC can be shown not to be the server, so nothing is requested.
+        if (localAddresses.ReadOrNull() is not { } machineAddresses)
+        {
+            return Results.Ok(new AffectedPcsResponse(0));
+        }
+
         var ct = http.RequestAborted;
         var now = clock.GetUtcNow();
-        var machineAddresses = localAddresses.Read();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SessionLifecycle.EndExpiredAsync(db, now, ct);
 
@@ -83,12 +95,16 @@ public static partial class PcEndpoints
     }
 
     // Requests a shutdown for each listed PC that isn't already pending. A request that went stale is replaced.
+    // A PC shut down within the delivery window is skipped, so a fresh delivery isn't followed by a second request.
     // Returns how many PCs were newly requested.
     private static Task<int> RequestShutdownsAsync(AppDbContext db, int[] pcIds, DateTimeOffset now, CancellationToken ct)
     {
         var expiredBefore = now - PcShutdownRules.RequestWindow;
+        var deliveredBefore = now - PcShutdownRules.DeliveryWindow;
         return db.Pcs
-            .Where(p => pcIds.Contains(p.Id) && (p.ShutdownRequestedAtUtc == null || p.ShutdownRequestedAtUtc <= expiredBefore))
+            .Where(p => pcIds.Contains(p.Id)
+                && (p.ShutdownRequestedAtUtc == null || p.ShutdownRequestedAtUtc <= expiredBefore)
+                && (p.ShutdownDeliveredAtUtc == null || p.ShutdownDeliveredAtUtc <= deliveredBefore))
             .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)now), ct);
     }
 }

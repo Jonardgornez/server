@@ -75,7 +75,8 @@ public static partial class PcEndpoints
             .ToDictionary(s => s.PcId);
 
         var now = clock.GetUtcNow();
-        var machineAddresses = localAddresses.Read();
+        // When the addresses can't be read, no PC is shown as the server. The list still answers.
+        var machineAddresses = localAddresses.ReadOrNull();
         return Results.Ok(pcs.Select(p =>
         {
             var isOnline = IsOnline(p.LastSeenUtc, now);
@@ -91,7 +92,7 @@ public static partial class PcEndpoints
                     ? ToSummary(session, now)
                     : null,
                 PcShutdownRules.StateOf(p, isOnline, now),
-                ServerPcRule.IsServerPc(p.IpAddress, machineAddresses));
+                machineAddresses is not null && ServerPcRule.IsServerPc(p.IpAddress, machineAddresses));
         }));
     }
 
