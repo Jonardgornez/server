@@ -19,7 +19,8 @@ public record HeartbeatRequest(int? SessionId);
 public record HeartbeatScreenView(string ViewId, string Mode);
 // Notice is the administrator's on-screen notice text, or null when the notice is turned off.
 // ShutdownSeconds and RestartSeconds are set only on the one heartbeat that hands the PC a requested shutdown or restart,
-// and say how long it has to go down. Exactly one of them is set, so an older client that only reads ShutdownSeconds never shuts down for a restart.
+// and say how long it has to go down: the countdown stored with that delivery. Exactly one of them is set, so an older client
+// that only reads ShutdownSeconds never shuts down for a restart.
 public record HeartbeatResponse(
     PcSessionInfo? Session,
     string? EndedReason,
@@ -358,18 +359,18 @@ public static partial class ClientEndpoints
         var now = clock.GetUtcNow();
         var delivery = await db.Pcs
             .Where(p => p.Id == pcId)
-            .Select(p => new { p.ShutdownDeliveredAtUtc, p.PowerAction })
+            .Select(p => new { p.ShutdownDeliveredAtUtc, p.PowerAction, p.PowerCountdownSeconds })
             .FirstOrDefaultAsync(ct);
-        var reason = LogoutReason(delivery?.ShutdownDeliveredAtUtc, delivery?.PowerAction, now);
+        var reason = LogoutReason(delivery?.ShutdownDeliveredAtUtc, delivery?.PowerAction, delivery?.PowerCountdownSeconds, now);
         await SessionLifecycle.EndExpiredForPcAsync(db, pcId, now, ct);
         await SessionLifecycle.EndForPcAsync(db, pcId, reason, now, ct);
         return Results.NoContent();
     }
 
     // A PC the administrator has just shut down or restarted ends its session as an admin action, not as a plain logout.
-    private static string LogoutReason(DateTimeOffset? deliveredAt, string? storedAction, DateTimeOffset now)
+    private static string LogoutReason(DateTimeOffset? deliveredAt, string? storedAction, int? countdownSeconds, DateTimeOffset now)
     {
-        if (deliveredAt is not { } delivered || !PcShutdownRules.IsWithin(delivered, now, PcShutdownRules.LogoutWindow))
+        if (deliveredAt is not { } delivered || !PcShutdownRules.IsWithin(delivered, now, PcShutdownRules.LogoutWindowOf(countdownSeconds)))
         {
             return SessionLifecycle.Logout;
         }
@@ -434,6 +435,7 @@ public static partial class ClientEndpoints
                 p.ShutdownRequestedAtUtc,
                 p.ShutdownDeliveredAtUtc,
                 p.PowerAction,
+                p.PowerCountdownSeconds,
             })
             .FirstOrDefaultAsync(ct);
         if (known is null)
@@ -480,15 +482,13 @@ public static partial class ClientEndpoints
             return NotRegistered();
         }
 
-        var deliveredAction = await DeliverPowerActionAsync(
+        var delivery = await DeliverPowerActionAsync(
             db,
             tokenHash,
             address,
             wasOnline,
             localAddresses,
-            known.ShutdownRequestedAtUtc,
-            known.PowerAction,
-            known.ShutdownDeliveredAtUtc,
+            new PowerSnapshot(known.ShutdownRequestedAtUtc, known.ShutdownDeliveredAtUtc, known.PowerAction, known.PowerCountdownSeconds),
             now,
             ct);
 
@@ -509,8 +509,8 @@ public static partial class ClientEndpoints
             endedReason,
             known.IsLocked,
             settings.NoticeEnabled ? settings.NoticeText : null,
-            deliveredAction == PcShutdownRules.ShutdownAction ? PcShutdownRules.DeliveredSeconds : null,
-            deliveredAction == PcShutdownRules.RestartAction ? PcShutdownRules.DeliveredSeconds : null,
+            delivery?.Action == PcShutdownRules.ShutdownAction ? delivery.CountdownSeconds : null,
+            delivery?.Action == PcShutdownRules.RestartAction ? delivery.CountdownSeconds : null,
             screenView));
     }
 

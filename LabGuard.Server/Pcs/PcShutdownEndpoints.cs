@@ -120,18 +120,31 @@ public static partial class PcEndpoints
     // A PC shut down or restarted within the delivery window is skipped, so a fresh delivery isn't followed by a second request.
     // Replacing a request also forgets an older delivery, so the stored action always belongs to the stored request.
     // Returns how many PCs were newly requested.
-    private static Task<int> RequestPowerActionsAsync(AppDbContext db, int[] pcIds, string action, DateTimeOffset now, CancellationToken ct)
+    private static async Task<int> RequestPowerActionsAsync(AppDbContext db, int[] pcIds, string action, DateTimeOffset now, CancellationToken ct)
     {
         var expiredBefore = now - PcShutdownRules.RequestWindow;
-        var deliveredBefore = now - PcShutdownRules.DeliveryWindow;
-        return db.Pcs
-            .Where(p => pcIds.Contains(p.Id)
-                && (p.ShutdownRequestedAtUtc == null || p.ShutdownRequestedAtUtc <= expiredBefore)
-                && (p.ShutdownDeliveredAtUtc == null || p.ShutdownDeliveredAtUtc <= deliveredBefore))
-            .ExecuteUpdateAsync(setters => setters
-                .SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)now)
-                .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
-                .SetProperty(p => p.PowerAction, action), ct);
+        var candidates = await db.Pcs
+            .AsNoTracking()
+            .Where(p => pcIds.Contains(p.Id) && (p.ShutdownRequestedAtUtc == null || p.ShutdownRequestedAtUtc <= expiredBefore))
+            .Select(p => new { p.Id, p.ShutdownRequestedAtUtc, p.ShutdownDeliveredAtUtc, p.PowerCountdownSeconds })
+            .ToListAsync(ct);
+
+        // Each delivery window depends on the countdown stored with that delivery, so it is checked for each PC here. The update
+        // matches the values read, so a PC that a heartbeat changed meanwhile is left alone and not requested.
+        var requested = 0;
+        foreach (var pc in candidates.Where(p => !PcShutdownRules.IsDeliveryInWindow(p.ShutdownDeliveredAtUtc, p.PowerCountdownSeconds, now)))
+        {
+            requested += await db.Pcs
+                .Where(p => p.Id == pc.Id
+                    && p.ShutdownRequestedAtUtc == pc.ShutdownRequestedAtUtc
+                    && p.ShutdownDeliveredAtUtc == pc.ShutdownDeliveredAtUtc)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)now)
+                    .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
+                    .SetProperty(p => p.PowerAction, action), ct);
+        }
+
+        return requested;
     }
 
     private static string ServerPcMessage(string action) =>

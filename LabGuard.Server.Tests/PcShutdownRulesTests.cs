@@ -120,6 +120,70 @@ public class PcShutdownRulesTests
         Assert.Equal(PcShutdownRules.ShutdownState, PcShutdownRules.StateOf(pc, isOnline: false, Now));
     }
 
+    // The windows follow the countdown stored with the delivery: 30 seconds gives the first version's windows, 600 a longer one.
+    // A null countdown is a row delivered before it was stored, so it uses the default of 30.
+
+    [Theory]
+    [InlineData(30, 59, true)]
+    [InlineData(30, 60, false)]
+    [InlineData(600, 629, true)]
+    [InlineData(600, 630, false)]
+    [InlineData(null, 59, true)]
+    [InlineData(null, 60, false)]
+    public void StateOf_DeliveryWindowFollowsTheStoredCountdown(int? countdown, int secondsSinceDelivery, bool inWindow)
+    {
+        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddSeconds(-secondsSinceDelivery), PowerCountdownSeconds = countdown };
+
+        Assert.Equal(inWindow ? PcShutdownRules.ShuttingDownState : null, PcShutdownRules.StateOf(pc, isOnline: true, Now));
+    }
+
+    [Theory]
+    [InlineData(30, 299, true)]
+    [InlineData(30, 300, false)]
+    [InlineData(600, 869, true)]
+    [InlineData(600, 870, false)]
+    [InlineData(null, 299, true)]
+    [InlineData(null, 300, false)]
+    public void StateOf_RebootingWindowFollowsTheStoredCountdown(int? countdown, int secondsSinceDelivery, bool inWindow)
+    {
+        var pc = new Pc
+        {
+            Name = "PC-01",
+            ShutdownDeliveredAtUtc = Now.AddSeconds(-secondsSinceDelivery),
+            PowerAction = PcShutdownRules.RestartAction,
+            PowerCountdownSeconds = countdown,
+        };
+
+        Assert.Equal(inWindow ? PcShutdownRules.RebootingState : null, PcShutdownRules.StateOf(pc, isOnline: false, Now));
+    }
+
+    [Theory]
+    [InlineData(null, 60)]
+    [InlineData(30, 60)]
+    [InlineData(600, 630)]
+    public void DeliveryWindowOf_IsTheCountdownPlus30Seconds(int? countdown, int seconds) =>
+        Assert.Equal(TimeSpan.FromSeconds(seconds), PcShutdownRules.DeliveryWindowOf(countdown));
+
+    [Theory]
+    [InlineData(null, 120)]
+    [InlineData(30, 120)]
+    [InlineData(600, 690)]
+    public void LogoutWindowOf_IsTheCountdownPlus90Seconds(int? countdown, int seconds) =>
+        Assert.Equal(TimeSpan.FromSeconds(seconds), PcShutdownRules.LogoutWindowOf(countdown));
+
+    [Theory]
+    [InlineData(null, 300)]
+    [InlineData(30, 300)]
+    [InlineData(600, 870)]
+    public void RebootingWindowOf_IsTheCountdownPlus270Seconds(int? countdown, int seconds) =>
+        Assert.Equal(TimeSpan.FromSeconds(seconds), PcShutdownRules.RebootingWindowOf(countdown));
+
+    [Fact]
+    public void IsDeliveryInWindow_NoDelivery_IsFalse()
+    {
+        Assert.False(PcShutdownRules.IsDeliveryInWindow(null, countdownSeconds: 30, Now));
+    }
+
     [Fact]
     public void IsWithin_FutureTime_CountsAsWithin()
     {

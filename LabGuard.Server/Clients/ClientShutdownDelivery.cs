@@ -1,6 +1,7 @@
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using LabGuard.Server.Pcs;
+using LabGuard.Server.Settings;
 using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Clients;
@@ -10,16 +11,24 @@ namespace LabGuard.Server.Clients;
 // A request is never handed to a PC that was offline before this heartbeat, or to the PC this server runs on.
 public static partial class ClientEndpoints
 {
-    // Returns the action handed to the PC on this heartbeat, or null when this heartbeat carries none.
-    private static async Task<string?> DeliverPowerActionAsync(
+    // The stored shutdown or restart as a heartbeat reads it, before the heartbeat changes anything.
+    private sealed record PowerSnapshot(
+        DateTimeOffset? RequestedAtUtc,
+        DateTimeOffset? DeliveredAtUtc,
+        string? PowerAction,
+        int? CountdownSeconds);
+
+    // The action handed to the PC on a heartbeat, with the countdown stored for it.
+    private sealed record PowerDelivery(string Action, int CountdownSeconds);
+
+    // Returns the action handed to the PC on this heartbeat with its countdown, or null when this heartbeat carries none.
+    private static async Task<PowerDelivery?> DeliverPowerActionAsync(
         AppDbContext db,
         string tokenHash,
         string? address,
         bool wasOnline,
         ILocalAddressSource localAddresses,
-        DateTimeOffset? requestedAt,
-        string? storedAction,
-        DateTimeOffset? deliveredAt,
+        PowerSnapshot power,
         DateTimeOffset now,
         CancellationToken ct)
     {
@@ -35,16 +44,16 @@ public static partial class ClientEndpoints
             return null;
         }
 
-        // A delivery more than the window old is forgotten: the PC is no longer shutting down or restarting.
-        var deliveredBefore = now - PcShutdownRules.DeliveryWindow;
-        if (deliveredAt is { } lastDelivered && lastDelivered < deliveredBefore)
+        // A delivery more than its own window old is forgotten: the PC is no longer shutting down or restarting.
+        var deliveredBefore = now - PcShutdownRules.DeliveryWindowOf(power.CountdownSeconds);
+        if (power.DeliveredAtUtc is { } lastDelivered && lastDelivered < deliveredBefore)
         {
             await db.Pcs
                 .Where(p => p.TokenHash == tokenHash && p.ShutdownDeliveredAtUtc < deliveredBefore)
                 .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null), ct);
         }
 
-        if (requestedAt is not { } requested)
+        if (power.RequestedAtUtc is not { } requested)
         {
             return null;
         }
@@ -73,14 +82,18 @@ public static partial class ClientEndpoints
             return null;
         }
 
+        // The countdown in force now is stored with this delivery, so a later change to the setting leaves it alone.
+        var countdown = (await ServerSettingsStore.GetAsync(db, ct)).PowerCountdownSeconds;
+
         // The update matches this exact request, so a concurrent heartbeat that already took it gets nothing, and a request
         // replaced after it was read is left for a later heartbeat, which reads the action that belongs to it.
         var changed = await db.Pcs
             .Where(p => p.TokenHash == tokenHash && p.ShutdownRequestedAtUtc == requested)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)null)
-                .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)now), ct);
-        return changed > 0 ? PcShutdownRules.ActionOf(storedAction) : null;
+                .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)now)
+                .SetProperty(p => p.PowerCountdownSeconds, (int?)countdown), ct);
+        return changed > 0 ? new PowerDelivery(PcShutdownRules.ActionOf(power.PowerAction), countdown) : null;
     }
 
     // Drops a pending request without delivering it.
