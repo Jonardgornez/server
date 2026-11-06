@@ -150,6 +150,16 @@ public static class SessionLifecycle
             ? (int)Math.Max(0, Math.Ceiling((expiresAt - (session.PausedAtUtc ?? now)).TotalSeconds))
             : null;
 
-    public static PcSessionInfo ToInfo(PcSession session, DateTimeOffset now) =>
-        new(session.Id, session.Username, ToTime(session.DefaultTimeMinutes), SecondsRemaining(session, now), session.IsAdminUnlock);
+    // Edit time can leave more time than the session started with, and the client refuses a session whose
+    // seconds exceed its minutes, so the reported minutes always cover the time left.
+    public static int? ReportedMinutes(int? defaultMinutes, int? secondsRemaining) =>
+        defaultMinutes is { } minutes
+            ? Math.Max(minutes, (int)Math.Ceiling((secondsRemaining ?? 0) / 60.0))
+            : null;
+
+    public static PcSessionInfo ToInfo(PcSession session, DateTimeOffset now)
+    {
+        var secondsRemaining = SecondsRemaining(session, now);
+        return new(session.Id, session.Username, ToTime(ReportedMinutes(session.DefaultTimeMinutes, secondsRemaining)), secondsRemaining, session.IsAdminUnlock);
+    }
 }

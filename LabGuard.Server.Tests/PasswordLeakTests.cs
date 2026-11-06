@@ -169,6 +169,59 @@ public class PasswordLeakTests
     }
 
     [Fact]
+    public async Task ErrorReplies_CarryNoPasswordOrHash_AndNeitherDoTheLogs()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        Assert.Equal(HttpStatusCode.Created, (await admin.PostAsJsonAsync("/api/accounts", AccountBody("alice", Password))).StatusCode);
+
+        using var stranger = app.CreateBrowser();
+        var wrongAdmin = await stranger.PostAsJsonAsync("/api/auth/login", new { username = TestApp.Username, password = NewPassword });
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongAdmin.StatusCode);
+        await AssertNoPasswordValuesAsync(wrongAdmin, await SecretsAsync(app));
+
+        var tooShort = await admin.PostAsJsonAsync("/api/accounts", AccountBody("bob", "short"));
+        Assert.Equal(HttpStatusCode.BadRequest, tooShort.StatusCode);
+        await AssertNoPasswordValuesAsync(tooShort, [.. await SecretsAsync(app), "short"]);
+
+        var wrongCurrent = await admin.PostAsJsonAsync("/api/auth/change-password", new { currentPassword = NewPassword, newPassword = Password });
+        Assert.False(wrongCurrent.IsSuccessStatusCode);
+        await AssertNoPasswordValuesAsync(wrongCurrent, await SecretsAsync(app));
+
+        using var pcClient = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        using var wrongPcLogin = new HttpRequestMessage(HttpMethod.Post, "/api/client/login")
+        {
+            Content = JsonContent.Create(new { username = "alice", password = NewPassword }),
+        };
+        wrongPcLogin.Headers.TryAddWithoutValidation("Authorization", $"Bearer {pc.Token}");
+        var refused = await pcClient.SendAsync(wrongPcLogin);
+        Assert.False(refused.IsSuccessStatusCode);
+        await AssertNoPasswordValuesAsync(refused, await SecretsAsync(app));
+
+        var secrets = await SecretsAsync(app);
+        foreach (var entry in app.Logs.Entries)
+        {
+            foreach (var secret in secrets)
+            {
+                Assert.DoesNotContain(secret, entry);
+            }
+        }
+    }
+
+    // An error message may use the word "password", so this checks only for the secret values themselves.
+    private static async Task AssertNoPasswordValuesAsync(HttpResponseMessage response, string[] secrets)
+    {
+        var body = await response.Content.ReadAsStringAsync();
+        var text = body.Length == 0 ? "" : JsonDocument.Parse(body).RootElement.ToString();
+        foreach (var secret in secrets)
+        {
+            Assert.DoesNotContain(secret, body);
+            Assert.DoesNotContain(secret, text);
+        }
+    }
+
+    [Fact]
     public async Task StoredHash_IsNotThePassword_AndTwoAccountsWithOnePasswordGetDifferentHashes()
     {
         using var app = new TestApp();

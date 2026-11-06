@@ -310,7 +310,7 @@ public class PcTimeEndpointTests
         Assert.Equal(app.Time.GetUtcNow().AddMinutes(13).ToUnixTimeMilliseconds(), session.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
         Assert.Null(session.EndedAtUtc);
         var shown = await HeartbeatTimeAsync(client, pc, sessionId);
-        Assert.Equal(new ReportedTime(AccountEndpoints.TimeLimitMode, 10, 780), shown);
+        Assert.Equal(new ReportedTime(AccountEndpoints.TimeLimitMode, 13, 780), shown);
     }
 
     [Fact]
@@ -356,7 +356,7 @@ public class PcTimeEndpointTests
         await BringOnlineAsync(app, pc.Id);
         Assert.Equal(HttpStatusCode.NoContent, (await UnlockAsync(admin, pc.Id)).StatusCode);
 
-        Assert.Equal(new ReportedTime(AccountEndpoints.TimeLimitMode, 10, 780), await HeartbeatTimeAsync(client, pc, sessionId));
+        Assert.Equal(new ReportedTime(AccountEndpoints.TimeLimitMode, 13, 780), await HeartbeatTimeAsync(client, pc, sessionId));
         Assert.True((await StoredPcAsync(app, pc.Id)).LockedAtUtc is null);
     }
 

@@ -364,6 +364,35 @@ public class SessionLifecycleTests
         Assert.NotNull(ended2.ExpiresAtUtc);
     }
 
+    [Theory]
+    [InlineData(60, 3000, 60)]
+    [InlineData(60, 3600, 60)]
+    [InlineData(60, 3601, 61)]
+    [InlineData(60, 4800, 80)]
+    [InlineData(10, 86400, 1440)]
+    public void ReportedMinutes_AlwaysCoverTheTimeLeft(int defaultMinutes, int secondsRemaining, int expected)
+    {
+        Assert.Equal(expected, SessionLifecycle.ReportedMinutes(defaultMinutes, secondsRemaining));
+    }
+
+    [Fact]
+    public void ReportedMinutes_StayNullForOpenTime()
+    {
+        Assert.Null(SessionLifecycle.ReportedMinutes(null, null));
+    }
+
+    [Fact]
+    public void ToInfo_AfterAddedTime_NeverReportsMoreSecondsThanMinutes()
+    {
+        var now = new DateTimeOffset(2026, 11, 6, 10, 0, 0, TimeSpan.Zero);
+        var session = new PcSession { Id = 1, Username = "student", DefaultTimeMinutes = 60, ExpiresAtUtc = now.AddMinutes(80) };
+
+        var info = SessionLifecycle.ToInfo(session, now);
+
+        Assert.Equal(4800, info.SecondsRemaining);
+        Assert.Equal(80, info.Time.Minutes);
+    }
+
     private static PcSession SessionOn(int pcId, DateTimeOffset startedAt, DateTimeOffset? expiresAt = null, DateTimeOffset? endedAt = null, DateTimeOffset? pausedAt = null) => new()
     {
         PcId = pcId,
