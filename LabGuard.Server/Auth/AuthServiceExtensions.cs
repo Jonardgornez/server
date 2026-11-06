@@ -13,9 +13,10 @@ public static class AuthServiceExtensions
 {
     public const string CookieName = "lykantra.admin";
     public const string SessionVersionClaim = "lykantra:session-version";
+    // The idle limit that was saved when this session signed in. It applies to that session only.
+    public const string IdleTimeoutMinutesClaim = "lykantra:idle-timeout-minutes";
     // Sent by the dashboard's automatic polling so it doesn't count as activity for the idle timeout.
     public const string BackgroundRefreshHeader = "X-Background-Refresh";
-    public static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(30);
 
     public static IServiceCollection AddAdminAuth(this IServiceCollection services)
     {
@@ -30,7 +31,9 @@ public static class AuthServiceExtensions
                 options.Cookie.HttpOnly = true;
                 options.Cookie.SameSite = SameSiteMode.Strict;
                 options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
-                options.ExpireTimeSpan = IdleTimeout;
+                // The longest idle limit an administrator can save. The limit a session actually gets is checked in
+                // ValidateSessionVersionAsync, so this only needs to be at least as long as any saved limit.
+                options.ExpireTimeSpan = TimeSpan.FromMinutes(ServerSettings.MaxIdleTimeoutMinutes);
                 // Renewal is explicit in ValidateSessionVersionAsync. The built-in sliding renewal would
                 // also fire past the half-way point on background refreshes and keep an idle session alive.
                 options.SlidingExpiration = false;
@@ -75,9 +78,14 @@ public static class AuthServiceExtensions
             isValid = currentVersion == version;
         }
 
+        if (isValid && IsIdleTooLong(context))
+        {
+            isValid = false;
+        }
+
         if (isValid)
         {
-            // Re-issue on every request so the 30 minutes are measured from the last activity,
+            // Re-issue on every request so the idle limit is measured from the last activity,
             // not from the half-way point the sliding expiry would otherwise wait for.
             // Background refreshes skip this, so they can't keep an idle session alive.
             context.ShouldRenew = context.Request.Headers[BackgroundRefreshHeader] != "1";
@@ -87,5 +95,18 @@ public static class AuthServiceExtensions
             context.RejectPrincipal();
             await context.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         }
+    }
+
+    // Measured from the last request that renewed the session. A session with no saved limit is refused.
+    private static bool IsIdleTooLong(CookieValidatePrincipalContext context)
+    {
+        if (!int.TryParse(context.Principal?.FindFirstValue(IdleTimeoutMinutesClaim), CultureInfo.InvariantCulture, out var idleMinutes)
+            || context.Properties.IssuedUtc is not { } lastRenewedUtc)
+        {
+            return true;
+        }
+
+        var now = context.HttpContext.RequestServices.GetRequiredService<TimeProvider>().GetUtcNow();
+        return now - lastRenewedUtc > TimeSpan.FromMinutes(idleMinutes);
     }
 }

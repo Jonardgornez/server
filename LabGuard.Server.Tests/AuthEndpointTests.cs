@@ -48,6 +48,15 @@ public class AuthEndpointTests
     private static Task<HttpResponseMessage> ChangePasswordAsync(HttpClient client, string current, string next) =>
         client.PostAsJsonAsync("/api/auth/change-password", new { currentPassword = current, newPassword = next });
 
+    private static Task<HttpResponseMessage> SetIdleTimeoutAsync(HttpClient admin, double minutes) =>
+        admin.PutAsJsonAsync("/api/settings", new
+        {
+            defaultApproval = new { mode = "time-limit", minutes = 60 },
+            notice = new { isEnabled = true, text = "Notice" },
+            idleTimeoutMinutes = minutes,
+            defaultViewMode = "notified",
+        });
+
     // Seeding
 
     [Fact]
@@ -340,7 +349,7 @@ public class AuthEndpointTests
         Assert.True(options.Cookie.HttpOnly);
         Assert.Equal(SameSiteMode.Strict, options.Cookie.SameSite);
         Assert.Equal(CookieSecurePolicy.SameAsRequest, options.Cookie.SecurePolicy);
-        Assert.Equal(TimeSpan.FromMinutes(30), options.ExpireTimeSpan);
+        Assert.Equal(TimeSpan.FromMinutes(ServerSettings.MaxIdleTimeoutMinutes), options.ExpireTimeSpan);
         Assert.False(options.SlidingExpiration);
     }
 
@@ -558,6 +567,82 @@ public class AuthEndpointTests
 
         app.Time.Advance(TimeSpan.FromMinutes(31));
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Session_UsesTheIdleLimitSavedAtItsSignIn()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        Assert.Equal(HttpStatusCode.OK, (await SetIdleTimeoutAsync(admin, 5)).StatusCode);
+        using var session = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromMinutes(6));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await session.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Session_SignedInBeforeTheChange_KeepsItsOwnLimit()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+
+        Assert.Equal(HttpStatusCode.OK, (await SetIdleTimeoutAsync(admin, 5)).StatusCode);
+        app.Time.Advance(TimeSpan.FromMinutes(6));
+
+        Assert.Equal(HttpStatusCode.OK, (await admin.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Session_WithAFiveMinuteLimit_IsKeptAliveByActivity_AndEndsAfterItsLimit()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await SetIdleTimeoutAsync(admin, 5);
+        using var session = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromMinutes(4));
+        Assert.Equal(HttpStatusCode.OK, (await session.GetAsync("/api/auth/me")).StatusCode);
+        app.Time.Advance(TimeSpan.FromMinutes(4));
+        Assert.Equal(HttpStatusCode.OK, (await session.GetAsync("/api/auth/me")).StatusCode);
+        app.Time.Advance(TimeSpan.FromMinutes(6));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await session.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Session_BackgroundRefresh_DoesNotRenewTheIdleLimit()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await SetIdleTimeoutAsync(admin, 5);
+        using var session = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromMinutes(4));
+        using var background = new HttpRequestMessage(HttpMethod.Get, "/api/auth/me");
+        background.Headers.Add(AuthServiceExtensions.BackgroundRefreshHeader, "1");
+        Assert.Equal(HttpStatusCode.OK, (await session.SendAsync(background)).StatusCode);
+        app.Time.Advance(TimeSpan.FromMinutes(2));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await session.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Session_WithA480MinuteLimit_StaysValidWellPast30Minutes()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await SetIdleTimeoutAsync(admin, 480);
+        using var session = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromMinutes(400));
+        Assert.Equal(HttpStatusCode.OK, (await session.GetAsync("/api/auth/me")).StatusCode);
+        app.Time.Advance(TimeSpan.FromMinutes(479));
+        Assert.Equal(HttpStatusCode.OK, (await session.GetAsync("/api/auth/me")).StatusCode);
+        app.Time.Advance(TimeSpan.FromMinutes(481));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await session.GetAsync("/api/auth/me")).StatusCode);
     }
 
     // Request hardening

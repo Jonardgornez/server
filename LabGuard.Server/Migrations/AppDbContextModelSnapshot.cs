@@ -185,6 +185,43 @@ namespace LabGuard.Server.Migrations
                     b.ToTable("PcSessions");
                 });
 
+            modelBuilder.Entity("LabGuard.Server.Data.ServerSettings", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("DefaultApprovalMinutes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DefaultApprovalMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DefaultViewMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("IdleTimeoutMinutes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("NoticeEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("NoticeText")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ServerSettings", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_ServerSettings_SingleRow", "\"Id\" = 1");
+                        });
+                });
+
             modelBuilder.Entity("LabGuard.Server.Data.UserAccount", b =>
                 {
                     b.Property<int>("Id")

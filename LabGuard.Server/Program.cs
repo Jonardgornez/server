@@ -5,6 +5,7 @@ using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using LabGuard.Server.Pcs;
 using LabGuard.Server.Requests;
+using LabGuard.Server.Settings;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -86,6 +87,8 @@ app.MapAuthEndpoints();
 app.MapAccountEndpoints();
 app.MapLoginRequestEndpoints();
 app.MapPcEndpoints();
+app.MapSettingsEndpoints();
+app.MapServerInfoEndpoints();
 app.MapClientEndpoints();
 
 app.Run();

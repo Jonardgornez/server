@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Claims;
 using System.Text.Json;
 using LabGuard.Server.Data;
+using LabGuard.Server.Settings;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Identity;
@@ -93,7 +94,9 @@ public static class AuthEndpoints
 
             await ResetFailuresAsync(db, admin, http.RequestAborted);
 
-            await http.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, BuildPrincipal(admin));
+            // The idle limit is read at sign-in, so a change in settings applies from the next sign-in.
+            var settings = await ServerSettingsStore.GetAsync(db, http.RequestAborted);
+            await http.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, BuildPrincipal(admin, settings.IdleTimeoutMinutes));
             return Results.Ok(new UserResponse(admin.Username));
         }
         finally
@@ -252,13 +255,14 @@ public static class AuthEndpoints
         return account is not null && result != PasswordVerificationResult.Failed;
     }
 
-    private static ClaimsPrincipal BuildPrincipal(AdminAccount admin)
+    private static ClaimsPrincipal BuildPrincipal(AdminAccount admin, int idleTimeoutMinutes)
     {
         var identity = new ClaimsIdentity(
             [
                 new Claim(ClaimTypes.NameIdentifier, admin.Id.ToString(CultureInfo.InvariantCulture)),
                 new Claim(ClaimTypes.Name, admin.Username),
                 new Claim(AuthServiceExtensions.SessionVersionClaim, admin.SessionVersion.ToString(CultureInfo.InvariantCulture)),
+                new Claim(AuthServiceExtensions.IdleTimeoutMinutesClaim, idleTimeoutMinutes.ToString(CultureInfo.InvariantCulture)),
             ],
             CookieAuthenticationDefaults.AuthenticationScheme);
         return new ClaimsPrincipal(identity);

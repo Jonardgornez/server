@@ -4,6 +4,7 @@ using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
 using LabGuard.Server.Pcs;
 using LabGuard.Server.Sessions;
+using LabGuard.Server.Settings;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
@@ -12,7 +13,8 @@ namespace LabGuard.Server.Clients;
 public record PcLoginRequest(string? Username, string? Password);
 public record PcLoginResponse(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining);
 public record HeartbeatRequest(int? SessionId);
-public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason, bool IsLocked);
+// Notice is the administrator's on-screen notice text, or null when the notice is turned off.
+public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason, bool IsLocked, string? Notice);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -437,10 +439,12 @@ public static partial class ClientEndpoints
                 .FirstOrDefaultAsync(ct);
         }
 
+        var settings = await ServerSettingsStore.GetAsync(db, ct);
         return Results.Ok(new HeartbeatResponse(
             active is null ? null : SessionLifecycle.ToInfo(active, now),
             endedReason,
-            known.IsLocked));
+            known.IsLocked,
+            settings.NoticeEnabled ? settings.NoticeText : null));
     }
 
     private static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)

@@ -10,6 +10,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<LoginRequest> LoginRequests => Set<LoginRequest>();
     public DbSet<Pc> Pcs => Set<Pc>();
     public DbSet<PcSession> PcSessions => Set<PcSession>();
+    public DbSet<ServerSettings> ServerSettingsRows => Set<ServerSettings>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -69,6 +70,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             // At most one active (not ended) session per PC, enforced by the database.
             entity.HasIndex(s => s.PcId).IsUnique().HasFilter("\"EndedAtUtc\" IS NULL");
             entity.HasIndex(s => s.UserAccountId);
+        });
+
+        modelBuilder.Entity<ServerSettings>(entity =>
+        {
+            entity.ToTable("ServerSettings", table => table.HasCheckConstraint("CK_ServerSettings_SingleRow", $"\"Id\" = {ServerSettings.SingletonId}"));
+            entity.Property(s => s.Id).ValueGeneratedNever();
+            entity.Property(s => s.DefaultApprovalMode).HasMaxLength(16).IsRequired();
+            entity.Property(s => s.NoticeText).HasMaxLength(ServerSettings.MaxNoticeLength).IsRequired();
+            entity.Property(s => s.DefaultViewMode).HasMaxLength(16).IsRequired();
         });
     }
 }
