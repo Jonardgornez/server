@@ -199,7 +199,17 @@ public static partial class ClientEndpoints
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(r => r.Nonce, nonce)
                 .SetProperty(r => r.PairingNumber, pairingNumber), ct);
-        return revealed == 0 ? RevealRefused() : Results.NoContent();
+        if (revealed > 0)
+        {
+            return Results.NoContent();
+        }
+
+        // A retry can race the PC's own first reveal, and losing that race with the same nonce still succeeded.
+        var storedNonce = await db.PcRegistrationRequests
+            .Where(r => r.Id == request.Id && r.Status == RegistrationRequestStatus.Pending)
+            .Select(r => r.Nonce)
+            .FirstOrDefaultAsync(ct);
+        return storedNonce == nonce ? Results.NoContent() : RevealRefused();
     }
 
     private static async Task<IResult> RegistrationStatusAsync(HttpContext http, AppDbContext db, TimeProvider clock)
