@@ -21,6 +21,8 @@ public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, Defau
 
 // Sent as {} by the single lock and unlock routes; the body is required so a cross-origin form can't send it.
 public record PcAdminActionRequest;
+// Action is add-time, open-time or time-out. Minutes is a double so a fraction reaches validation instead of failing JSON parsing.
+public record PcTimeRequest(string? Action, double? Minutes);
 // Sent by the bulk lock and unlock routes. A missing, empty or over-long list is refused.
 public record PcIdsRequest(int[]? Ids);
 public record AffectedPcsResponse(int Affected);
@@ -37,6 +39,7 @@ public static partial class PcEndpoints
         group.MapDelete("/{id:int}", DeleteAsync);
         group.MapPost("/{id:int}/lock", LockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/unlock", UnlockAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/{id:int}/time", AdjustTimeAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/lock", LockManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/unlock", UnlockManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;

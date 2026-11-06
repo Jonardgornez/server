@@ -232,6 +232,138 @@ public class SessionLifecycleTests
         Assert.Equal(now.AddMinutes(70).ToUnixTimeMilliseconds(), stored.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
     }
 
+    [Fact]
+    public void ExpiryAfterAddingTime_MovesATimedExpiryLater()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+        var session = new PcSession { ExpiresAtUtc = now.AddMinutes(30) };
+
+        Assert.Equal(now.AddMinutes(45), SessionLifecycle.ExpiryAfterAddingTime(session, 15, now));
+    }
+
+    [Fact]
+    public void ExpiryAfterAddingTime_GivesOpenTimeThatManyMinutesFromNow()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+
+        Assert.Equal(now.AddMinutes(15), SessionLifecycle.ExpiryAfterAddingTime(new PcSession(), 15, now));
+    }
+
+    [Fact]
+    public void ExpiryAfterAddingTime_GivesPausedOpenTimeThatManyMinutesFromThePause()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+        var session = new PcSession { PausedAtUtc = now.AddMinutes(-20) };
+
+        var expiresAt = SessionLifecycle.ExpiryAfterAddingTime(session, 15, now);
+
+        Assert.Equal(now.AddMinutes(-5), expiresAt);
+        Assert.Equal(TimeSpan.FromMinutes(15), expiresAt - session.PausedAtUtc);
+    }
+
+    [Fact]
+    public void FitsMaxTimeLeft_AllowsExactly1440MinutesLeft_AndRejectsOneSecondMore()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+        var atLimit = new PcSession { ExpiresAtUtc = now.AddMinutes(1439) };
+        var oneSecondOver = new PcSession { ExpiresAtUtc = now.AddMinutes(1439).AddSeconds(1) };
+
+        Assert.True(SessionLifecycle.FitsMaxTimeLeft(atLimit, 1, now));
+        Assert.False(SessionLifecycle.FitsMaxTimeLeft(oneSecondOver, 1, now));
+    }
+
+    [Fact]
+    public void FitsMaxTimeLeft_WhilePaused_MeasuresFromThePauseMoment()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+        var paused = new PcSession { ExpiresAtUtc = now.AddMinutes(1439), PausedAtUtc = now };
+
+        Assert.True(SessionLifecycle.FitsMaxTimeLeft(paused, 1, now.AddHours(5)));
+        Assert.False(SessionLifecycle.FitsMaxTimeLeft(paused, 2, now.AddHours(5)));
+    }
+
+    [Fact]
+    public void FitsMaxTimeLeft_OpenTimeWithTheLargestAllowedMinutes_Fits()
+    {
+        var now = new DateTimeOffset(2026, 11, 5, 10, 0, 0, TimeSpan.Zero);
+
+        Assert.True(SessionLifecycle.FitsMaxTimeLeft(new PcSession(), 1440, now));
+    }
+
+    [Fact]
+    public async Task AddTimeAsync_ExtendsATimedSession_AndKeepsItsDefaultAndPause()
+    {
+        using var app = new TestApp();
+        var now = app.Time.GetUtcNow();
+        var timed = SessionOn(1, now.AddMinutes(-5), expiresAt: now.AddMinutes(10), pausedAt: now.AddMinutes(-1));
+        timed.DefaultTimeMinutes = 15;
+        await app.WithDbAsync(async db =>
+        {
+            db.PcSessions.Add(timed);
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        var session = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync());
+
+        var affected = await app.WithDbAsync(db => SessionLifecycle.AddTimeAsync(db, session, 20, now, CancellationToken.None));
+
+        Assert.Equal(1, affected);
+        var stored = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync());
+        Assert.Equal(now.AddMinutes(30).ToUnixTimeMilliseconds(), stored.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.Equal(15, stored.DefaultTimeMinutes);
+        Assert.Equal(now.AddMinutes(-1).ToUnixTimeMilliseconds(), stored.PausedAtUtc!.Value.ToUnixTimeMilliseconds());
+    }
+
+    [Fact]
+    public async Task AddTimeAsync_TurnsOpenTimeIntoATimeLimit_CountedFromNow()
+    {
+        using var app = new TestApp();
+        var now = app.Time.GetUtcNow();
+        await app.WithDbAsync(async db =>
+        {
+            db.PcSessions.Add(SessionOn(1, now.AddMinutes(-5)));
+            await db.SaveChangesAsync();
+            return 0;
+        });
+        var session = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync());
+
+        await app.WithDbAsync(db => SessionLifecycle.AddTimeAsync(db, session, 20, now, CancellationToken.None));
+
+        var stored = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync());
+        Assert.Equal(now.AddMinutes(20).ToUnixTimeMilliseconds(), stored.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.Equal(20, stored.DefaultTimeMinutes);
+    }
+
+    [Fact]
+    public async Task SetOpenTimeAsync_ClearsTheExpiryAndDefault_KeepsThePause_AndSkipsEndedSessions()
+    {
+        using var app = new TestApp();
+        var now = app.Time.GetUtcNow();
+        var (activeId, endedId) = await app.WithDbAsync(async db =>
+        {
+            var active = SessionOn(1, now.AddMinutes(-5), expiresAt: now.AddMinutes(10), pausedAt: now.AddMinutes(-1));
+            active.DefaultTimeMinutes = 15;
+            var ended = SessionOn(2, now.AddMinutes(-5), expiresAt: now.AddMinutes(10), endedAt: now.AddMinutes(-2));
+            ended.DefaultTimeMinutes = 15;
+            db.PcSessions.AddRange(active, ended);
+            await db.SaveChangesAsync();
+            return (active.Id, ended.Id);
+        });
+
+        var affected = await app.WithDbAsync(db => SessionLifecycle.SetOpenTimeAsync(db, activeId, CancellationToken.None));
+        var skipped = await app.WithDbAsync(db => SessionLifecycle.SetOpenTimeAsync(db, endedId, CancellationToken.None));
+
+        Assert.Equal(1, affected);
+        Assert.Equal(0, skipped);
+        var active2 = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.Id == activeId));
+        Assert.Null(active2.ExpiresAtUtc);
+        Assert.Null(active2.DefaultTimeMinutes);
+        Assert.Equal(now.AddMinutes(-1).ToUnixTimeMilliseconds(), active2.PausedAtUtc!.Value.ToUnixTimeMilliseconds());
+        var ended2 = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.Id == endedId));
+        Assert.Equal(15, ended2.DefaultTimeMinutes);
+        Assert.NotNull(ended2.ExpiresAtUtc);
+    }
+
     private static PcSession SessionOn(int pcId, DateTimeOffset startedAt, DateTimeOffset? expiresAt = null, DateTimeOffset? endedAt = null, DateTimeOffset? pausedAt = null) => new()
     {
         PcId = pcId,

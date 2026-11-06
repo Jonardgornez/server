@@ -104,6 +104,40 @@ public static class SessionLifecycle
     public static bool HasExpired(PcSession session, DateTimeOffset now) =>
         session.PausedAtUtc is null && session.ExpiresAtUtc is { } expiresAt && expiresAt <= now;
 
+    // The most time a session may have left. The client treats more than this as invalid and ends the session.
+    public static readonly TimeSpan MaxTimeLeft = TimeSpan.FromDays(1);
+
+    // Open time gets a limit of exactly the minutes, counted from now or, while paused, from the pause.
+    public static DateTimeOffset ExpiryAfterAddingTime(PcSession session, int minutes, DateTimeOffset now) =>
+        session.ExpiresAtUtc is { } expiresAt
+            ? expiresAt.AddMinutes(minutes)
+            : (session.PausedAtUtc ?? now).AddMinutes(minutes);
+
+    // Measured the way SecondsRemaining measures it: from the pause while paused.
+    public static bool FitsMaxTimeLeft(PcSession session, int minutes, DateTimeOffset now) =>
+        ExpiryAfterAddingTime(session, minutes, now) - (session.PausedAtUtc ?? now) <= MaxTimeLeft;
+
+    // Open time becomes a time limit with the minutes as its default time. A timed session keeps its default time.
+    // Any pause is kept, so a paused session shows the added time at once and resumes with it.
+    public static Task<int> AddTimeAsync(AppDbContext db, PcSession session, int minutes, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var expiresAt = ExpiryAfterAddingTime(session, minutes, now);
+        var defaultTimeMinutes = session.ExpiresAtUtc is null ? minutes : session.DefaultTimeMinutes;
+        return db.PcSessions
+            .Where(s => s.Id == session.Id && s.EndedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(s => s.ExpiresAtUtc, expiresAt)
+                .SetProperty(s => s.DefaultTimeMinutes, defaultTimeMinutes), cancellationToken);
+    }
+
+    // Makes the session open time: no expiry and no default time. Any pause is kept.
+    public static Task<int> SetOpenTimeAsync(AppDbContext db, int sessionId, CancellationToken cancellationToken) =>
+        db.PcSessions
+            .Where(s => s.Id == sessionId && s.EndedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(s => s.ExpiresAtUtc, (DateTimeOffset?)null)
+                .SetProperty(s => s.DefaultTimeMinutes, (int?)null), cancellationToken);
+
     public static DefaultTimeResponse ToTime(int? minutes) =>
         minutes is { } value
             ? new DefaultTimeResponse(AccountEndpoints.TimeLimitMode, value)
