@@ -263,6 +263,20 @@ public class PcLockEndpointTests
     }
 
     [Fact]
+    public async Task Heartbeat_AfterLockingAnOfflinePc_ReportsIsLocked()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app, seenAgo: TimeSpan.FromMinutes(1));
+        await LockAsync(admin, pc.Id);
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc));
+
+        Assert.True(body.GetProperty("isLocked").GetBoolean());
+    }
+
+    [Fact]
     public async Task Heartbeat_AfterLock_KeepsReturningThePausedSession_AndTheLock()
     {
         using var app = new TestApp();
