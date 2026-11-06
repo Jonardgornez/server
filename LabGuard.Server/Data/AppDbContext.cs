@@ -12,6 +12,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Pc> Pcs => Set<Pc>();
     public DbSet<PcSession> PcSessions => Set<PcSession>();
     public DbSet<ServerSettings> ServerSettingsRows => Set<ServerSettings>();
+    public DbSet<ScreenViewEvent> ScreenViewEvents => Set<ScreenViewEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -89,6 +90,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             // At most one active (not ended) session per PC, enforced by the database.
             entity.HasIndex(s => s.PcId).IsUnique().HasFilter("\"EndedAtUtc\" IS NULL");
             entity.HasIndex(s => s.UserAccountId);
+        });
+
+        modelBuilder.Entity<ScreenViewEvent>(entity =>
+        {
+            entity.Property(e => e.AdminUsername).HasMaxLength(64).IsRequired();
+            entity.Property(e => e.PcName).HasMaxLength(32).IsRequired();
+            entity.Property(e => e.Mode).HasMaxLength(16).IsRequired();
+            entity.Property(e => e.StartedAtUtc).HasConversion(unixMilliseconds);
+            entity.Property(e => e.EndedAtUtc).HasConversion(unixMilliseconds);
         });
 
         modelBuilder.Entity<ServerSettings>(entity =>

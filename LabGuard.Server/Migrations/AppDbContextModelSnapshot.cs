@@ -250,6 +250,38 @@ namespace LabGuard.Server.Migrations
                     b.ToTable("PcSessions");
                 });
 
+            modelBuilder.Entity("LabGuard.Server.Data.ScreenViewEvent", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AdminUsername")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("EndedAtUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PcName")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("StartedAtUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ScreenViewEvents");
+                });
+
             modelBuilder.Entity("LabGuard.Server.Data.ServerSettings", b =>
                 {
                     b.Property<int>("Id")
