@@ -86,6 +86,7 @@ app.MapGet("/api/health", () => new HealthResponse("ok"))
 app.MapAuthEndpoints();
 app.MapAccountEndpoints();
 app.MapLoginRequestEndpoints();
+app.MapRegistrationRequestEndpoints();
 app.MapPcEndpoints();
 app.MapSettingsEndpoints();
 app.MapServerInfoEndpoints();

@@ -312,11 +312,11 @@ public class PcEndpointTests
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
         using var pc = app.CreatePcClient();
-        var body = await JsonOf(await pc.PostAsync("/api/client/register", app.RegistrationBody("PC-01", app.SetupSecret)));
-        var token = body.GetProperty("token").GetString()!;
+        var token = await app.RegisterPcAsync(pc, "PC-01");
+        var id = await app.WithDbAsync(db => db.Pcs.Where(p => p.Name == "PC-01").Select(p => p.Id).SingleAsync());
         app.Time.Advance(TimeSpan.FromSeconds(20));
 
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync($"/api/pcs/{body.GetProperty("id").GetInt32()}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync($"/api/pcs/{id}")).StatusCode);
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await HeartbeatAsync(pc, token)).StatusCode);
     }
@@ -327,13 +327,31 @@ public class PcEndpointTests
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
         using var pc = app.CreatePcClient();
-        var body = await JsonOf(await pc.PostAsync("/api/client/register", app.RegistrationBody("PC-01", app.SetupSecret)));
+        var token = await app.RegisterPcAsync(pc, "PC-01");
+        var id = await app.WithDbAsync(db => db.Pcs.Where(p => p.Name == "PC-01").Select(p => p.Id).SingleAsync());
         app.Time.Advance(TimeSpan.FromSeconds(60));
-        await HeartbeatAsync(pc, body.GetProperty("token").GetString()!);
+        await HeartbeatAsync(pc, token);
 
-        var response = await admin.DeleteAsync($"/api/pcs/{body.GetProperty("id").GetInt32()}");
+        var response = await admin.DeleteAsync($"/api/pcs/{id}");
 
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    // The setup code is gone: its routes are served like any unknown path, even to a signed-in administrator.
+
+    [Theory]
+    [InlineData("GET", "/api/pcs/setup-code")]
+    [InlineData("POST", "/api/pcs/setup-code/regenerate")]
+    public async Task SetupCodeRoutes_NoLongerExist(string method, string path)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var request = new HttpRequestMessage(new HttpMethod(method), path) { Content = JsonContent.Create(new { }) };
+
+        var response = await admin.SendAsync(request);
+
+        Assert.False(response.IsSuccessStatusCode);
+        Assert.DoesNotContain("\"code\"", await response.Content.ReadAsStringAsync());
     }
 
     // Background refresh and the idle timeout

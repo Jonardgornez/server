@@ -1,12 +1,8 @@
-using System.Buffers.Text;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading.RateLimiting;
 using LabGuard.Server.Auth;
-using LabGuard.Server.Data;
-using LabGuard.Server.Network;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -14,8 +10,6 @@ using Microsoft.EntityFrameworkCore;
 namespace LabGuard.Server.Clients;
 
 public record PingResponse(string Service);
-public record RegisterPcRequest(string? Name, string? SetupSecret);
-public record RegisterPcResponse(int Id, string Name, string Token);
 
 public static partial class ClientEndpoints
 {
@@ -26,15 +20,10 @@ public static partial class ClientEndpoints
     public const int MaxTrafficPerMinute = 120;
     public const string TrafficRateLimitPolicy = "pc-traffic";
 
-    private const int TokenBytes = 32;
     private const int MaxTokenLength = 64;
     private const string BearerPrefix = "Bearer ";
     private const string NameTakenMessage = "That PC name is already registered.";
-    private const string WrongSetupCodeMessage = "That setup code isn't right.";
     private const int SqliteUniqueConstraintErrorCode = 2067;
-
-    [GeneratedRegex(@"^[A-Za-z0-9._-]+\z")]
-    private static partial Regex NamePattern();
 
     public static IServiceCollection AddClientRateLimiting(this IServiceCollection services) =>
         services.AddRateLimiter(options =>
@@ -82,7 +71,12 @@ public static partial class ClientEndpoints
     {
         var group = app.MapGroup("/api/client").AllowAnonymous();
         group.MapGet("/ping", () => Results.Ok(new PingResponse("lykantra"))).RequireRateLimiting(TrafficRateLimitPolicy);
-        group.MapPost("/register", RegisterAsync).RequireRateLimiting(RegistrationRateLimitPolicy);
+        group.MapPost("/register-requests", CreateRegistrationRequestAsync).RequireRateLimiting(RegistrationRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapPost("/register-requests/status", RegistrationStatusAsync).RequireRateLimiting(TrafficRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapPost("/register-requests/cancel", CancelRegistrationRequestAsync).RequireRateLimiting(TrafficRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/heartbeat", HeartbeatAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/login", LoginAsync).RequireRateLimiting(LoginRateLimitPolicy)
@@ -92,57 +86,6 @@ public static partial class ClientEndpoints
         group.MapPost("/offline", OfflineAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         return app;
-    }
-
-    private static async Task<IResult> RegisterAsync(HttpContext http, AppDbContext db, TimeProvider clock, PcChannelStore channel)
-    {
-        var request = await AuthEndpoints.ReadBodyAsync<RegisterPcRequest>(http.Request);
-        if (request is null)
-        {
-            return AuthEndpoints.InvalidRequest();
-        }
-
-        // First, so nothing about the name (valid, taken) can be probed without the setup code.
-        if (!channel.SecretMatches(request.SetupSecret))
-        {
-            return Results.Json(new ErrorResponse(WrongSetupCodeMessage), statusCode: StatusCodes.Status403Forbidden);
-        }
-
-        var name = request.Name?.Trim() ?? "";
-        if (name.Length == 0 || name.Length > MaxNameLength || !NamePattern().IsMatch(name))
-        {
-            return AuthEndpoints.BadRequest(
-                $"PC name must be 1 to {MaxNameLength} characters: letters, numbers, dots, underscores and hyphens only.");
-        }
-
-        var ct = http.RequestAborted;
-        if (await db.Pcs.AnyAsync(p => p.Name == name, ct))
-        {
-            return NameTaken();
-        }
-
-        var token = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(TokenBytes));
-        var now = clock.GetUtcNow();
-        var pc = new Pc
-        {
-            Name = name,
-            TokenHash = HashToken(token),
-            IpAddress = RemoteAddress(http)?.ToString(),
-            RegisteredAtUtc = now,
-            LastSeenUtc = now,
-        };
-        db.Pcs.Add(pc);
-
-        try
-        {
-            await db.SaveChangesAsync(ct);
-        }
-        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
-        {
-            return NameTaken();
-        }
-
-        return Results.Json(new RegisterPcResponse(pc.Id, pc.Name, token), statusCode: StatusCodes.Status201Created);
     }
 
     private static string? ReadBearerToken(HttpRequest request)
@@ -171,7 +114,7 @@ public static partial class ClientEndpoints
     internal static bool IsUniqueViolation(DbUpdateException exception) =>
         exception.InnerException is SqliteException { SqliteExtendedErrorCode: SqliteUniqueConstraintErrorCode };
 
-    private static IResult NameTaken() =>
+    internal static IResult NameTaken() =>
         Results.Json(new ErrorResponse(NameTakenMessage), statusCode: StatusCodes.Status409Conflict);
 
     internal static IResult NotRegistered() =>

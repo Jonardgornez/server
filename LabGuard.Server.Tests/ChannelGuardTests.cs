@@ -117,19 +117,19 @@ public class ChannelGuardTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var json = $$"""{"name":"PC-01","setupSecret":"{{app.SetupSecret}}"}""";
+        var json = $$"""{"name":"PC-01","nonce":"{{TestApp.NewNonce()}}"}""";
         var padding = new string(' ', ChannelGuard.MaxClientBodyBytes - json.Length);
 
-        var response = await client.PostAsync("/api/client/register", new StringContent(json + padding, Encoding.UTF8, "application/json"));
+        var response = await client.PostAsync("/api/client/register-requests", new StringContent(json + padding, Encoding.UTF8, "application/json"));
 
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
     }
 
     // Admin port
 
     [Theory]
     [InlineData("GET", "/api/client/ping")]
-    [InlineData("POST", "/api/client/register")]
+    [InlineData("POST", "/api/client/register-requests")]
     [InlineData("POST", "/api/client/heartbeat")]
     [InlineData("POST", "/api/client/offline")]
     [InlineData("GET", "/API/CLIENT/ping")]
@@ -304,7 +304,7 @@ public class ChannelGuardTests
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/client/ping")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await ipv6.GetAsync("/api/client/ping")).StatusCode);
-        Assert.Equal(HttpStatusCode.Created, (await client.PostAsync("/api/client/register", app.RegistrationBody("PC-01", app.SetupSecret))).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody("PC-01"))).StatusCode);
     }
 
     [Fact]

@@ -1,8 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
@@ -22,15 +20,8 @@ public class ClientEndpointTests
         return json.RootElement.Clone();
     }
 
-    private static Task<HttpResponseMessage> RegisterAsync(TestApp app, HttpClient client, string? name, string? setupSecret = null) =>
-        client.PostAsync("/api/client/register", app.RegistrationBody(name, setupSecret ?? app.SetupSecret));
-
-    private static async Task<string> RegisterTokenAsync(TestApp app, HttpClient client, string name)
-    {
-        var response = await RegisterAsync(app, client, name);
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        return (await JsonOf(response)).GetProperty("token").GetString()!;
-    }
+    private static Task<HttpResponseMessage> RequestRegistrationAsync(TestApp app, HttpClient client, string? name) =>
+        client.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody(name));
 
     private static Task<HttpResponseMessage> HeartbeatAsync(HttpClient client, string? authorization)
     {
@@ -73,181 +64,68 @@ public class ClientEndpointTests
         Assert.Single(body.EnumerateObject());
     }
 
-    // Register
+    // Accepted PCs
 
     [Fact]
-    public async Task Register_Succeeds_ReturnsTokenAndStoresOnlyItsHash()
-    {
-        using var app = new TestApp();
-        using var client = app.CreatePcClient("192.168.1.77");
-
-        var response = await RegisterAsync(app, client, "  PC-05  ");
-
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        var body = await JsonOf(response);
-        var token = body.GetProperty("token").GetString()!;
-        Assert.Equal("PC-05", body.GetProperty("name").GetString());
-        Assert.Equal(43, token.Length);
-        Assert.Matches("^[A-Za-z0-9_-]+$", token);
-
-        var stored = await StoredAsync(app, "PC-05");
-        Assert.Equal(body.GetProperty("id").GetInt32(), stored.Id);
-        Assert.NotEqual(token, stored.TokenHash);
-        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(token))), stored.TokenHash);
-        Assert.Equal("192.168.1.77", stored.IpAddress);
-        Assert.Equal(app.Time.GetUtcNow().ToUnixTimeMilliseconds(), stored.RegisteredAtUtc.ToUnixTimeMilliseconds());
-        Assert.Equal(stored.RegisteredAtUtc, stored.LastSeenUtc);
-    }
-
-    [Fact]
-    public async Task Register_TokenWorksForHeartbeat_AndTokensDiffer()
+    public async Task Accepted_TokensDiffer_AndEachWorksForHeartbeat()
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
 
-        var first = await RegisterTokenAsync(app, client, "PC-01");
-        var second = await RegisterTokenAsync(app, client, "PC-02");
+        var first = await app.RegisterPcAsync(client, "PC-01");
+        var second = await app.RegisterPcAsync(client, "PC-02");
 
         Assert.NotEqual(first, second);
         Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(client, $"Bearer {first}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(client, $"Bearer {second}")).StatusCode);
     }
 
     [Fact]
-    public async Task Register_StoresIpv4MappedAddressAsIpv4()
+    public async Task Accepted_PcStoresTheIpv4MappedAddressAsIpv4()
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient("::ffff:10.0.0.7");
 
-        await RegisterTokenAsync(app, client, "PC-01");
+        await app.RegisterPcAsync(client, "PC-01");
 
         Assert.Equal("10.0.0.7", (await StoredAsync(app, "PC-01")).IpAddress);
     }
 
     [Fact]
-    public async Task Register_IgnoresForwardedHeaders()
+    public async Task Request_IgnoresForwardedHeaders_ForTheAddressItRecords()
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient("192.168.1.9");
-        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/client/register")
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/client/register-requests")
         {
-            Content = app.RegistrationBody("PC-01", app.SetupSecret),
+            Content = TestApp.RegistrationRequestBody("PC-01"),
         };
         request.Headers.Add("X-Forwarded-For", "6.6.6.6");
 
-        Assert.Equal(HttpStatusCode.Created, (await client.SendAsync(request)).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await client.SendAsync(request)).StatusCode);
 
-        Assert.Equal("192.168.1.9", (await StoredAsync(app, "PC-01")).IpAddress);
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("   ")]
-    [InlineData("PC 05")]
-    [InlineData("PC/05")]
-    [InlineData("PC;05")]
-    [InlineData("pcé")]
-    [InlineData("PC-05\u0000")]
-    public async Task Register_WithInvalidName_Returns400AndStoresNothing(string name)
-    {
-        using var app = new TestApp();
-        using var client = app.CreatePcClient();
-
-        var response = await RegisterAsync(app, client, name);
-
-        await AssertErrorAsync(response, HttpStatusCode.BadRequest);
-        Assert.Contains("letters, numbers", (await JsonOf(response)).GetProperty("error").GetString());
-        Assert.Equal(0, await app.WithDbAsync(db => db.Pcs.CountAsync()));
-    }
-
-    [Fact]
-    public async Task Register_WithMissingOrTooLongName_Returns400_AndMaxLengthIsAccepted()
-    {
-        using var app = new TestApp();
-        using var client = app.CreatePcClient();
-
-        await AssertErrorAsync(await RegisterAsync(app, client, null), HttpStatusCode.BadRequest);
-        await AssertErrorAsync(await RegisterAsync(app, client, new string('a', 33)), HttpStatusCode.BadRequest);
-        Assert.Equal(HttpStatusCode.Created, (await RegisterAsync(app, client, new string('a', 32))).StatusCode);
-    }
-
-    [Theory]
-    [InlineData("{not json", "application/json")]
-    [InlineData("null", "application/json")]
-    [InlineData("""{"name":"PC-01"}""", "text/plain")]
-    public async Task Register_WithMalformedBodyOrContentType_Returns400(string body, string contentType)
-    {
-        using var app = new TestApp();
-        using var client = app.CreatePcClient();
-
-        var response = await client.PostAsync("/api/client/register", new StringContent(body, Encoding.UTF8, contentType));
-
-        await AssertErrorAsync(response, HttpStatusCode.BadRequest, "Invalid request.");
-        Assert.Equal(0, await app.WithDbAsync(db => db.Pcs.CountAsync()));
+        var stored = await app.WithDbAsync(db => db.PcRegistrationRequests.AsNoTracking().SingleAsync());
+        Assert.Equal("192.168.1.9", stored.IpAddress);
     }
 
     [Theory]
     [InlineData("PC-05")]
     [InlineData("pc-05")]
     [InlineData(" Pc-05 ")]
-    public async Task Register_DuplicateName_Returns409AndKeepsOriginalToken(string secondName)
+    public async Task Request_ForANameThatIsRegistered_Returns409AndKeepsTheOriginalPc(string secondName)
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var originalToken = await RegisterTokenAsync(app, client, "PC-05");
+        var originalToken = await app.RegisterPcAsync(client, "PC-05");
         var originalHash = (await StoredAsync(app, "PC-05")).TokenHash;
 
-        var response = await RegisterAsync(app, client, secondName);
+        var response = await RequestRegistrationAsync(app, client, secondName);
 
         await AssertErrorAsync(response, HttpStatusCode.Conflict, "That PC name is already registered.");
         Assert.DoesNotContain("token", await response.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, await app.WithDbAsync(db => db.Pcs.CountAsync()));
         Assert.Equal(originalHash, (await StoredAsync(app, "PC-05")).TokenHash);
         Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(client, $"Bearer {originalToken}")).StatusCode);
-    }
-
-    [Fact]
-    public async Task Register_ConcurrentSameName_CreatesOneAndReturns409ForTheRest()
-    {
-        using var app = new TestApp();
-        using var client = app.CreatePcClient();
-
-        var responses = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => RegisterAsync(app, client, "PC-05")));
-
-        Assert.Equal(1, responses.Count(r => r.StatusCode == HttpStatusCode.Created));
-        Assert.Equal(4, responses.Count(r => r.StatusCode == HttpStatusCode.Conflict));
-        Assert.Equal(1, await app.WithDbAsync(db => db.Pcs.CountAsync()));
-    }
-
-    [Fact]
-    public async Task Register_EleventhAttemptInAMinute_Returns429_ForThatAddressOnly()
-    {
-        using var app = new TestApp();
-        using var client = app.CreatePcClient("192.168.1.50");
-        using var otherClient = app.CreatePcClient("192.168.1.51");
-
-        for (var i = 0; i < ClientEndpoints.MaxRegistrationsPerMinute; i++)
-        {
-            Assert.Equal(HttpStatusCode.Created, (await RegisterAsync(app, client, $"PC-{i:00}")).StatusCode);
-        }
-
-        var limited = await RegisterAsync(app, client, "PC-99");
-
-        await AssertErrorAsync(limited, HttpStatusCode.TooManyRequests, "Too many registration attempts. Try again in a minute.");
-        Assert.Equal(HttpStatusCode.Created, (await RegisterAsync(app, otherClient, "PC-98")).StatusCode);
-        Assert.Equal(0, await app.WithDbAsync(db => db.Pcs.CountAsync(p => p.Name == "PC-99")));
-    }
-
-    [Fact]
-    public async Task Register_WithBodyOver4Kb_IsRejectedCleanly()
-    {
-        using var app = new TestApp();
-        using var client = app.CreatePcClient();
-        var body = $$"""{"name":"PC-01","padding":"{{new string('x', ChannelGuard.MaxClientBodyBytes)}}"}""";
-
-        var response = await client.PostAsync("/api/client/register", new StringContent(body, Encoding.UTF8, "application/json"));
-
-        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
-        Assert.Equal(0, await app.WithDbAsync(db => db.Pcs.CountAsync()));
     }
 
     // Heartbeat
@@ -257,7 +135,7 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var registering = app.CreatePcClient("192.168.1.50");
-        var token = await RegisterTokenAsync(app, registering, "PC-01");
+        var token = await app.RegisterPcAsync(registering, "PC-01");
         var registeredAt = app.Time.GetUtcNow();
         app.Time.Advance(TimeSpan.FromSeconds(10));
         using var moved = app.CreatePcClient("192.168.1.60");
@@ -283,7 +161,7 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        await RegisterTokenAsync(app, client, "PC-01");
+        await app.RegisterPcAsync(client, "PC-01");
 
         var response = await HeartbeatAsync(client, authorization);
 
@@ -295,7 +173,7 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var token = await RegisterTokenAsync(app, client, "PC-01");
+        var token = await app.RegisterPcAsync(client, "PC-01");
         var hash = (await StoredAsync(app, "PC-01")).TokenHash;
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await HeartbeatAsync(client, token)).StatusCode);
@@ -307,7 +185,7 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var token = await RegisterTokenAsync(app, client, "PC-01");
+        var token = await app.RegisterPcAsync(client, "PC-01");
         await app.WithDbAsync(async db =>
         {
             db.Pcs.RemoveRange(db.Pcs);
@@ -326,7 +204,7 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var token = await RegisterTokenAsync(app, client, "PC-01");
+        var token = await app.RegisterPcAsync(client, "PC-01");
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/client/heartbeat");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -378,16 +256,16 @@ public class ClientEndpointTests
         }
 
         // Traffic budget is spent, registration still has its own.
-        Assert.Equal(HttpStatusCode.Created, (await RegisterAsync(app, client, "PC-01")).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await RequestRegistrationAsync(app, client, "PC-01")).StatusCode);
 
         using var second = app.CreatePcClient("192.168.1.99");
         for (var i = 0; i < ClientEndpoints.MaxRegistrationsPerMinute; i++)
         {
-            await RegisterAsync(app, second, $"PC-{i + 10}");
+            await RequestRegistrationAsync(app, second, $"PC-{i + 10}");
         }
 
         await AssertErrorAsync(
-            await RegisterAsync(app, second, "PC-99"),
+            await RequestRegistrationAsync(app, second, "PC-99"),
             HttpStatusCode.TooManyRequests,
             "Too many registration attempts. Try again in a minute.");
         Assert.Equal(HttpStatusCode.OK, (await second.GetAsync("/api/client/ping")).StatusCode);

@@ -87,18 +87,20 @@ public sealed class PcChannelSocketTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task PcPort_RegistersOverHttps_WithTheSetupSecret()
+    public async Task PcPort_TakesRegistrationRequestsOverHttps()
     {
         using var client = PinnedClient(_ => { });
-        var secret = PcSetupCode.Normalize(Channel.SetupCode)[PcSetupCode.FingerprintLength..];
-        var uri = $"https://127.0.0.1:{_clientPort}/api/client/register";
+        var uri = $"https://127.0.0.1:{_clientPort}/api/client/register-requests";
 
-        var wrong = await client.PostAsJsonAsync(uri, new { name = "PC-01", setupSecret = "AAAAAAAAAA" });
-        var right = await client.PostAsJsonAsync(uri, new { name = "PC-01", setupSecret = secret });
+        var invalid = await client.PostAsJsonAsync(uri, new { name = "bad name!", nonce = TestApp.NewNonce() });
+        var created = await client.PostAsJsonAsync(uri, new { name = "PC-01", nonce = TestApp.NewNonce() });
 
-        Assert.Equal(HttpStatusCode.Forbidden, wrong.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, right.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+        Assert.Matches("^[A-Za-z0-9_-]{43}$", (await created.Content.ReadFromJsonAsync<TokenBody>())!.Token);
     }
+
+    private sealed record TokenBody(string Token);
 
     [Theory]
     [InlineData(SslProtocols.Tls12)]
@@ -145,10 +147,10 @@ public sealed class PcChannelSocketTests : IAsyncLifetime
         using var client = new HttpClient();
 
         var health = await client.GetAsync($"http://127.0.0.1:{_adminPort}/api/health");
-        var setupCode = await client.GetAsync($"http://127.0.0.1:{_adminPort}/api/pcs/setup-code");
+        var pcs = await client.GetAsync($"http://127.0.0.1:{_adminPort}/api/pcs");
 
         Assert.Equal(HttpStatusCode.OK, health.StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, setupCode.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, pcs.StatusCode);
     }
 
     [Fact]
@@ -156,7 +158,7 @@ public sealed class PcChannelSocketTests : IAsyncLifetime
     {
         using var client = PinnedClient(_ => { });
 
-        var response = await client.GetAsync($"https://127.0.0.1:{_clientPort}/api/pcs/setup-code");
+        var response = await client.GetAsync($"https://127.0.0.1:{_clientPort}/api/pcs");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }

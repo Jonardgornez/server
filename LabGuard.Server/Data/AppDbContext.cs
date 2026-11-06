@@ -8,6 +8,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<AdminAccount> AdminAccounts => Set<AdminAccount>();
     public DbSet<UserAccount> UserAccounts => Set<UserAccount>();
     public DbSet<LoginRequest> LoginRequests => Set<LoginRequest>();
+    public DbSet<PcRegistrationRequest> PcRegistrationRequests => Set<PcRegistrationRequest>();
     public DbSet<Pc> Pcs => Set<Pc>();
     public DbSet<PcSession> PcSessions => Set<PcSession>();
     public DbSet<ServerSettings> ServerSettingsRows => Set<ServerSettings>();
@@ -41,6 +42,19 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(r => r.RequestedAtUtc).HasConversion(unixMilliseconds);
             entity.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
             entity.Property(r => r.DecidedAtUtc).HasConversion(unixMilliseconds);
+            entity.HasIndex(r => r.Status);
+        });
+
+        modelBuilder.Entity<PcRegistrationRequest>(entity =>
+        {
+            entity.Property(r => r.Name).HasMaxLength(32).IsRequired();
+            entity.Property(r => r.IpAddress).HasMaxLength(45);
+            entity.Property(r => r.Nonce).HasMaxLength(64).IsRequired();
+            entity.Property(r => r.PairingNumber).HasMaxLength(6).IsRequired();
+            entity.Property(r => r.TokenHash).IsRequired();
+            entity.HasIndex(r => r.TokenHash).IsUnique();
+            entity.Property(r => r.RequestedAtUtc).HasConversion(unixMilliseconds);
+            entity.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
             entity.HasIndex(r => r.Status);
         });
 

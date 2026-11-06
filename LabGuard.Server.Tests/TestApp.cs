@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text.Json;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using Microsoft.AspNetCore.Hosting;
@@ -46,11 +48,40 @@ public sealed class TestApp : WebApplicationFactory<Program>
 
     public PcChannelStore Channel => Services.GetRequiredService<PcChannelStore>();
 
-    /// <summary>The registration secret a PC must send: the last 10 characters of the setup code.</summary>
-    public string SetupSecret => PcSetupCode.Normalize(Channel.SetupCode)[PcSetupCode.FingerprintLength..];
+    /// <summary>A nonce as a PC sends it: 32 random bytes as 64 lowercase hex characters.</summary>
+    public static string NewNonce() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
 
-    public JsonContent RegistrationBody(string? name, string? setupSecret) =>
-        JsonContent.Create(new { name, setupSecret });
+    public static JsonContent RegistrationRequestBody(string? name, string? nonce = null) =>
+        JsonContent.Create(new { name, nonce = nonce ?? NewNonce() });
+
+    /// <summary>Signs in as the administrator on a loopback browser client.</summary>
+    public async Task<HttpClient> SignedInAdminAsync()
+    {
+        var client = CreateBrowser();
+        var response = await client.PostAsJsonAsync("/api/auth/login", new { username = Username, password = Password });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return client;
+    }
+
+    /// <summary>
+    /// Sends a registration request from the PC, has the administrator accept it, and returns the token the PC holds.
+    /// </summary>
+    public async Task<string> RegisterPcAsync(HttpClient pc, string name)
+    {
+        var created = await pc.PostAsync("/api/client/register-requests", RegistrationRequestBody(name));
+        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+        var token = JsonDocument.Parse(await created.Content.ReadAsStringAsync()).RootElement.GetProperty("token").GetString()!;
+
+        using var admin = await SignedInAdminAsync();
+        using var listed = JsonDocument.Parse(await (await admin.GetAsync("/api/registration-requests")).Content.ReadAsStringAsync());
+        var id = listed.RootElement.GetProperty("requests").EnumerateArray()
+            .Single(request => request.GetProperty("name").GetString() == name)
+            .GetProperty("id").GetInt32();
+
+        var accepted = await admin.PostAsJsonAsync($"/api/registration-requests/{id}/accept", new { });
+        Assert.Equal(HttpStatusCode.NoContent, accepted.StatusCode);
+        return token;
+    }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {

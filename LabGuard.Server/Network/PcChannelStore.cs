@@ -2,15 +2,13 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
-using System.Text;
 using System.Text.Json;
 
 namespace LabGuard.Server.Network;
 
-// The identity of the PC channel: a self-signed certificate (PCs pin its public key) and the registration secret.
-// Both live in one file that is encrypted as a whole with DPAPI (machine scope), so copying the file to another
-// machine or reading it as another process without DPAPI access reveals nothing. The setup code an admin types
-// into a PC is the key fingerprint followed by the secret; see PcSetupCode.
+// The identity of the PC channel: a self-signed certificate that PCs pin by public key. It is stored as one file
+// that is encrypted as a whole with DPAPI (machine scope), so copying the file to another machine or reading it as
+// another process without DPAPI access reveals nothing.
 public sealed class PcChannelStore : IDisposable
 {
     public const string DefaultFileName = "pc-channel.dat";
@@ -19,25 +17,18 @@ public sealed class PcChannelStore : IDisposable
     private const int FormatVersion = 1;
     private static readonly byte[] Entropy = "Lykantra PC channel v1"u8.ToArray();
 
-    private readonly object _gate = new();
     private readonly string _path;
     private readonly byte[] _pfx;
-    private string _secret;
 
-    private PcChannelStore(string path, byte[] pfx, string secret)
+    private PcChannelStore(string path, byte[] pfx)
     {
         _path = path;
         _pfx = pfx;
-        _secret = secret;
         Certificate = LoadCertificate(pfx);
-        Fingerprint = PcSetupCode.FingerprintOf(Certificate);
     }
 
     // Kestrel serves this one instance for the life of the process.
     public X509Certificate2 Certificate { get; }
-
-    // First 14 characters of the setup code: the pinned key's fingerprint.
-    public string Fingerprint { get; }
 
     public static string ResolvePath(IConfiguration configuration, string contentRootPath)
     {
@@ -56,20 +47,21 @@ public sealed class PcChannelStore : IDisposable
 
         if (!File.Exists(path))
         {
-            var created = new PcChannelStore(path, CreatePfx(), PcSetupCode.NewSecret());
-            created.Save(created._secret);
+            var created = new PcChannelStore(path, CreatePfx());
+            created.Save();
             return created;
         }
 
         try
         {
+            // Files written before setup codes were removed also hold a Secret field. It is ignored here.
             var stored = JsonSerializer.Deserialize<StoredIdentity>(Unprotect(File.ReadAllBytes(path)));
-            if (stored is not { Version: FormatVersion, Pfx: not null, Secret: not null } || !PcSetupCode.IsValidSecret(stored.Secret))
+            if (stored is not { Version: FormatVersion, Pfx: not null })
             {
                 throw new InvalidDataException("The file has an unexpected layout.");
             }
 
-            return new PcChannelStore(path, Convert.FromBase64String(stored.Pfx), stored.Secret);
+            return new PcChannelStore(path, Convert.FromBase64String(stored.Pfx));
         }
         catch (Exception exception) when (exception is CryptographicException or JsonException or FormatException or InvalidDataException or IOException or UnauthorizedAccessException)
         {
@@ -84,45 +76,9 @@ public sealed class PcChannelStore : IDisposable
     // Releases the certificate, which also removes the temporary key container Windows created for it.
     public void Dispose() => Certificate.Dispose();
 
-    public string SetupCode
+    private void Save()
     {
-        get
-        {
-            lock (_gate)
-            {
-                return PcSetupCode.Format(Fingerprint, _secret);
-            }
-        }
-    }
-
-    // Normalizes what the PC sent and compares in constant time.
-    public bool SecretMatches(string? submitted)
-    {
-        var normalized = PcSetupCode.Normalize(submitted);
-        string current;
-        lock (_gate)
-        {
-            current = _secret;
-        }
-
-        return CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(normalized), Encoding.ASCII.GetBytes(current));
-    }
-
-    // New secret, same key: PCs that are already registered use their token and are unaffected.
-    public string RegenerateSecret()
-    {
-        lock (_gate)
-        {
-            var secret = PcSetupCode.NewSecret();
-            Save(secret);
-            _secret = secret;
-            return PcSetupCode.Format(Fingerprint, secret);
-        }
-    }
-
-    private void Save(string secret)
-    {
-        var json = JsonSerializer.SerializeToUtf8Bytes(new StoredIdentity(FormatVersion, Convert.ToBase64String(_pfx), secret));
+        var json = JsonSerializer.SerializeToUtf8Bytes(new StoredIdentity(FormatVersion, Convert.ToBase64String(_pfx)));
         var protectedBytes = Protect(json);
         CryptographicOperations.ZeroMemory(json);
 
@@ -202,5 +158,5 @@ public sealed class PcChannelStore : IDisposable
     private static X509Certificate2 LoadCertificate(byte[] pfx) =>
         X509CertificateLoader.LoadPkcs12(pfx, password: null, X509KeyStorageFlags.DefaultKeySet);
 
-    private sealed record StoredIdentity(int Version, string? Pfx, string? Secret);
+    private sealed record StoredIdentity(int Version, string? Pfx);
 }
