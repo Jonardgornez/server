@@ -14,13 +14,15 @@ namespace LabGuard.Server.Clients;
 
 public record PcLoginRequest(string? Username, string? Password);
 public record PcLoginResponse(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining);
-public record HeartbeatRequest(int? SessionId);
+// PowerCancelHandled is sent by a PC that has acted on a cancel of its shutdown or restart. It only matters while a cancel is recorded.
+public record HeartbeatRequest(int? SessionId, bool? PowerCancelHandled);
 // ScreenView is set while an administrator has a live view of this PC open. The PC streams only then, and an older client ignores it.
 public record HeartbeatScreenView(string ViewId, string Mode);
 // Notice is the administrator's on-screen notice text, or null when the notice is turned off.
 // ShutdownSeconds and RestartSeconds are set only on the one heartbeat that hands the PC a requested shutdown or restart,
 // and say how long it has to go down: the countdown stored with that delivery. Exactly one of them is set, so an older client
 // that only reads ShutdownSeconds never shuts down for a restart.
+// PowerCancelled is true while an administrator's cancel of the shutdown or restart waits for this PC to acknowledge it.
 public record HeartbeatResponse(
     PcSessionInfo? Session,
     string? EndedReason,
@@ -28,6 +30,7 @@ public record HeartbeatResponse(
     string? Notice,
     int? ShutdownSeconds,
     int? RestartSeconds,
+    bool PowerCancelled,
     HeartbeatScreenView? ScreenView);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
@@ -436,6 +439,7 @@ public static partial class ClientEndpoints
                 p.ShutdownDeliveredAtUtc,
                 p.PowerAction,
                 p.PowerCountdownSeconds,
+                p.PowerCancelRequestedAtUtc,
             })
             .FirstOrDefaultAsync(ct);
         if (known is null)
@@ -482,13 +486,19 @@ public static partial class ClientEndpoints
             return NotRegistered();
         }
 
-        var delivery = await DeliverPowerActionAsync(
+        var handOff = await HandOffPowerAsync(
             db,
             tokenHash,
             address,
             wasOnline,
             localAddresses,
-            new PowerSnapshot(known.ShutdownRequestedAtUtc, known.ShutdownDeliveredAtUtc, known.PowerAction, known.PowerCountdownSeconds),
+            new PowerSnapshot(
+                known.ShutdownRequestedAtUtc,
+                known.ShutdownDeliveredAtUtc,
+                known.PowerAction,
+                known.PowerCountdownSeconds,
+                known.PowerCancelRequestedAtUtc),
+            request?.PowerCancelHandled,
             now,
             ct);
 
@@ -509,8 +519,9 @@ public static partial class ClientEndpoints
             endedReason,
             known.IsLocked,
             settings.NoticeEnabled ? settings.NoticeText : null,
-            delivery?.Action == PcShutdownRules.ShutdownAction ? delivery.CountdownSeconds : null,
-            delivery?.Action == PcShutdownRules.RestartAction ? delivery.CountdownSeconds : null,
+            handOff.Delivery?.Action == PcShutdownRules.ShutdownAction ? handOff.Delivery.CountdownSeconds : null,
+            handOff.Delivery?.Action == PcShutdownRules.RestartAction ? handOff.Delivery.CountdownSeconds : null,
+            handOff.IsCancelled,
             screenView));
     }
 

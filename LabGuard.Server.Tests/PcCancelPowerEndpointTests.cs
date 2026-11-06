@@ -16,7 +16,7 @@ public class PcCancelPowerEndpointTests
     private const string NothingToCancelMessage = "This PC has no shutdown or restart to cancel.";
     private const string CancelOfflineMessage = "This PC is offline. Its shutdown or restart can't be cancelled.";
 
-    private static Task<HttpResponseMessage> CancelAsync(HttpClient admin, int pcId) =>
+    internal static Task<HttpResponseMessage> CancelAsync(HttpClient admin, int pcId) =>
         admin.PostAsJsonAsync($"/api/pcs/{pcId}/cancel-power", new { });
 
     private static Task<HttpResponseMessage> CancelManyAsync(HttpClient admin, params int[] ids) =>
@@ -25,14 +25,14 @@ public class PcCancelPowerEndpointTests
     private static Task<HttpResponseMessage> RebootAsync(HttpClient admin, int pcId) =>
         admin.PostAsJsonAsync($"/api/pcs/{pcId}/reboot", new { });
 
-    private static Task<HttpResponseMessage> PowerAsync(HttpClient admin, string action, int pcId) =>
+    internal static Task<HttpResponseMessage> PowerAsync(HttpClient admin, string action, int pcId) =>
         action == PcShutdownRules.RestartAction ? RebootAsync(admin, pcId) : ShutdownAsync(admin, pcId);
 
     private static async Task<string?> ErrorOf(HttpResponseMessage response) =>
         (await JsonOf(response)).GetProperty("error").GetString();
 
     // Requests the action and has the PC take it on its next heartbeat, so the PC holds a delivery.
-    private static async Task DeliverAsync(HttpClient admin, HttpClient client, TestPc pc, string action)
+    internal static async Task DeliverAsync(HttpClient admin, HttpClient client, TestPc pc, string action)
     {
         Assert.Equal(HttpStatusCode.NoContent, (await PowerAsync(admin, action, pc.Id)).StatusCode);
         var body = await HeartbeatBodyAsync(client, pc);

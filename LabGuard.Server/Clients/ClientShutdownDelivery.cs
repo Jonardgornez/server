@@ -6,9 +6,10 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Clients;
 
-// Hands a requested shutdown or restart to the PC on its heartbeat. Only the update that clears a pending request reports it,
-// so a second heartbeat in a row, or a PC that restarts, never gets the same action again.
-// A request is never handed to a PC that was offline before this heartbeat, or to the PC this server runs on.
+// Hands a requested shutdown or restart to the PC on its heartbeat, and tells it about an administrator's cancel of one.
+// Only the update that clears a pending request reports it, so a second heartbeat in a row, or a PC that restarts, never gets
+// the same action again. A request is never handed to a PC that was offline before this heartbeat, or to the PC this server runs on.
+// A cancel is cleared when the PC acknowledges it, or with the delivery it cancels. Nothing the PC sends can start or extend one.
 public static partial class ClientEndpoints
 {
     // The stored shutdown or restart as a heartbeat reads it, before the heartbeat changes anything.
@@ -16,19 +17,24 @@ public static partial class ClientEndpoints
         DateTimeOffset? RequestedAtUtc,
         DateTimeOffset? DeliveredAtUtc,
         string? PowerAction,
-        int? CountdownSeconds);
+        int? CountdownSeconds,
+        DateTimeOffset? CancelRequestedAtUtc);
 
     // The action handed to the PC on a heartbeat, with the countdown stored for it.
     private sealed record PowerDelivery(string Action, int CountdownSeconds);
 
-    // Returns the action handed to the PC on this heartbeat with its countdown, or null when this heartbeat carries none.
-    private static async Task<PowerDelivery?> DeliverPowerActionAsync(
+    // What a heartbeat tells the PC about its shutdown or restart: the delivery made on this heartbeat, or null, and whether
+    // a cancel is still recorded for the PC to acknowledge.
+    private sealed record PowerHandOff(PowerDelivery? Delivery, bool IsCancelled);
+
+    private static async Task<PowerHandOff> HandOffPowerAsync(
         AppDbContext db,
         string tokenHash,
         string? address,
         bool wasOnline,
         ILocalAddressSource localAddresses,
         PowerSnapshot power,
+        bool? cancelHandled,
         DateTimeOffset now,
         CancellationToken ct)
     {
@@ -43,7 +49,7 @@ public static partial class ClientEndpoints
                     .SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)null)
                     .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
                     .SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)null), ct);
-            return null;
+            return new PowerHandOff(null, IsCancelled: false);
         }
 
         // A delivery more than its own window old is forgotten: the PC is no longer shutting down or restarting, so a cancel goes with it.
@@ -55,8 +61,35 @@ public static partial class ClientEndpoints
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
                     .SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)null), ct);
+            power = power with { DeliveredAtUtc = null, CancelRequestedAtUtc = null };
         }
 
+        // The PC has acted on the cancel, so the cancel and its delivery are cleared. The update matches the cancel that was read,
+        // so a cancel recorded meanwhile is left for the next heartbeat to report. An acknowledgement with no cancel does nothing.
+        if (cancelHandled == true && power.CancelRequestedAtUtc is { } cancelRecorded)
+        {
+            await db.Pcs
+                .Where(p => p.TokenHash == tokenHash && p.PowerCancelRequestedAtUtc == cancelRecorded)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
+                    .SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)null), ct);
+            power = power with { DeliveredAtUtc = null, CancelRequestedAtUtc = null };
+        }
+
+        var delivery = await DeliverRequestAsync(db, tokenHash, address, localAddresses, power, now, ct);
+        return new PowerHandOff(delivery, IsCancelled: power.CancelRequestedAtUtc is not null);
+    }
+
+    // Returns the pending request handed to the PC on this heartbeat with its countdown, or null when this heartbeat hands over none.
+    private static async Task<PowerDelivery?> DeliverRequestAsync(
+        AppDbContext db,
+        string tokenHash,
+        string? address,
+        ILocalAddressSource localAddresses,
+        PowerSnapshot power,
+        DateTimeOffset now,
+        CancellationToken ct)
+    {
         if (power.RequestedAtUtc is not { } requested)
         {
             return null;
