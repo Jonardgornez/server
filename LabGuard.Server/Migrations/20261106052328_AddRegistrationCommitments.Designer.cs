@@ -10,7 +10,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace LabGuard.Server.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20261106051933_AddRegistrationCommitments")]
+    [Migration("20261106052328_AddRegistrationCommitments")]
     partial class AddRegistrationCommitments
     {
         /// <inheritdoc />
