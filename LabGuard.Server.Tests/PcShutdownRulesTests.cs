@@ -179,6 +179,52 @@ public class PcShutdownRulesTests
         Assert.Equal(TimeSpan.FromSeconds(seconds), PcShutdownRules.RebootingWindowOf(countdown));
 
     [Fact]
+    public void StateOf_CancelRecordedWhileOnlineWithinTheWindow_IsCancelling()
+    {
+        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddSeconds(-10), PowerCancelRequestedAtUtc = Now.AddSeconds(-5) };
+
+        Assert.Equal(PcShutdownRules.CancellingState, PcShutdownRules.StateOf(pc, isOnline: true, Now));
+    }
+
+    [Fact]
+    public void StateOf_CancelRecordedForARestartWhileOnline_IsCancelling()
+    {
+        var pc = new Pc
+        {
+            Name = "PC-01",
+            ShutdownDeliveredAtUtc = Now.AddSeconds(-10),
+            PowerCancelRequestedAtUtc = Now.AddSeconds(-5),
+            PowerAction = PcShutdownRules.RestartAction,
+        };
+
+        Assert.Equal(PcShutdownRules.CancellingState, PcShutdownRules.StateOf(pc, isOnline: true, Now));
+    }
+
+    [Theory]
+    [InlineData(PcShutdownRules.ShutdownAction, PcShutdownRules.ShutdownState)]
+    [InlineData(PcShutdownRules.RestartAction, PcShutdownRules.RebootingState)]
+    public void StateOf_CancelRecordedButOffline_IsTheStateOfTheDelivery(string action, string expected)
+    {
+        var pc = new Pc
+        {
+            Name = "PC-01",
+            ShutdownDeliveredAtUtc = Now.AddSeconds(-10),
+            PowerCancelRequestedAtUtc = Now.AddSeconds(-5),
+            PowerAction = action,
+        };
+
+        Assert.Equal(expected, PcShutdownRules.StateOf(pc, isOnline: false, Now));
+    }
+
+    [Fact]
+    public void StateOf_CancelRecordedOfADeliveryOutsideItsWindow_IsNull()
+    {
+        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddSeconds(-60), PowerCancelRequestedAtUtc = Now.AddSeconds(-5) };
+
+        Assert.Null(PcShutdownRules.StateOf(pc, isOnline: true, Now));
+    }
+
+    [Fact]
     public void IsDeliveryInWindow_NoDelivery_IsFalse()
     {
         Assert.False(PcShutdownRules.IsDeliveryInWindow(null, countdownSeconds: 30, Now));

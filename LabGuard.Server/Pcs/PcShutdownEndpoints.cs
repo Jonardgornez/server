@@ -63,6 +63,12 @@ public static partial class PcEndpoints
             return ConflictResponse(ServerPcMessage(action));
         }
 
+        // A cancel waiting for the PC to acknowledge it holds the delivery, so nothing is requested until that is done.
+        if (PcShutdownRules.StateOf(pc, isOnline: true, now) == PcShutdownRules.CancellingState)
+        {
+            return ConflictResponse(CancellingMessage(pc));
+        }
+
         // A PC already pending is left as it is, so the request is not refreshed and its first action is kept.
         var requested = await RequestPowerActionsAsync(db, [id], action, now, ct);
         await transaction.CommitAsync(ct);
@@ -118,7 +124,7 @@ public static partial class PcEndpoints
 
     // Requests a shutdown or restart for each listed PC that isn't already pending. A request that went stale is replaced.
     // A PC shut down or restarted within the delivery window is skipped, so a fresh delivery isn't followed by a second request.
-    // Replacing a request also forgets an older delivery, so the stored action always belongs to the stored request.
+    // Replacing a request also forgets an older delivery and any cancel of it, so the stored action always belongs to the stored request.
     // Returns how many PCs were newly requested.
     private static async Task<int> RequestPowerActionsAsync(AppDbContext db, int[] pcIds, string action, DateTimeOffset now, CancellationToken ct)
     {
@@ -141,11 +147,126 @@ public static partial class PcEndpoints
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)now)
                     .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
+                    .SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)null)
                     .SetProperty(p => p.PowerAction, action), ct);
         }
 
         return requested;
     }
+
+    private static async Task<IResult> CancelPowerAsync(int id, HttpContext http, AppDbContext db, TimeProvider clock)
+    {
+        if (await AuthEndpoints.ReadBodyAsync<PcAdminActionRequest>(http.Request) is null)
+        {
+            return AuthEndpoints.InvalidRequest();
+        }
+
+        // Cancelling needs no address check: the PC that runs the server never gets a delivery, so there is nothing to cancel there.
+        var ct = http.RequestAborted;
+        var now = clock.GetUtcNow();
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SessionLifecycle.EndExpiredAsync(db, now, ct);
+        var outcome = await CancelPowerForPcAsync(db, id, now, ct);
+        await transaction.CommitAsync(ct);
+
+        return outcome switch
+        {
+            PowerCancelOutcome.NotFound => PcNotFound(),
+            PowerCancelOutcome.Offline => ConflictResponse(CancelOfflineMessage),
+            PowerCancelOutcome.NothingToCancel => ConflictResponse(NothingToCancelMessage),
+            _ => Results.NoContent(),
+        };
+    }
+
+    private static async Task<IResult> CancelPowerManyAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    {
+        var pcIds = await ReadPcIdsAsync(http.Request);
+        if (pcIds is null)
+        {
+            return AuthEndpoints.InvalidRequest();
+        }
+
+        var ct = http.RequestAborted;
+        var now = clock.GetUtcNow();
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SessionLifecycle.EndExpiredAsync(db, now, ct);
+        var cancelled = 0;
+        foreach (var pcId in pcIds)
+        {
+            if (await CancelPowerForPcAsync(db, pcId, now, ct) == PowerCancelOutcome.Cancelled)
+            {
+                cancelled++;
+            }
+        }
+
+        await transaction.CommitAsync(ct);
+        return Results.Ok(new AffectedPcsResponse(cancelled));
+    }
+
+    private enum PowerCancelOutcome
+    {
+        NotFound,
+        Offline,
+        NothingToCancel,
+        AlreadyCancelling,
+        Cancelled,
+    }
+
+    // Cancels the shutdown or restart of one PC, if it has one. A pending request is dropped, since nothing was delivered.
+    // A delivery still in its window is cancelled on an online PC, and kept until the PC acknowledges the cancel, so a PC that
+    // goes down anyway is still shown as shutting down or rebooting.
+    private static async Task<PowerCancelOutcome> CancelPowerForPcAsync(AppDbContext db, int pcId, DateTimeOffset now, CancellationToken ct)
+    {
+        // The pending request is checked first. A heartbeat that delivers the request between these two checks is caught by
+        // the delivery check below, which reads the PC again rather than assuming the request is still pending.
+        var dropped = await db.Pcs
+            .Where(p => p.Id == pcId && p.ShutdownRequestedAtUtc > now - PcShutdownRules.RequestWindow)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)null), ct);
+        if (dropped > 0)
+        {
+            return PowerCancelOutcome.Cancelled;
+        }
+
+        var pc = await db.Pcs
+            .AsNoTracking()
+            .Where(p => p.Id == pcId)
+            .Select(p => new { p.LastSeenUtc, p.ShutdownDeliveredAtUtc, p.PowerCountdownSeconds, p.PowerCancelRequestedAtUtc })
+            .FirstOrDefaultAsync(ct);
+        if (pc is null)
+        {
+            return PowerCancelOutcome.NotFound;
+        }
+
+        if (!PcShutdownRules.IsDeliveryInWindow(pc.ShutdownDeliveredAtUtc, pc.PowerCountdownSeconds, now))
+        {
+            return PowerCancelOutcome.NothingToCancel;
+        }
+
+        // An offline PC never gets the cancel, so its delivery is left as it is.
+        if (!IsOnline(pc.LastSeenUtc, now))
+        {
+            return PowerCancelOutcome.Offline;
+        }
+
+        if (pc.PowerCancelRequestedAtUtc is not null)
+        {
+            return PowerCancelOutcome.AlreadyCancelling;
+        }
+
+        // Matches the delivery that was read, so a delivery forgotten or acknowledged meanwhile is not cancelled.
+        var recorded = await db.Pcs
+            .Where(p => p.Id == pcId && p.ShutdownDeliveredAtUtc == pc.ShutdownDeliveredAtUtc)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)now), ct);
+        return recorded > 0 ? PowerCancelOutcome.Cancelled : PowerCancelOutcome.NothingToCancel;
+    }
+
+    private static string CancellingMessage(Pc pc) =>
+        PcShutdownRules.ActionOf(pc.PowerAction) == PcShutdownRules.RestartAction
+            ? "This PC is cancelling its restart. Try again once the cancel is done."
+            : "This PC is cancelling its shutdown. Try again once the cancel is done.";
+
+    private const string NothingToCancelMessage = "This PC has no shutdown or restart to cancel.";
+    private const string CancelOfflineMessage = "This PC is offline. Its shutdown or restart can't be cancelled.";
 
     private static string ServerPcMessage(string action) =>
         action == PcShutdownRules.RestartAction

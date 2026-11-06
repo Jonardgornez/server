@@ -12,6 +12,7 @@ public static class PcShutdownRules
     public const string RestartingState = "restarting";
     public const string ShutdownState = "shutdown";
     public const string RebootingState = "rebooting";
+    public const string CancellingState = "cancelling";
 
     // A request the PC hasn't picked up within this time expires.
     public static readonly TimeSpan RequestWindow = TimeSpan.FromSeconds(60);
@@ -45,13 +46,19 @@ public static class PcShutdownRules
         deliveredAt is { } delivered && IsWithin(delivered, now, DeliveryWindowOf(countdownSeconds));
 
     // Null for a PC with no shutdown or restart in progress or done. In progress: a request not yet picked up, or a
-    // delivery while the PC is online. Done: a delivered shutdown once the PC has gone offline, or a delivered restart
+    // delivery while the PC is online. A delivery the administrator has cancelled, while the PC is online, is cancelling
+    // until the PC acknowledges it. Done: a delivered shutdown once the PC has gone offline, or a delivered restart
     // while it is offline for less than the rebooting window. A PC that just went offline without a command stays null.
     public static string? StateOf(Pc pc, bool isOnline, DateTimeOffset now)
     {
         var isRestart = ActionOf(pc.PowerAction) == RestartAction;
         var isRequestPending = pc.ShutdownRequestedAtUtc is { } requestedAt && IsWithin(requestedAt, now, RequestWindow);
         var isDeliveredRecently = IsDeliveryInWindow(pc.ShutdownDeliveredAtUtc, pc.PowerCountdownSeconds, now);
+        if (isOnline && isDeliveredRecently && pc.PowerCancelRequestedAtUtc is not null)
+        {
+            return CancellingState;
+        }
+
         if (isRequestPending || (isOnline && isDeliveredRecently))
         {
             return isRestart ? RestartingState : ShuttingDownState;

@@ -33,24 +33,28 @@ public static partial class ClientEndpoints
         CancellationToken ct)
     {
         // A PC that was offline before this heartbeat has only just started. Whatever it was asked to do is forgotten at
-        // once, so it isn't shown as still going down, and a pending request is dropped rather than handed over.
+        // once, so it isn't shown as still going down, and a pending request or a cancel is dropped rather than handed over.
         if (!wasOnline)
         {
             await db.Pcs
-                .Where(p => p.TokenHash == tokenHash && (p.ShutdownRequestedAtUtc != null || p.ShutdownDeliveredAtUtc != null))
+                .Where(p => p.TokenHash == tokenHash
+                    && (p.ShutdownRequestedAtUtc != null || p.ShutdownDeliveredAtUtc != null || p.PowerCancelRequestedAtUtc != null))
                 .ExecuteUpdateAsync(setters => setters
                     .SetProperty(p => p.ShutdownRequestedAtUtc, (DateTimeOffset?)null)
-                    .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null), ct);
+                    .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
+                    .SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)null), ct);
             return null;
         }
 
-        // A delivery more than its own window old is forgotten: the PC is no longer shutting down or restarting.
+        // A delivery more than its own window old is forgotten: the PC is no longer shutting down or restarting, so a cancel goes with it.
         var deliveredBefore = now - PcShutdownRules.DeliveryWindowOf(power.CountdownSeconds);
         if (power.DeliveredAtUtc is { } lastDelivered && lastDelivered < deliveredBefore)
         {
             await db.Pcs
                 .Where(p => p.TokenHash == tokenHash && p.ShutdownDeliveredAtUtc < deliveredBefore)
-                .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null), ct);
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
+                    .SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)null), ct);
         }
 
         if (power.RequestedAtUtc is not { } requested)

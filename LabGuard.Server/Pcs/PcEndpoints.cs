@@ -7,7 +7,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Pcs;
 
-// ShutdownState is null, "shutting-down", "shutdown", "restarting" or "rebooting". IsServerPc is true for the PC this server runs on.
+// ShutdownState is null, "shutting-down", "shutdown", "restarting", "rebooting" or "cancelling". IsServerPc is true for the PC this server runs on.
 public record PcResponse(
     int Id,
     string Name,
@@ -50,6 +50,8 @@ public static partial class PcEndpoints
         group.MapPost("/shutdown", ShutdownManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/reboot", RebootAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/reboot", RebootManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/{id:int}/cancel-power", CancelPowerAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/cancel-power", CancelPowerManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 
