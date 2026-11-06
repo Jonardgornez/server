@@ -136,6 +136,11 @@ namespace LabGuard.Server.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("Commitment")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("IpAddress")
                         .HasMaxLength(45)
                         .HasColumnType("TEXT");
@@ -146,17 +151,20 @@ namespace LabGuard.Server.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Nonce")
-                        .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("PairingNumber")
-                        .IsRequired()
                         .HasMaxLength(6)
                         .HasColumnType("TEXT");
 
                     b.Property<long>("RequestedAtUtc")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("ServerNonce")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Status")
                         .IsRequired()

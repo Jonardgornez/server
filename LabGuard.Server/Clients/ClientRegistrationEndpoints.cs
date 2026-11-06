@@ -8,17 +8,24 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Clients;
 
-public record CreateRegistrationRequestBody(string? Name, string? Nonce);
-public record CreateRegistrationRequestResponse(string Token);
+public record CreateRegistrationRequestBody(string? Name, string? Commitment);
+public record CreateRegistrationRequestResponse(string Token, string ServerNonce);
+public record RevealRegistrationRequestBody(string? Nonce);
 public record RegistrationStatusResponse(string Status);
 
-// A new PC asks to join and waits for the administrator. Until it is accepted, its token only works for status and cancel.
+// A new PC asks to join and waits for the administrator. Until it is accepted, its token only works for status, reveal and cancel.
+// The PC commits to its nonce first and gets the server's nonce back. Then it reveals its nonce, which must match the commitment.
+// Each side fixes its random value before seeing the other's, so neither can steer the pairing number.
 public static partial class ClientEndpoints
 {
     public const int MaxPendingRegistrationRequests = 100;
 
     private const int TokenBytes = 32;
+    private const int ServerNonceBytes = 32;
     private const string PendingFullMessage = "Too many PCs are waiting for approval. Try again later.";
+    private const string BadHexMessage = "Nonce must be 64 lowercase hex characters.";
+    private const string CommitmentMismatchMessage = "The nonce doesn't match the commitment. The request has been cancelled.";
+    private const string RevealRefusedMessage = "The nonce can't be revealed. The request is no longer pending, or its nonce was already revealed.";
     private static readonly TimeSpan RegistrationGateWaitTimeout = TimeSpan.FromSeconds(3);
 
     // Finished and expired requests are kept for an hour, so the administrator and the PC can still see the outcome.
@@ -30,14 +37,14 @@ public static partial class ClientEndpoints
     [GeneratedRegex(@"^[A-Za-z0-9._-]+\z")]
     private static partial Regex NamePattern();
 
+    // 32 bytes as 64 lowercase hex characters: a commitment, a nonce or a server nonce.
     [GeneratedRegex(@"^[0-9a-f]{64}\z")]
-    private static partial Regex NoncePattern();
+    private static partial Regex Bytes32HexPattern();
 
     private static async Task<IResult> CreateRegistrationRequestAsync(
         HttpContext http,
         AppDbContext db,
-        TimeProvider clock,
-        PcChannelStore channel)
+        TimeProvider clock)
     {
         var body = await AuthEndpoints.ReadBodyAsync<CreateRegistrationRequestBody>(http.Request);
         if (body is null)
@@ -52,9 +59,9 @@ public static partial class ClientEndpoints
                 $"PC name must be 1 to {MaxNameLength} characters: letters, numbers, dots, underscores and hyphens only.");
         }
 
-        if (body.Nonce is not { } nonce || !NoncePattern().IsMatch(nonce))
+        if (body.Commitment is not { } commitment || !Bytes32HexPattern().IsMatch(commitment))
         {
-            return AuthEndpoints.BadRequest("Nonce must be 64 lowercase hex characters.");
+            return AuthEndpoints.BadRequest(BadHexMessage);
         }
 
         if (!await RegistrationGate.WaitAsync(RegistrationGateWaitTimeout, http.RequestAborted))
@@ -64,7 +71,7 @@ public static partial class ClientEndpoints
 
         try
         {
-            return await StoreRegistrationRequestAsync(http, db, clock, channel, name, nonce);
+            return await StoreRegistrationRequestAsync(http, db, clock, name, commitment);
         }
         finally
         {
@@ -77,9 +84,8 @@ public static partial class ClientEndpoints
         HttpContext http,
         AppDbContext db,
         TimeProvider clock,
-        PcChannelStore channel,
         string name,
-        string nonce)
+        string commitment)
     {
         var ct = http.RequestAborted;
         var now = clock.GetUtcNow();
@@ -116,12 +122,13 @@ public static partial class ClientEndpoints
 
         // The token is what the PC keeps. Only its hash is stored; accepting the request moves the hash to the new Pc.
         var token = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(TokenBytes));
+        var serverNonce = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(ServerNonceBytes));
         db.PcRegistrationRequests.Add(new PcRegistrationRequest
         {
             Name = name,
             IpAddress = address,
-            Nonce = nonce,
-            PairingNumber = PairingNumber.Compute(channel.Certificate, Convert.FromHexString(nonce)),
+            Commitment = commitment,
+            ServerNonce = serverNonce,
             TokenHash = HashToken(token),
             RequestedAtUtc = now,
             Status = RegistrationRequestStatus.Pending,
@@ -129,7 +136,70 @@ public static partial class ClientEndpoints
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
 
-        return Results.Json(new CreateRegistrationRequestResponse(token), statusCode: StatusCodes.Status202Accepted);
+        return Results.Json(new CreateRegistrationRequestResponse(token, serverNonce), statusCode: StatusCodes.Status202Accepted);
+    }
+
+    // Only while the request is pending. The nonce must match the commitment; a wrong nonce cancels the request, and a revealed nonce is never replaced.
+    private static async Task<IResult> RevealRegistrationRequestAsync(HttpContext http, AppDbContext db, TimeProvider clock, PcChannelStore channel)
+    {
+        if (ReadBearerToken(http.Request) is not { } token)
+        {
+            return NotRegistered();
+        }
+
+        var ct = http.RequestAborted;
+        var tokenHash = HashToken(token);
+        var request = await db.PcRegistrationRequests
+            .AsNoTracking()
+            .FirstOrDefaultAsync(r => r.TokenHash == tokenHash, ct);
+        if (request is null)
+        {
+            return NotRegistered();
+        }
+
+        var body = await AuthEndpoints.ReadBodyAsync<RevealRegistrationRequestBody>(http.Request);
+        if (body is null)
+        {
+            return AuthEndpoints.InvalidRequest();
+        }
+
+        if (body.Nonce is not { } nonce || !Bytes32HexPattern().IsMatch(nonce))
+        {
+            return AuthEndpoints.BadRequest(BadHexMessage);
+        }
+
+        var now = clock.GetUtcNow();
+        var pendingSince = PcRegistrationRequest.PendingSince(now);
+        if (request.Status != RegistrationRequestStatus.Pending || request.RequestedAtUtc < pendingSince)
+        {
+            return RevealRefused();
+        }
+
+        // The same nonce again means the PC never got the first answer, so it succeeds. A different one is refused.
+        if (request.Nonce is not null)
+        {
+            return request.Nonce == nonce ? Results.NoContent() : RevealRefused();
+        }
+
+        var nonceBytes = Convert.FromHexString(nonce);
+        if (Convert.ToHexStringLower(SHA256.HashData(nonceBytes)) != request.Commitment)
+        {
+            await db.PcRegistrationRequests
+                .Where(r => r.Id == request.Id && r.Status == RegistrationRequestStatus.Pending && r.Nonce == null)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.Status, RegistrationRequestStatus.Cancelled), ct);
+            return AuthEndpoints.BadRequest(CommitmentMismatchMessage);
+        }
+
+        var pairingNumber = PairingNumber.Compute(channel.Certificate, nonceBytes, Convert.FromHexString(request.ServerNonce));
+        var revealed = await db.PcRegistrationRequests
+            .Where(r => r.Id == request.Id
+                && r.Status == RegistrationRequestStatus.Pending
+                && r.Nonce == null
+                && r.RequestedAtUtc >= pendingSince)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(r => r.Nonce, nonce)
+                .SetProperty(r => r.PairingNumber, pairingNumber), ct);
+        return revealed == 0 ? RevealRefused() : Results.NoContent();
     }
 
     private static async Task<IResult> RegistrationStatusAsync(HttpContext http, AppDbContext db, TimeProvider clock)
@@ -139,15 +209,19 @@ public static partial class ClientEndpoints
             return NotRegistered();
         }
 
+        var ct = http.RequestAborted;
         var tokenHash = HashToken(token);
         var request = await db.PcRegistrationRequests
             .AsNoTracking()
             .Where(r => r.TokenHash == tokenHash)
             .Select(r => new { r.Status, r.RequestedAtUtc })
-            .FirstOrDefaultAsync(http.RequestAborted);
+            .FirstOrDefaultAsync(ct);
         if (request is null)
         {
-            return NotRegistered();
+            // The request row may have been cleaned up after the PC was accepted. The registered PC is proof enough.
+            return await db.Pcs.AnyAsync(p => p.TokenHash == tokenHash, ct)
+                ? Results.Ok(new RegistrationStatusResponse("approved"))
+                : NotRegistered();
         }
 
         return Results.Ok(new RegistrationStatusResponse(PublicStatus(request.Status, request.RequestedAtUtc, clock.GetUtcNow())));
@@ -165,7 +239,8 @@ public static partial class ClientEndpoints
             _ => throw new ArgumentOutOfRangeException(nameof(status), status, "Unknown registration status."),
         };
 
-    // Only a pending request changes. An answered request stays as it is and still answers 204.
+    // Only a pending request changes. A request that was already approved answers 409 so the PC learns it was accepted.
+    // Any other answered request stays as it is and still answers 204.
     private static async Task<IResult> CancelRegistrationRequestAsync(HttpContext http, AppDbContext db)
     {
         if (ReadBearerToken(http.Request) is not { } token)
@@ -175,14 +250,28 @@ public static partial class ClientEndpoints
 
         var tokenHash = HashToken(token);
         var ct = http.RequestAborted;
-        if (!await db.PcRegistrationRequests.AnyAsync(r => r.TokenHash == tokenHash, ct))
+        var cancelled = await db.PcRegistrationRequests
+            .Where(r => r.TokenHash == tokenHash && r.Status == RegistrationRequestStatus.Pending)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.Status, RegistrationRequestStatus.Cancelled), ct);
+        if (cancelled > 0)
+        {
+            return Results.NoContent();
+        }
+
+        // Nothing was pending, and a finished request never goes back to pending, so this status is the final answer.
+        var request = await db.PcRegistrationRequests
+            .AsNoTracking()
+            .FirstOrDefaultAsync(r => r.TokenHash == tokenHash, ct);
+        if (request is null)
         {
             return NotRegistered();
         }
 
-        await db.PcRegistrationRequests
-            .Where(r => r.TokenHash == tokenHash && r.Status == RegistrationRequestStatus.Pending)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.Status, RegistrationRequestStatus.Cancelled), ct);
-        return Results.NoContent();
+        return request.Status == RegistrationRequestStatus.Approved
+            ? Results.Json(new RegistrationStatusResponse("approved"), statusCode: StatusCodes.Status409Conflict)
+            : Results.NoContent();
     }
+
+    private static IResult RevealRefused() =>
+        Results.Json(new ErrorResponse(RevealRefusedMessage), statusCode: StatusCodes.Status409Conflict);
 }

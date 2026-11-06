@@ -13,6 +13,8 @@ namespace LabGuard.Server.Tests;
 public class ClientRegistrationEndpointTests
 {
     private const string NotRegisteredMessage = "This PC isn't registered.";
+    private const string BadNonceMessage = "Nonce must be 64 lowercase hex characters.";
+    private const string RevealPath = "/api/client/register-requests/reveal";
 
     private static async Task<JsonElement> JsonOf(HttpResponseMessage response)
     {
@@ -20,8 +22,8 @@ public class ClientRegistrationEndpointTests
         return json.RootElement.Clone();
     }
 
-    private static Task<HttpResponseMessage> CreateAsync(HttpClient pc, string? name, string? nonce = null) =>
-        pc.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody(name, nonce));
+    private static Task<HttpResponseMessage> CreateAsync(HttpClient pc, string? name, string? commitment = null) =>
+        pc.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody(name, commitment));
 
     private static async Task<string> CreateTokenAsync(HttpClient pc, string name)
     {
@@ -30,9 +32,29 @@ public class ClientRegistrationEndpointTests
         return (await JsonOf(response)).GetProperty("token").GetString()!;
     }
 
+    // Creates a request for a nonce the test keeps, so the test can reveal it later. Returns the token and the server's nonce.
+    private static async Task<(string Token, string ServerNonce)> CommitAsync(HttpClient pc, string name, string nonce)
+    {
+        var response = await CreateAsync(pc, name, TestApp.CommitmentOf(nonce));
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var body = await JsonOf(response);
+        return (body.GetProperty("token").GetString()!, body.GetProperty("serverNonce").GetString()!);
+    }
+
     private static Task<HttpResponseMessage> PostWithAuthorizationAsync(HttpClient client, string path, string? authorization)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, path);
+        if (authorization is not null)
+        {
+            request.Headers.TryAddWithoutValidation("Authorization", authorization);
+        }
+
+        return client.SendAsync(request);
+    }
+
+    private static Task<HttpResponseMessage> RevealWithAuthorizationAsync(HttpClient client, string? authorization, string? nonce)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, RevealPath) { Content = TestApp.RevealBody(nonce) };
         if (authorization is not null)
         {
             request.Headers.TryAddWithoutValidation("Authorization", authorization);
@@ -65,7 +87,7 @@ public class ClientRegistrationEndpointTests
     // Create
 
     [Fact]
-    public async Task Create_Succeeds_Returns202WithOnlyTheToken_AndStoresOnlyItsHash()
+    public async Task Create_Succeeds_Returns202WithTheTokenAndServerNonce_AndStoresOnlyTheTokenHash()
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient("192.168.1.77");
@@ -74,14 +96,17 @@ public class ClientRegistrationEndpointTests
 
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         var body = await JsonOf(response);
-        Assert.Single(body.EnumerateObject());
+        Assert.Equal(new[] { "serverNonce", "token" }, body.EnumerateObject().Select(p => p.Name).Order().ToArray());
         var token = body.GetProperty("token").GetString()!;
         Assert.Equal(43, token.Length);
         Assert.Matches("^[A-Za-z0-9_-]+$", token);
+        var serverNonce = body.GetProperty("serverNonce").GetString()!;
+        Assert.Matches("^[0-9a-f]{64}$", serverNonce);
 
         var stored = await StoredByNameAsync(app, "PC-05");
         Assert.Equal(HashOf(token), stored.TokenHash);
         Assert.NotEqual(token, stored.TokenHash);
+        Assert.Equal(serverNonce, stored.ServerNonce);
         Assert.Equal("192.168.1.77", stored.IpAddress);
         Assert.Equal(RegistrationRequestStatus.Pending, stored.Status);
         Assert.Equal(app.Time.GetUtcNow().ToUnixTimeMilliseconds(), stored.RequestedAtUtc.ToUnixTimeMilliseconds());
@@ -89,18 +114,33 @@ public class ClientRegistrationEndpointTests
     }
 
     [Fact]
-    public async Task Create_StoresTheNonceAndThePairingNumberForIt()
+    public async Task Create_StoresTheCommitment_AndLeavesTheNonceAndPairingNumberUntilReveal()
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
         var nonce = TestApp.NewNonce();
 
-        Assert.Equal(HttpStatusCode.Accepted, (await CreateAsync(client, "PC-01", nonce)).StatusCode);
+        var (_, serverNonce) = await CommitAsync(client, "PC-01", nonce);
 
         var stored = await StoredByNameAsync(app, "PC-01");
-        Assert.Equal(nonce, stored.Nonce);
-        Assert.Equal(PairingNumber.Compute(app.Channel.Certificate, Convert.FromHexString(nonce)), stored.PairingNumber);
-        Assert.Matches("^[0-9]{6}$", stored.PairingNumber);
+        Assert.Equal(TestApp.CommitmentOf(nonce), stored.Commitment);
+        Assert.Equal(serverNonce, stored.ServerNonce);
+        Assert.Null(stored.Nonce);
+        Assert.Null(stored.PairingNumber);
+    }
+
+    [Fact]
+    public async Task Create_GivesEachRequestItsOwnServerNonce()
+    {
+        using var app = new TestApp();
+        using var first = app.CreatePcClient("192.168.1.31");
+        using var second = app.CreatePcClient("192.168.1.32");
+        var commitment = TestApp.NewCommitment();
+
+        var firstNonce = (await CommitAsync(first, "PC-01", TestApp.NewNonce())).ServerNonce;
+        var secondResponse = await CreateAsync(second, "PC-02", commitment);
+
+        Assert.NotEqual(firstNonce, (await JsonOf(secondResponse)).GetProperty("serverNonce").GetString());
     }
 
     [Theory]
@@ -142,26 +182,26 @@ public class ClientRegistrationEndpointTests
     [InlineData("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0")]
     [InlineData("g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")]
     [InlineData(" 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde")]
-    public async Task Create_WithInvalidNonce_Returns400AndStoresNothing(string nonce)
+    public async Task Create_WithInvalidCommitment_Returns400AndStoresNothing(string commitment)
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
 
-        var response = await CreateAsync(client, "PC-01", nonce);
+        var response = await CreateAsync(client, "PC-01", commitment);
 
-        await AssertErrorAsync(response, HttpStatusCode.BadRequest, "Nonce must be 64 lowercase hex characters.");
+        await AssertErrorAsync(response, HttpStatusCode.BadRequest, BadNonceMessage);
         Assert.Equal(0, await app.WithDbAsync(db => db.PcRegistrationRequests.CountAsync()));
     }
 
     [Fact]
-    public async Task Create_WithoutANonce_Returns400()
+    public async Task Create_WithoutACommitment_Returns400()
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
 
         var response = await client.PostAsJsonAsync("/api/client/register-requests", new { name = "PC-01" });
 
-        await AssertErrorAsync(response, HttpStatusCode.BadRequest, "Nonce must be 64 lowercase hex characters.");
+        await AssertErrorAsync(response, HttpStatusCode.BadRequest, BadNonceMessage);
     }
 
     [Theory]
@@ -300,7 +340,7 @@ public class ClientRegistrationEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var body = $$"""{"name":"PC-01","nonce":"{{TestApp.NewNonce()}}","padding":"{{new string('x', ChannelGuard.MaxClientBodyBytes)}}"}""";
+        var body = $$"""{"name":"PC-01","commitment":"{{TestApp.NewCommitment()}}","padding":"{{new string('x', ChannelGuard.MaxClientBodyBytes)}}"}""";
 
         var response = await client.PostAsync("/api/client/register-requests", new StringContent(body, Encoding.UTF8, "application/json"));
 
@@ -322,6 +362,216 @@ public class ClientRegistrationEndpointTests
         Assert.Equal(0, await app.WithDbAsync(db => db.PcRegistrationRequests.CountAsync()));
     }
 
+    // Reveal
+
+    [Fact]
+    public async Task Reveal_WithTheNonceThatMatchesTheCommitment_Returns204_AndStoresTheNonceAndPairingNumber()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var nonce = TestApp.NewNonce();
+        var (token, serverNonce) = await CommitAsync(client, "PC-01", nonce);
+
+        var response = await TestApp.RevealAsync(client, token, nonce);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var stored = await StoredByNameAsync(app, "PC-01");
+        Assert.Equal(nonce, stored.Nonce);
+        Assert.Equal(
+            PairingNumber.Compute(app.Channel.Certificate, Convert.FromHexString(nonce), Convert.FromHexString(serverNonce)),
+            stored.PairingNumber);
+        Assert.Matches("^[0-9]{6}$", stored.PairingNumber!);
+        Assert.Equal(RegistrationRequestStatus.Pending, stored.Status);
+    }
+
+    [Fact]
+    public async Task Reveal_WithAWrongNonce_Returns400_CancelsTheRequest_AndItCannotBeAccepted()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var (token, _) = await CommitAsync(client, "PC-01", TestApp.NewNonce());
+
+        var response = await TestApp.RevealAsync(client, token, TestApp.NewNonce());
+
+        await AssertErrorAsync(response, HttpStatusCode.BadRequest, "The nonce doesn't match the commitment. The request has been cancelled.");
+        var stored = await StoredByNameAsync(app, "PC-01");
+        Assert.Equal(RegistrationRequestStatus.Cancelled, stored.Status);
+        Assert.Null(stored.Nonce);
+        Assert.Null(stored.PairingNumber);
+        Assert.Equal("expired", await StatusOfAsync(client, token));
+
+        using var admin = await app.SignedInAdminAsync();
+        Assert.Equal(HttpStatusCode.NotFound, (await admin.PostAsJsonAsync($"/api/registration-requests/{stored.Id}/accept", new { })).StatusCode);
+        Assert.Equal(0, await app.WithDbAsync(db => db.Pcs.CountAsync()));
+    }
+
+    [Fact]
+    public async Task Reveal_WithTheRightNonceAfterAWrongOne_Returns409()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var nonce = TestApp.NewNonce();
+        var (token, _) = await CommitAsync(client, "PC-01", nonce);
+        await TestApp.RevealAsync(client, token, TestApp.NewNonce());
+
+        var response = await TestApp.RevealAsync(client, token, nonce);
+
+        await AssertErrorAsync(response, HttpStatusCode.Conflict);
+        Assert.Null((await StoredByNameAsync(app, "PC-01")).Nonce);
+    }
+
+    [Fact]
+    public async Task Reveal_SameNonceAgainSucceeds_ADifferentOneReturns409_AndNeverReplacesTheFirstNonce()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var nonce = TestApp.NewNonce();
+        var (token, _) = await CommitAsync(client, "PC-01", nonce);
+        Assert.Equal(HttpStatusCode.NoContent, (await TestApp.RevealAsync(client, token, nonce)).StatusCode);
+        var pairingNumber = (await StoredByNameAsync(app, "PC-01")).PairingNumber;
+
+        Assert.Equal(HttpStatusCode.NoContent, (await TestApp.RevealAsync(client, token, nonce)).StatusCode);
+        await AssertErrorAsync(await TestApp.RevealAsync(client, token, TestApp.NewNonce()), HttpStatusCode.Conflict);
+
+        var stored = await StoredByNameAsync(app, "PC-01");
+        Assert.Equal(nonce, stored.Nonce);
+        Assert.Equal(pairingNumber, stored.PairingNumber);
+        Assert.Equal(RegistrationRequestStatus.Pending, stored.Status);
+        Assert.Equal("pending", await StatusOfAsync(client, token));
+    }
+
+    [Fact]
+    public async Task Reveal_BeforeTheRequestExpires_Returns204()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var nonce = TestApp.NewNonce();
+        var (token, _) = await CommitAsync(client, "PC-01", nonce);
+
+        // Times are stored to the millisecond, so the boundary itself is checked a few seconds either side.
+        app.Time.Advance(TimeSpan.FromMinutes(10) - TimeSpan.FromSeconds(1));
+
+        Assert.Equal(HttpStatusCode.NoContent, (await TestApp.RevealAsync(client, token, nonce)).StatusCode);
+        Assert.Equal(nonce, (await StoredByNameAsync(app, "PC-01")).Nonce);
+    }
+
+    [Fact]
+    public async Task Reveal_AfterTheRequestExpires_Returns409_AndStoresNoNonce()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var nonce = TestApp.NewNonce();
+        var (token, _) = await CommitAsync(client, "PC-01", nonce);
+
+        app.Time.Advance(TimeSpan.FromMinutes(10) + TimeSpan.FromSeconds(1));
+
+        await AssertErrorAsync(await TestApp.RevealAsync(client, token, nonce), HttpStatusCode.Conflict);
+        var stored = await StoredByNameAsync(app, "PC-01");
+        Assert.Null(stored.Nonce);
+        Assert.Null(stored.PairingNumber);
+        Assert.Equal("expired", await StatusOfAsync(client, token));
+    }
+
+    [Fact]
+    public async Task Reveal_AfterTheRequestIsCancelled_Returns409()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var nonce = TestApp.NewNonce();
+        var (token, _) = await CommitAsync(client, "PC-01", nonce);
+        Assert.Equal(HttpStatusCode.NoContent, (await CancelAsync(client, $"Bearer {token}")).StatusCode);
+
+        await AssertErrorAsync(await TestApp.RevealAsync(client, token, nonce), HttpStatusCode.Conflict);
+        Assert.Null((await StoredByNameAsync(app, "PC-01")).Nonce);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789")]
+    [InlineData("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde")]
+    [InlineData("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0")]
+    [InlineData("g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")]
+    [InlineData(" 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde")]
+    public async Task Reveal_WithAMalformedNonce_Returns400_AndLeavesTheRequestPending(string? nonce)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var (token, _) = await CommitAsync(client, "PC-01", TestApp.NewNonce());
+
+        await AssertErrorAsync(await TestApp.RevealAsync(client, token, nonce), HttpStatusCode.BadRequest, BadNonceMessage);
+
+        var stored = await StoredByNameAsync(app, "PC-01");
+        Assert.Equal(RegistrationRequestStatus.Pending, stored.Status);
+        Assert.Null(stored.Nonce);
+    }
+
+    [Theory]
+    [InlineData("{not json", "application/json")]
+    [InlineData("null", "application/json")]
+    [InlineData("{}", "text/plain")]
+    public async Task Reveal_WithAMalformedBody_Returns400_AndLeavesTheRequestPending(string body, string contentType)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var (token, _) = await CommitAsync(client, "PC-01", TestApp.NewNonce());
+        using var request = new HttpRequestMessage(HttpMethod.Post, RevealPath)
+        {
+            Content = new StringContent(body, Encoding.UTF8, contentType),
+        };
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+
+        await AssertErrorAsync(await client.SendAsync(request), HttpStatusCode.BadRequest, "Invalid request.");
+
+        Assert.Equal(RegistrationRequestStatus.Pending, (await StoredByNameAsync(app, "PC-01")).Status);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("Bearer")]
+    [InlineData("Bearer not-a-known-token")]
+    [InlineData("Basic dXNlcjpwYXNz")]
+    public async Task Reveal_WithMissingOrUnknownToken_Returns401(string? authorization)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var nonce = TestApp.NewNonce();
+        await CommitAsync(client, "PC-01", nonce);
+
+        await AssertErrorAsync(await RevealWithAuthorizationAsync(client, authorization, nonce), HttpStatusCode.Unauthorized, NotRegisteredMessage);
+        Assert.Null((await StoredByNameAsync(app, "PC-01")).Nonce);
+    }
+
+    [Fact]
+    public async Task Reveal_WithTheTokenHash_Returns401()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var nonce = TestApp.NewNonce();
+        var (token, _) = await CommitAsync(client, "PC-01", nonce);
+
+        var response = await RevealWithAuthorizationAsync(client, $"Bearer {HashOf(token)}", nonce);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Null((await StoredByNameAsync(app, "PC-01")).Nonce);
+    }
+
+    [Fact]
+    public async Task Reveal_UsesTheTrafficBudget()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var nonce = TestApp.NewNonce();
+
+        for (var i = 0; i < ClientEndpoints.MaxTrafficPerMinute; i++)
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, (await RevealWithAuthorizationAsync(client, "Bearer x", nonce)).StatusCode);
+        }
+
+        await AssertErrorAsync(await RevealWithAuthorizationAsync(client, "Bearer x", nonce), HttpStatusCode.TooManyRequests);
+    }
+
     // Status
 
     [Fact]
@@ -329,7 +579,7 @@ public class ClientRegistrationEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var token = await CreateTokenAsync(client, "PC-01");
+        var token = await app.RequestAndRevealAsync(client, "PC-01");
         Assert.Equal("pending", await StatusOfAsync(client, token));
 
         using var admin = await app.SignedInAdminAsync();
@@ -344,7 +594,7 @@ public class ClientRegistrationEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var token = await CreateTokenAsync(client, "PC-01");
+        var token = await app.RequestAndRevealAsync(client, "PC-01");
         using var admin = await app.SignedInAdminAsync();
         var id = (await StoredByNameAsync(app, "PC-01")).Id;
         Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync($"/api/registration-requests/{id}/deny", new { })).StatusCode);
@@ -376,6 +626,31 @@ public class ClientRegistrationEndpointTests
         Assert.Equal(HttpStatusCode.NoContent, (await CancelAsync(client, $"Bearer {token}")).StatusCode);
 
         Assert.Equal("expired", await StatusOfAsync(client, token));
+    }
+
+    [Fact]
+    public async Task Status_ReadsApproved_WhenTheRequestRowIsGone_AndThePcIsRegistered()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var token = await app.RegisterPcAsync(client, "PC-01");
+        var tokenHash = HashOf(token);
+        await app.WithDbAsync(db => db.PcRegistrationRequests.Where(r => r.TokenHash == tokenHash).ExecuteDeleteAsync());
+
+        Assert.Equal("approved", await StatusOfAsync(client, token));
+        Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(client, $"Bearer {token}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Status_WithARemovedRequestAndNoRegisteredPc_Returns401()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var token = await CreateTokenAsync(client, "PC-01");
+        var tokenHash = HashOf(token);
+        await app.WithDbAsync(db => db.PcRegistrationRequests.Where(r => r.TokenHash == tokenHash).ExecuteDeleteAsync());
+
+        await AssertErrorAsync(await StatusAsync(client, $"Bearer {token}"), HttpStatusCode.Unauthorized, NotRegisteredMessage);
     }
 
     [Theory]
@@ -438,14 +713,18 @@ public class ClientRegistrationEndpointTests
     }
 
     [Fact]
-    public async Task Cancel_AfterApproval_Returns204_AndLeavesThePcRegistered()
+    public async Task Cancel_AfterApproval_Returns409WithApprovedStatus_AndLeavesThePcRegistered()
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
         var token = await app.RegisterPcAsync(client, "PC-01");
 
-        Assert.Equal(HttpStatusCode.NoContent, (await CancelAsync(client, $"Bearer {token}")).StatusCode);
+        var response = await CancelAsync(client, $"Bearer {token}");
 
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var body = await JsonOf(response);
+        Assert.Equal(new[] { "status" }, body.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal("approved", body.GetProperty("status").GetString());
         Assert.Equal(RegistrationRequestStatus.Approved, (await StoredByNameAsync(app, "PC-01")).Status);
         Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(client, $"Bearer {token}")).StatusCode);
     }
@@ -455,7 +734,7 @@ public class ClientRegistrationEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var token = await CreateTokenAsync(client, "PC-01");
+        var token = await app.RequestAndRevealAsync(client, "PC-01");
         using var admin = await app.SignedInAdminAsync();
         var id = (await StoredByNameAsync(app, "PC-01")).Id;
         await admin.PostAsJsonAsync($"/api/registration-requests/{id}/deny", new { });
@@ -495,11 +774,28 @@ public class ClientRegistrationEndpointTests
     }
 
     [Fact]
+    public async Task Heartbeat_WhenRevealedButNotAccepted_IsRefused_UntilAccepted()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var token = await app.RequestAndRevealAsync(client, "PC-01");
+
+        await AssertErrorAsync(await HeartbeatAsync(client, $"Bearer {token}"), HttpStatusCode.Unauthorized, NotRegisteredMessage);
+        Assert.Equal(0, await app.WithDbAsync(db => db.Pcs.CountAsync()));
+
+        using var admin = await app.SignedInAdminAsync();
+        var id = (await StoredByNameAsync(app, "PC-01")).Id;
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync($"/api/registration-requests/{id}/accept", new { })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(client, $"Bearer {token}")).StatusCode);
+    }
+
+    [Fact]
     public async Task Heartbeat_WithADeniedOrCancelledToken_Returns401()
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var denied = await CreateTokenAsync(client, "PC-01");
+        var denied = await app.RequestAndRevealAsync(client, "PC-01");
         using var admin = await app.SignedInAdminAsync();
         await admin.PostAsJsonAsync($"/api/registration-requests/{(await StoredByNameAsync(app, "PC-01")).Id}/deny", new { });
         var cancelled = await CreateTokenAsync(client, "PC-02");
@@ -537,8 +833,8 @@ public class ClientRegistrationEndpointTests
         new()
         {
             Name = name,
-            Nonce = TestApp.NewNonce(),
-            PairingNumber = "000000",
+            Commitment = TestApp.NewCommitment(),
+            ServerNonce = TestApp.NewNonce(),
             TokenHash = Guid.NewGuid().ToString("N"),
             RequestedAtUtc = requestedAt,
             Status = status,

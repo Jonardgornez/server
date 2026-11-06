@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -51,8 +52,23 @@ public sealed class TestApp : WebApplicationFactory<Program>
     /// <summary>A nonce as a PC sends it: 32 random bytes as 64 lowercase hex characters.</summary>
     public static string NewNonce() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
 
-    public static JsonContent RegistrationRequestBody(string? name, string? nonce = null) =>
-        JsonContent.Create(new { name, nonce = nonce ?? NewNonce() });
+    /// <summary>The commitment a PC sends for a nonce: the SHA-256 of the nonce's 32 bytes, as 64 lowercase hex characters.</summary>
+    public static string CommitmentOf(string nonce) => Convert.ToHexStringLower(SHA256.HashData(Convert.FromHexString(nonce)));
+
+    public static string NewCommitment() => CommitmentOf(NewNonce());
+
+    public static JsonContent RegistrationRequestBody(string? name, string? commitment = null) =>
+        JsonContent.Create(new { name, commitment = commitment ?? NewCommitment() });
+
+    public static JsonContent RevealBody(string? nonce) => JsonContent.Create(new { nonce });
+
+    /// <summary>Sends the nonce a PC kept for its request, with the token it was given.</summary>
+    public static Task<HttpResponseMessage> RevealAsync(HttpClient pc, string token, string? nonce)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/client/register-requests/reveal") { Content = RevealBody(nonce) };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return pc.SendAsync(request);
+    }
 
     /// <summary>Signs in as the administrator on a loopback browser client.</summary>
     public async Task<HttpClient> SignedInAdminAsync()
@@ -64,13 +80,26 @@ public sealed class TestApp : WebApplicationFactory<Program>
     }
 
     /// <summary>
-    /// Sends a registration request from the PC, has the administrator accept it, and returns the token the PC holds.
+    /// Creates a registration request as a PC does, then reveals its nonce, so the administrator can see it. Returns the token the PC holds.
+    /// </summary>
+    public async Task<string> RequestAndRevealAsync(HttpClient pc, string name)
+    {
+        var nonce = NewNonce();
+        var created = await pc.PostAsync("/api/client/register-requests", RegistrationRequestBody(name, CommitmentOf(nonce)));
+        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
+        var token = JsonDocument.Parse(await created.Content.ReadAsStringAsync()).RootElement.GetProperty("token").GetString()!;
+
+        var revealed = await RevealAsync(pc, token, nonce);
+        Assert.Equal(HttpStatusCode.NoContent, revealed.StatusCode);
+        return token;
+    }
+
+    /// <summary>
+    /// Sends a registration request from the PC, reveals it, has the administrator accept it, and returns the token the PC holds.
     /// </summary>
     public async Task<string> RegisterPcAsync(HttpClient pc, string name)
     {
-        var created = await pc.PostAsync("/api/client/register-requests", RegistrationRequestBody(name));
-        Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
-        var token = JsonDocument.Parse(await created.Content.ReadAsStringAsync()).RootElement.GetProperty("token").GetString()!;
+        var token = await RequestAndRevealAsync(pc, name);
 
         using var admin = await SignedInAdminAsync();
         using var listed = JsonDocument.Parse(await (await admin.GetAsync("/api/registration-requests")).Content.ReadAsStringAsync());

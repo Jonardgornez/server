@@ -49,8 +49,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         {
             entity.Property(r => r.Name).HasMaxLength(32).IsRequired();
             entity.Property(r => r.IpAddress).HasMaxLength(45);
-            entity.Property(r => r.Nonce).HasMaxLength(64).IsRequired();
-            entity.Property(r => r.PairingNumber).HasMaxLength(6).IsRequired();
+            entity.Property(r => r.Commitment).HasMaxLength(64).IsRequired();
+            entity.Property(r => r.ServerNonce).HasMaxLength(64).IsRequired();
+            entity.Property(r => r.Nonce).HasMaxLength(64);
+            entity.Property(r => r.PairingNumber).HasMaxLength(6);
             entity.Property(r => r.TokenHash).IsRequired();
             entity.HasIndex(r => r.TokenHash).IsUnique();
             entity.Property(r => r.RequestedAtUtc).HasConversion(unixMilliseconds);

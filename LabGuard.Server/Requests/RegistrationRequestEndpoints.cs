@@ -25,16 +25,17 @@ public static class RegistrationRequestEndpoints
         return app;
     }
 
-    // Only pending, unexpired requests, oldest first. Polled in the background, so the response is never cached.
+    // Only pending, unexpired and revealed requests, oldest first. An unrevealed request has no pairing number yet, so it stays hidden.
+    // Polled in the background, so the response is never cached.
     private static async Task<IResult> ListAsync(HttpContext http, AppDbContext db, TimeProvider clock, CancellationToken cancellationToken)
     {
         var pendingSince = PcRegistrationRequest.PendingSince(clock.GetUtcNow());
         var requests = await db.PcRegistrationRequests
             .AsNoTracking()
-            .Where(r => r.Status == RegistrationRequestStatus.Pending && r.RequestedAtUtc >= pendingSince)
+            .Where(r => r.Status == RegistrationRequestStatus.Pending && r.Nonce != null && r.RequestedAtUtc >= pendingSince)
             .OrderBy(r => r.RequestedAtUtc)
             .ThenBy(r => r.Id)
-            .Select(r => new RegistrationRequestResponse(r.Id, r.Name, r.IpAddress, r.PairingNumber, r.RequestedAtUtc))
+            .Select(r => new RegistrationRequestResponse(r.Id, r.Name, r.IpAddress, r.PairingNumber!, r.RequestedAtUtc))
             .ToListAsync(cancellationToken);
 
         http.Response.Headers.CacheControl = "no-store";
@@ -42,7 +43,8 @@ public static class RegistrationRequestEndpoints
     }
 
     // Claims the request before anything else. That is the transaction's first write, so a concurrent decision waits
-    // instead of deadlocking, and only one caller can ever claim it. Any rejection rolls the claim back.
+    // instead of deadlocking, and only one caller can ever claim it. A rejection that is the request's own fault
+    // (the name is taken) denies it and commits, so the PC is told and it leaves the list. Other rejections roll back.
     private static async Task<IResult> AcceptAsync(int id, HttpContext http, AppDbContext db, TimeProvider clock)
     {
         if (await AuthEndpoints.ReadBodyAsync<RegistrationDecisionRequest>(http.Request) is null)
@@ -56,7 +58,7 @@ public static class RegistrationRequestEndpoints
 
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         var claimed = await db.PcRegistrationRequests
-            .Where(r => r.Id == id && r.Status == RegistrationRequestStatus.Pending && r.RequestedAtUtc >= pendingSince)
+            .Where(r => r.Id == id && r.Status == RegistrationRequestStatus.Pending && r.Nonce != null && r.RequestedAtUtc >= pendingSince)
             .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.Status, RegistrationRequestStatus.Approved), ct);
         if (claimed == 0)
         {
@@ -64,28 +66,36 @@ public static class RegistrationRequestEndpoints
         }
 
         var request = await db.PcRegistrationRequests.AsNoTracking().SingleAsync(r => r.Id == id, ct);
-        if (await db.Pcs.AnyAsync(p => p.Name == request.Name, ct))
+        var nameTaken = await db.Pcs.AnyAsync(p => p.Name == request.Name, ct);
+        if (!nameTaken)
         {
-            return ClientEndpoints.NameTaken();
+            // The PC already holds the token whose hash the request carries, so it can heartbeat from now on.
+            db.Pcs.Add(new Pc
+            {
+                Name = request.Name,
+                TokenHash = request.TokenHash,
+                IpAddress = request.IpAddress,
+                RegisteredAtUtc = now,
+                LastSeenUtc = now,
+            });
+
+            try
+            {
+                await db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException exception) when (ClientEndpoints.IsUniqueViolation(exception))
+            {
+                // The name was taken between the check above and this insert.
+                nameTaken = true;
+            }
         }
 
-        // The PC already holds the token whose hash the request carries, so it can heartbeat from now on.
-        db.Pcs.Add(new Pc
+        if (nameTaken)
         {
-            Name = request.Name,
-            TokenHash = request.TokenHash,
-            IpAddress = request.IpAddress,
-            RegisteredAtUtc = now,
-            LastSeenUtc = now,
-        });
-
-        try
-        {
-            await db.SaveChangesAsync(ct);
-        }
-        catch (DbUpdateException exception) when (ClientEndpoints.IsUniqueViolation(exception))
-        {
-            // The name was taken between the check above and this insert.
+            await db.PcRegistrationRequests
+                .Where(r => r.Id == id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.Status, RegistrationRequestStatus.Denied), ct);
+            await transaction.CommitAsync(ct);
             return ClientEndpoints.NameTaken();
         }
 
@@ -102,7 +112,7 @@ public static class RegistrationRequestEndpoints
 
         var pendingSince = PcRegistrationRequest.PendingSince(clock.GetUtcNow());
         var denied = await db.PcRegistrationRequests
-            .Where(r => r.Id == id && r.Status == RegistrationRequestStatus.Pending && r.RequestedAtUtc >= pendingSince)
+            .Where(r => r.Id == id && r.Status == RegistrationRequestStatus.Pending && r.Nonce != null && r.RequestedAtUtc >= pendingSince)
             .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.Status, RegistrationRequestStatus.Denied), http.RequestAborted);
         return denied == 0 ? NotPending() : Results.NoContent();
     }

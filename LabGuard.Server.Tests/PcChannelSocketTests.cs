@@ -92,8 +92,8 @@ public sealed class PcChannelSocketTests : IAsyncLifetime
         using var client = PinnedClient(_ => { });
         var uri = $"https://127.0.0.1:{_clientPort}/api/client/register-requests";
 
-        var invalid = await client.PostAsJsonAsync(uri, new { name = "bad name!", nonce = TestApp.NewNonce() });
-        var created = await client.PostAsJsonAsync(uri, new { name = "PC-01", nonce = TestApp.NewNonce() });
+        var invalid = await client.PostAsJsonAsync(uri, new { name = "bad name!", commitment = TestApp.NewCommitment() });
+        var created = await client.PostAsJsonAsync(uri, new { name = "PC-01", commitment = TestApp.NewCommitment() });
 
         Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
         Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);

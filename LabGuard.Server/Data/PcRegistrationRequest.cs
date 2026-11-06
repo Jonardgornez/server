@@ -19,11 +19,18 @@ public class PcRegistrationRequest
     public string Name { get; set; } = "";
     public string? IpAddress { get; set; }
 
-    // 32 random bytes from the PC, as 64 lowercase hex characters. Part of the pairing number.
-    public string Nonce { get; set; } = "";
+    // SHA-256 of the PC's 32-byte nonce, as 64 lowercase hex characters. Sent before the nonce is revealed, so the PC
+    // can't change its nonce after seeing the server's.
+    public string Commitment { get; set; } = "";
 
-    // Six digits both screens show, so the administrator can check they match before accepting.
-    public string PairingNumber { get; set; } = "";
+    // 32 random bytes from the server, as 64 lowercase hex characters. Sent back to the PC when the request is created.
+    public string ServerNonce { get; set; } = "";
+
+    // The PC's 32-byte nonce, as 64 lowercase hex characters. Null until it is revealed. Part of the pairing number.
+    public string? Nonce { get; set; }
+
+    // Six digits both screens show, so the administrator can check they match before accepting. Null until revealed.
+    public string? PairingNumber { get; set; }
     public string TokenHash { get; set; } = "";
     public DateTimeOffset RequestedAtUtc { get; set; }
     public RegistrationRequestStatus Status { get; set; }

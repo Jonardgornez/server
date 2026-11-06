@@ -75,6 +75,8 @@ public static partial class ClientEndpoints
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/register-requests/status", RegistrationStatusAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapPost("/register-requests/reveal", RevealRegistrationRequestAsync).RequireRateLimiting(TrafficRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/register-requests/cancel", CancelRegistrationRequestAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/heartbeat", HeartbeatAsync).RequireRateLimiting(TrafficRateLimitPolicy)

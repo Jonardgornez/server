@@ -24,12 +24,30 @@ public class RegistrationRequestEndpointTests
     // Each request comes from its own address, so the per-address registration limit never applies.
     private static string AddressFor(int n) => $"10.0.0.{n}";
 
+    // Creates a request and reveals its nonce, so the administrator can see it. Returns the token the PC holds.
     private static async Task<string> RequestAsync(TestApp app, string name, string address)
+    {
+        using var pc = app.CreatePcClient(address);
+        return await app.RequestAndRevealAsync(pc, name);
+    }
+
+    // Creates a request and keeps the nonce to itself, so the administrator can't see it yet.
+    private static async Task<string> UnrevealedRequestAsync(TestApp app, string name, string address)
     {
         using var pc = app.CreatePcClient(address);
         var response = await pc.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody(name));
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         return (await JsonOf(response)).GetProperty("token").GetString()!;
+    }
+
+    private static async Task<string> StatusOfAsync(TestApp app, string address, string token)
+    {
+        using var pc = app.CreatePcClient(address);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/client/register-requests/status");
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        var response = await pc.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await JsonOf(response)).GetProperty("status").GetString()!;
     }
 
     private static Task<PcRegistrationRequest> StoredAsync(TestApp app, string name) =>
@@ -91,10 +109,31 @@ public class RegistrationRequestEndpointTests
     }
 
     [Fact]
-    public async Task List_ReturnsTheFieldsTheConsoleNeeds_AndNothingAboutTheToken()
+    public async Task List_HidesUnrevealedRequests_UntilTheyAreRevealed()
     {
         using var app = new TestApp();
-        await RequestAsync(app, "PC-05", AddressFor(7));
+        using var pc = app.CreatePcClient(AddressFor(21));
+        var nonce = TestApp.NewNonce();
+        var created = await pc.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody("PC-HIDDEN", TestApp.CommitmentOf(nonce)));
+        var token = (await JsonOf(created)).GetProperty("token").GetString()!;
+        using var admin = await app.SignedInAdminAsync();
+
+        Assert.Empty((await ListAsync(admin)).EnumerateArray());
+
+        Assert.Equal(HttpStatusCode.NoContent, (await TestApp.RevealAsync(pc, token, nonce)).StatusCode);
+        var listed = (await ListAsync(admin)).EnumerateArray().ToList();
+        Assert.Equal("PC-HIDDEN", Assert.Single(listed).GetProperty("name").GetString());
+    }
+
+    [Fact]
+    public async Task List_ReturnsTheFieldsTheConsoleNeeds_AndNothingAboutTheTokenOrNonces()
+    {
+        using var app = new TestApp();
+        var nonce = TestApp.NewNonce();
+        using var pc = app.CreatePcClient(AddressFor(7));
+        var created = await pc.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody("PC-05", TestApp.CommitmentOf(nonce)));
+        var token = (await JsonOf(created)).GetProperty("token").GetString()!;
+        Assert.Equal(HttpStatusCode.NoContent, (await TestApp.RevealAsync(pc, token, nonce)).StatusCode);
         using var admin = await app.SignedInAdminAsync();
         var stored = await StoredAsync(app, "PC-05");
 
@@ -113,10 +152,14 @@ public class RegistrationRequestEndpointTests
         Assert.Equal(stored.Id, request.GetProperty("id").GetInt32());
         Assert.Equal("PC-05", request.GetProperty("name").GetString());
         Assert.Equal(AddressFor(7), request.GetProperty("ipAddress").GetString());
-        Assert.Equal(PairingNumber.Compute(app.Channel.Certificate, Convert.FromHexString(stored.Nonce)), request.GetProperty("pairingNumber").GetString());
+        Assert.Equal(
+            PairingNumber.Compute(app.Channel.Certificate, Convert.FromHexString(nonce), Convert.FromHexString(stored.ServerNonce)),
+            request.GetProperty("pairingNumber").GetString());
         Assert.Equal(stored.RequestedAtUtc, request.GetProperty("requestedAt").GetDateTimeOffset());
         Assert.DoesNotContain(stored.TokenHash, text);
-        Assert.DoesNotContain(stored.Nonce, text);
+        Assert.DoesNotContain(nonce, text);
+        Assert.DoesNotContain(stored.ServerNonce, text);
+        Assert.DoesNotContain(stored.Commitment, text);
     }
 
     [Fact]
@@ -184,10 +227,10 @@ public class RegistrationRequestEndpointTests
     }
 
     [Fact]
-    public async Task Accept_WhenTheNameWasTakenMeanwhile_Returns409_AndKeepsTheRequestPending()
+    public async Task Accept_WhenTheNameWasTakenMeanwhile_Returns409_AndDeniesTheRequest()
     {
         using var app = new TestApp();
-        await RequestAsync(app, "PC-05", AddressFor(8));
+        var token = await RequestAsync(app, "PC-05", AddressFor(8));
         await app.WithDbAsync(async db =>
         {
             db.Pcs.Add(new Pc
@@ -205,16 +248,18 @@ public class RegistrationRequestEndpointTests
         var response = await AcceptAsync(admin, await IdOfAsync(app, "PC-05"));
 
         await AssertErrorAsync(response, HttpStatusCode.Conflict, "That PC name is already registered.");
-        Assert.Equal(RegistrationRequestStatus.Pending, (await StoredAsync(app, "PC-05")).Status);
+        Assert.Equal(RegistrationRequestStatus.Denied, (await StoredAsync(app, "PC-05")).Status);
         Assert.Equal(1, await app.WithDbAsync(db => db.Pcs.CountAsync()));
+        Assert.Equal("denied", await StatusOfAsync(app, AddressFor(8), token));
+        Assert.Empty((await ListAsync(admin)).EnumerateArray());
     }
 
     [Fact]
-    public async Task Accept_OfTwoPendingRequestsForOneName_CreatesOnePc_AndThenReturns409()
+    public async Task Accept_OfTwoPendingRequestsForOneName_CreatesOnePc_AndDeniesTheSecond()
     {
         using var app = new TestApp();
         await RequestAsync(app, "PC-05", AddressFor(15));
-        await RequestAsync(app, "PC-05", AddressFor(16));
+        var secondToken = await RequestAsync(app, "PC-05", AddressFor(16));
         using var admin = await app.SignedInAdminAsync();
         var requests = (await ListAsync(admin)).EnumerateArray().ToList();
         Assert.Equal(2, requests.Count);
@@ -224,8 +269,35 @@ public class RegistrationRequestEndpointTests
 
         await AssertErrorAsync(await AcceptAsync(admin, secondId), HttpStatusCode.Conflict, "That PC name is already registered.");
         var second = await app.WithDbAsync(db => db.PcRegistrationRequests.AsNoTracking().SingleAsync(r => r.Id == secondId));
-        Assert.Equal(RegistrationRequestStatus.Pending, second.Status);
+        Assert.Equal(RegistrationRequestStatus.Denied, second.Status);
         Assert.Equal(1, await app.WithDbAsync(db => db.Pcs.CountAsync()));
+        Assert.Equal("denied", await StatusOfAsync(app, AddressFor(16), secondToken));
+        Assert.Empty((await ListAsync(admin)).EnumerateArray());
+    }
+
+    [Fact]
+    public async Task Accept_OfAnUnrevealedRequest_Returns404_AndCreatesNoPc()
+    {
+        using var app = new TestApp();
+        await UnrevealedRequestAsync(app, "PC-05", AddressFor(22));
+        using var admin = await app.SignedInAdminAsync();
+        var id = await IdOfAsync(app, "PC-05");
+
+        await AssertErrorAsync(await AcceptAsync(admin, id), HttpStatusCode.NotFound);
+        Assert.Equal(RegistrationRequestStatus.Pending, (await StoredAsync(app, "PC-05")).Status);
+        Assert.Equal(0, await app.WithDbAsync(db => db.Pcs.CountAsync()));
+    }
+
+    [Fact]
+    public async Task Deny_OfAnUnrevealedRequest_Returns404_AndLeavesItPending()
+    {
+        using var app = new TestApp();
+        await UnrevealedRequestAsync(app, "PC-05", AddressFor(23));
+        using var admin = await app.SignedInAdminAsync();
+        var id = await IdOfAsync(app, "PC-05");
+
+        await AssertErrorAsync(await DenyAsync(admin, id), HttpStatusCode.NotFound);
+        Assert.Equal(RegistrationRequestStatus.Pending, (await StoredAsync(app, "PC-05")).Status);
     }
 
     [Fact]

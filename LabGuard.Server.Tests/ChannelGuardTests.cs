@@ -117,7 +117,7 @@ public class ChannelGuardTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var json = $$"""{"name":"PC-01","nonce":"{{TestApp.NewNonce()}}"}""";
+        var json = $$"""{"name":"PC-01","commitment":"{{TestApp.NewCommitment()}}"}""";
         var padding = new string(' ', ChannelGuard.MaxClientBodyBytes - json.Length);
 
         var response = await client.PostAsync("/api/client/register-requests", new StringContent(json + padding, Encoding.UTF8, "application/json"));
