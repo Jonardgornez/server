@@ -64,10 +64,19 @@ public static partial class PcEndpoints
         }
 
         // A PC already pending is left as it is, so the request is not refreshed and its first action is kept.
-        await RequestPowerActionsAsync(db, [id], action, now, ct);
+        var requested = await RequestPowerActionsAsync(db, [id], action, now, ct);
         await transaction.CommitAsync(ct);
-        return Results.NoContent();
+
+        // Repeating the action in progress is fine. Asking for the other one is refused, so nobody is told it will restart when it will shut down.
+        return requested == 0 && PcShutdownRules.ActionOf(pc.PowerAction) != action
+            ? ConflictResponse(PowerActionInProgressMessage(pc))
+            : Results.NoContent();
     }
+
+    private static string PowerActionInProgressMessage(Pc pc) =>
+        PcShutdownRules.ActionOf(pc.PowerAction) == PcShutdownRules.RestartAction
+            ? "This PC is already restarting."
+            : "This PC is already shutting down.";
 
     private static async Task<IResult> RequestPowerActionManyAsync(
         string action,

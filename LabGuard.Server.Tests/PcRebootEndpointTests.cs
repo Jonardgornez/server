@@ -218,7 +218,7 @@ public class PcRebootEndpointTests
     // A pending or recently delivered request keeps its first action.
 
     [Fact]
-    public async Task Reboot_AlreadyPendingShutdown_Returns204AndKeepsTheShutdown()
+    public async Task Reboot_AlreadyPendingShutdown_Returns409AndKeepsTheShutdown()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -232,14 +232,14 @@ public class PcRebootEndpointTests
 
         var response = await RebootAsync(admin, pc.Id);
 
-        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         var stored = await StoredPcAsync(app, pc.Id);
         Assert.Equal(before.ShutdownRequestedAtUtc, stored.ShutdownRequestedAtUtc);
         Assert.Equal(PcShutdownRules.ShutdownAction, stored.PowerAction);
     }
 
     [Fact]
-    public async Task Shutdown_AlreadyPendingReboot_Returns204AndKeepsTheRestart()
+    public async Task Shutdown_AlreadyPendingReboot_Returns409AndKeepsTheRestart()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -253,14 +253,14 @@ public class PcRebootEndpointTests
 
         var response = await ShutdownAsync(admin, pc.Id);
 
-        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         var stored = await StoredPcAsync(app, pc.Id);
         Assert.Equal(before.ShutdownRequestedAtUtc, stored.ShutdownRequestedAtUtc);
         Assert.Equal(PcShutdownRules.RestartAction, stored.PowerAction);
     }
 
     [Fact]
-    public async Task Reboot_WithinTheDeliveryWindowOfAShutdown_StoresNothing()
+    public async Task Reboot_WithinTheDeliveryWindowOfAShutdown_Returns409AndStoresNothing()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -275,7 +275,7 @@ public class PcRebootEndpointTests
 
         var response = await RebootAsync(admin, pc.Id);
 
-        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         var stored = await StoredPcAsync(app, pc.Id);
         Assert.Null(stored.ShutdownRequestedAtUtc);
         Assert.Equal(delivered, stored.ShutdownDeliveredAtUtc);
@@ -322,6 +322,35 @@ public class PcRebootEndpointTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal(InvalidRequestMessage, (await JsonOf(response)).GetProperty("error").GetString());
         Assert.Null((await StoredPcAsync(app, pc.Id)).ShutdownRequestedAtUtc);
+    }
+
+    [Fact]
+    public async Task Reboot_RightAfterADeliveredShutdown_Returns409()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await ShutdownAsync(admin, pc.Id);
+        await HeartbeatAsync(client, pc);
+
+        Assert.Equal(HttpStatusCode.Conflict, (await RebootAsync(admin, pc.Id)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Reboot_Repeated_Returns204AndKeepsTheFirstRequest()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient(OtherPcAddress);
+        var pc = await AddPcAsync(app);
+        await HeartbeatAsync(client, pc);
+        await RebootAsync(admin, pc.Id);
+        var before = await StoredPcAsync(app, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await RebootAsync(admin, pc.Id)).StatusCode);
+        Assert.Equal(before.ShutdownRequestedAtUtc, (await StoredPcAsync(app, pc.Id)).ShutdownRequestedAtUtc);
     }
 
     [Fact]
