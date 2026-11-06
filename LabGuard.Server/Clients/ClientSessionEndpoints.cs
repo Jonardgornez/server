@@ -344,23 +344,17 @@ public static partial class ClientEndpoints
         var address = RemoteAddress(http)?.ToString();
         var ct = http.RequestAborted;
 
-        // Read before the update, so the PC's last-seen time from before this heartbeat is still known.
-        var previousLastSeen = await db.Pcs
+        var known = await db.Pcs
             .AsNoTracking()
             .Where(p => p.TokenHash == tokenHash)
-            .Select(p => (DateTimeOffset?)p.LastSeenUtc)
+            .Select(p => new { p.Id, p.LastSeenUtc })
             .FirstOrDefaultAsync(ct);
-
-        // A single conditional update, so a PC removed a moment ago can't be revived.
-        var changed = await db.Pcs
-            .Where(p => p.TokenHash == tokenHash)
-            .ExecuteUpdateAsync(setters => setters
-                .SetProperty(p => p.LastSeenUtc, now)
-                .SetProperty(p => p.IpAddress, address), ct);
-        if (changed == 0 || await FindPcIdAsync(db, token, ct) is not { } pcId)
+        if (known is null)
         {
             return NotRegistered();
         }
+
+        var pcId = known.Id;
 
         // A missing, empty or malformed body is still a heartbeat, just without a session id.
         var request = await AuthEndpoints.ReadBodyAsync<HeartbeatRequest>(http.Request);
@@ -378,10 +372,22 @@ public static partial class ClientEndpoints
 
         // An admin unlock is adopted by a PC that was online before this heartbeat, or that reports its id (a network blip).
         // A PC that was offline and doesn't know the id, such as a rebooted one, must not open itself unattended.
-        if (active is { IsAdminUnlock: true } && request?.SessionId != active.Id && WasOffline(previousLastSeen, now))
+        if (active is { IsAdminUnlock: true } && request?.SessionId != active.Id && !PcEndpoints.IsOnline(known.LastSeenUtc, now))
         {
             await SessionLifecycle.EndSessionAsync(db, active.Id, SessionLifecycle.ConnectionLost, now, ct);
             active = null;
+        }
+
+        // Written after the decision above, so a heartbeat that dies partway can't make the PC look online with the
+        // unlock still open. A single conditional update, so a PC removed a moment ago can't be revived.
+        var changed = await db.Pcs
+            .Where(p => p.TokenHash == tokenHash)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(p => p.LastSeenUtc, now)
+                .SetProperty(p => p.IpAddress, address), ct);
+        if (changed == 0)
+        {
+            return NotRegistered();
         }
 
         // Only this PC's own ended sessions are ever reported, never another PC's.
@@ -398,10 +404,6 @@ public static partial class ClientEndpoints
             active is null ? null : SessionLifecycle.ToInfo(active, now),
             endedReason));
     }
-
-    // Offline means the last heartbeat was too old, or lies in the future (the clock moved back).
-    private static bool WasOffline(DateTimeOffset? previousLastSeen, DateTimeOffset now) =>
-        previousLastSeen is not { } lastSeen || !PcEndpoints.IsOnline(lastSeen, now);
 
     private static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)
     {

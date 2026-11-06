@@ -1065,6 +1065,40 @@ public class SessionEndpointTests
     }
 
     [Fact]
+    public async Task Heartbeat_AdminUnlock_StaysEnded_WhenTheHeartbeatFailsBeforeLastSeenIsWritten()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var unlockId = await AdminUnlockAsync(app, admin, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(60));
+        // A heartbeat that dies partway must not leave a fresh last-seen time and the unlock still open,
+        // or the PC's next heartbeat would look online and adopt the unlock.
+        await app.WithDbAsync(db => db.Database.ExecuteSqlRawAsync("""
+            CREATE TRIGGER FailLastSeen BEFORE UPDATE OF LastSeenUtc ON Pcs
+            BEGIN
+                SELECT RAISE(ABORT, 'simulated failure');
+            END
+            """));
+
+        try
+        {
+            await HeartbeatAsync(client, pc);
+        }
+        catch (Exception exception) when (exception is not Xunit.Sdk.XunitException)
+        {
+            // The test host passes the simulated failure through.
+        }
+
+        await app.WithDbAsync(db => db.Database.ExecuteSqlRawAsync("DROP TRIGGER FailLastSeen"));
+        Assert.Equal(SessionLifecycle.ConnectionLost, (await StoredSessionAsync(app, unlockId)).EndReason);
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc));
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("session").ValueKind);
+    }
+
+    [Fact]
     public async Task Heartbeat_AdminUnlock_IsEndedAsConnectionLost_WhenTheLastSeenTimeIsInTheFuture()
     {
         using var app = new TestApp();

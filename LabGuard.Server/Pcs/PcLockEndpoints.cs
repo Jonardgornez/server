@@ -38,10 +38,13 @@ public static partial class PcEndpoints
             return AuthEndpoints.InvalidRequest();
         }
 
+        // Closing an expired session comes first: that write takes the database lock, so heartbeats can't commit
+        // between the reads below and the insert. Only a session that is still running then blocks the unlock.
         // The PC is read inside the transaction, so a PC removed a moment ago can't get a session.
         var ct = http.RequestAborted;
         var now = clock.GetUtcNow();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SessionLifecycle.EndExpiredForPcAsync(db, id, now, ct);
         var pc = await db.Pcs.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
         if (pc is null)
         {
@@ -53,9 +56,7 @@ public static partial class PcEndpoints
             return ConflictResponse("This PC is offline.");
         }
 
-        // An expired session is closed first, so only a session that is still running blocks the unlock.
-        // The transaction is committed either way, so that closing is kept even when the unlock is refused.
-        await SessionLifecycle.EndExpiredForPcAsync(db, id, now, ct);
+        // Committed either way, so closing an expired session is kept even when the unlock is refused.
         var inUse = await db.PcSessions.AnyAsync(s => s.PcId == id && s.EndedAtUtc == null, ct);
         var opened = !inUse && await TryOpenAdminUnlockAsync(db, pc, now, ct);
         await transaction.CommitAsync(ct);
