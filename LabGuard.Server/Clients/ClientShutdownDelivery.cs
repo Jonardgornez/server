@@ -35,13 +35,23 @@ public static partial class ClientEndpoints
         ILocalAddressSource localAddresses,
         PowerSnapshot power,
         bool? cancelHandled,
+        bool? countdownRunning,
         DateTimeOffset now,
         CancellationToken ct)
     {
         // A PC that was offline before this heartbeat has only just started. Whatever it was asked to do is forgotten at
         // once, so it isn't shown as still going down, and a pending request or a cancel is dropped rather than handed over.
+        // The exception is a PC that says its countdown is still running: it never went down, it only missed heartbeats, so
+        // its delivery and any cancel stand until the window ends. Only the pending request is dropped, as always.
         if (!wasOnline)
         {
+            if (countdownRunning == true)
+            {
+                power = await ForgetExpiredDeliveryAsync(db, tokenHash, power, now, ct);
+                await ClearRequestAsync(db, tokenHash, ct);
+                return new PowerHandOff(null, IsCancelled: power.CancelRequestedAtUtc is not null);
+            }
+
             await db.Pcs
                 .Where(p => p.TokenHash == tokenHash
                     && (p.ShutdownRequestedAtUtc != null || p.ShutdownDeliveredAtUtc != null || p.PowerCancelRequestedAtUtc != null))
@@ -52,17 +62,7 @@ public static partial class ClientEndpoints
             return new PowerHandOff(null, IsCancelled: false);
         }
 
-        // A delivery more than its own window old is forgotten: the PC is no longer shutting down or restarting, so a cancel goes with it.
-        var deliveredBefore = now - PcShutdownRules.DeliveryWindowOf(power.CountdownSeconds);
-        if (power.DeliveredAtUtc is { } lastDelivered && lastDelivered < deliveredBefore)
-        {
-            await db.Pcs
-                .Where(p => p.TokenHash == tokenHash && p.ShutdownDeliveredAtUtc < deliveredBefore)
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
-                    .SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)null), ct);
-            power = power with { DeliveredAtUtc = null, CancelRequestedAtUtc = null };
-        }
+        power = await ForgetExpiredDeliveryAsync(db, tokenHash, power, now, ct);
 
         // The PC has acted on the cancel, so the cancel and its delivery are cleared. The update matches the cancel that was read,
         // so a cancel recorded meanwhile is left for the next heartbeat to report. An acknowledgement with no cancel does nothing.
@@ -131,6 +131,29 @@ public static partial class ClientEndpoints
                 .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)now)
                 .SetProperty(p => p.PowerCountdownSeconds, (int?)countdown), ct);
         return changed > 0 ? new PowerDelivery(PcShutdownRules.ActionOf(power.PowerAction), countdown) : null;
+    }
+
+    // A delivery more than its own window old is forgotten: the PC is no longer shutting down or restarting, so a cancel goes with it.
+    // Returns the state as it now stands.
+    private static async Task<PowerSnapshot> ForgetExpiredDeliveryAsync(
+        AppDbContext db,
+        string tokenHash,
+        PowerSnapshot power,
+        DateTimeOffset now,
+        CancellationToken ct)
+    {
+        var deliveredBefore = now - PcShutdownRules.DeliveryWindowOf(power.CountdownSeconds);
+        if (power.DeliveredAtUtc is not { } lastDelivered || lastDelivered >= deliveredBefore)
+        {
+            return power;
+        }
+
+        await db.Pcs
+            .Where(p => p.TokenHash == tokenHash && p.ShutdownDeliveredAtUtc < deliveredBefore)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)null)
+                .SetProperty(p => p.PowerCancelRequestedAtUtc, (DateTimeOffset?)null), ct);
+        return power with { DeliveredAtUtc = null, CancelRequestedAtUtc = null };
     }
 
     // Drops a pending request without delivering it.

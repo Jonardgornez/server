@@ -15,7 +15,8 @@ namespace LabGuard.Server.Clients;
 public record PcLoginRequest(string? Username, string? Password);
 public record PcLoginResponse(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining);
 // PowerCancelHandled is sent by a PC that has acted on a cancel of its shutdown or restart. It only matters while a cancel is recorded.
-public record HeartbeatRequest(int? SessionId, bool? PowerCancelHandled);
+// PowerCountdownRunning is sent by a PC that is counting down a shutdown or restart it was handed. Null from an older client.
+public record HeartbeatRequest(int? SessionId, bool? PowerCancelHandled, bool? PowerCountdownRunning);
 // ScreenView is set while an administrator has a live view of this PC open. The PC streams only then, and an older client ignores it.
 public record HeartbeatScreenView(string ViewId, string Mode);
 // Notice is the administrator's on-screen notice text, or null when the notice is turned off.
@@ -499,6 +500,7 @@ public static partial class ClientEndpoints
                 known.PowerCountdownSeconds,
                 known.PowerCancelRequestedAtUtc),
             request?.PowerCancelHandled,
+            request?.PowerCountdownRunning,
             now,
             ct);
 
