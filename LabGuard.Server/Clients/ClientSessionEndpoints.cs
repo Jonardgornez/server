@@ -14,7 +14,7 @@ public record PcLoginResponse(int SessionId, string Username, DefaultTimeRespons
 public record HeartbeatRequest(int? SessionId);
 public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason, bool IsLocked);
 
-// Login, logout and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
+// Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
 {
     public const int MaxLoginsPerMinute = 20;
@@ -343,6 +343,29 @@ public static partial class ClientEndpoints
         var now = clock.GetUtcNow();
         await SessionLifecycle.EndExpiredForPcAsync(db, pcId, now, ct);
         await SessionLifecycle.EndForPcAsync(db, pcId, SessionLifecycle.Logout, now, ct);
+        return Results.NoContent();
+    }
+
+    // The PC says it is closing. Its last heartbeat moves back to the edge of the online window, so it shows offline at once.
+    // Only ever moves backward, and leaves its sessions and its lock alone.
+    private static async Task<IResult> OfflineAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    {
+        if (ReadBearerToken(http.Request) is not { } token)
+        {
+            return NotRegistered();
+        }
+
+        var ct = http.RequestAborted;
+        if (await FindPcIdAsync(db, token, ct) is not { } pcId)
+        {
+            return NotRegistered();
+        }
+
+        // Exactly the moment IsOnline gives up on: a PC last seen this long ago is offline.
+        var offlineSince = clock.GetUtcNow() - PcEndpoints.OnlineWindow;
+        await db.Pcs
+            .Where(p => p.Id == pcId && p.LastSeenUtc > offlineSince)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LastSeenUtc, offlineSince), ct);
         return Results.NoContent();
     }
 

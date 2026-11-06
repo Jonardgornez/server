@@ -95,6 +95,12 @@ public class PcLockEndpointTests
     private static Task<HttpResponseMessage> UnlockAsync(HttpClient admin, int pcId) =>
         admin.PostAsJsonAsync($"/api/pcs/{pcId}/unlock", new { });
 
+    // Marks PCs as seen now, so they are online at this moment, without a heartbeat's side effects on their sessions.
+    private static Task BringOnlineAsync(TestApp app, params int[] pcIds) =>
+        app.WithDbAsync(db => db.Pcs
+            .Where(p => pcIds.Contains(p.Id))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LastSeenUtc, app.Time.GetUtcNow())));
+
     // Every admin route refuses anonymous callers, the PC port, and any request without a JSON body.
 
     [Theory]
@@ -178,6 +184,7 @@ public class PcLockEndpointTests
         await AddAccountAsync(app);
         var sessionId = await LoggedInSessionIdAsync(client, pc);
         app.Time.Advance(TimeSpan.FromSeconds(30));
+        await BringOnlineAsync(app, pc.Id);
 
         var response = await LockAsync(admin, pc.Id);
 
@@ -214,6 +221,7 @@ public class PcLockEndpointTests
         var firstPause = (await StoredSessionAsync(app, sessionId)).PausedAtUtc;
         var firstLock = (await StoredPcAsync(app, pc.Id)).LockedAtUtc;
         app.Time.Advance(TimeSpan.FromMinutes(1));
+        await BringOnlineAsync(app, pc.Id);
 
         Assert.Equal(HttpStatusCode.NoContent, (await LockAsync(admin, pc.Id)).StatusCode);
 
@@ -231,6 +239,7 @@ public class PcLockEndpointTests
         await AddAccountAsync(app, minutes: 1);
         var sessionId = await LoggedInSessionIdAsync(client, pc);
         app.Time.Advance(TimeSpan.FromSeconds(20));
+        await BringOnlineAsync(app, pc.Id);
         await LockAsync(admin, pc.Id);
         app.Time.Advance(TimeSpan.FromMinutes(5));
 
@@ -263,13 +272,14 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task Heartbeat_AfterLockingAnOfflinePc_ReportsIsLocked()
+    public async Task Heartbeat_AfterLockingAndThenGoingOffline_ReportsIsLocked()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
         using var client = app.CreatePcClient();
-        var pc = await AddPcAsync(app, seenAgo: TimeSpan.FromMinutes(1));
+        var pc = await AddPcAsync(app);
         await LockAsync(admin, pc.Id);
+        app.Time.Advance(TimeSpan.FromMinutes(1));
 
         var body = await JsonOf(await HeartbeatAsync(client, pc));
 
@@ -314,7 +324,7 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task Lock_OfflinePc_StillLocksAndPausesItsSession()
+    public async Task Lock_OfflinePc_Returns409AndChangesNothing()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -324,12 +334,14 @@ public class PcLockEndpointTests
         var sessionId = await LoggedInSessionIdAsync(client, pc);
         app.Time.Advance(TimeSpan.FromMinutes(1));
 
-        Assert.Equal(HttpStatusCode.NoContent, (await LockAsync(admin, pc.Id)).StatusCode);
+        var response = await LockAsync(admin, pc.Id);
 
-        Assert.NotNull((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("This PC is offline.", (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
         var session = await StoredSessionAsync(app, sessionId);
         Assert.Null(session.EndedAtUtc);
-        Assert.NotNull(session.PausedAtUtc);
+        Assert.Null(session.PausedAtUtc);
     }
 
     [Fact]
@@ -342,6 +354,7 @@ public class PcLockEndpointTests
         await AddAccountAsync(app, minutes: 1);
         var sessionId = await LoggedInSessionIdAsync(client, pc);
         app.Time.Advance(TimeSpan.FromMinutes(5));
+        await BringOnlineAsync(app, pc.Id);
 
         Assert.Equal(HttpStatusCode.NoContent, (await LockAsync(admin, pc.Id)).StatusCode);
 
@@ -438,7 +451,7 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task LockMany_PausesRunningSessions_LocksOfflinePcs_AndCountsOnlyNewLocks()
+    public async Task LockMany_PausesRunningSessions_SkipsOfflinePcs_AndCountsOnlyNewLocks()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -457,17 +470,22 @@ public class PcLockEndpointTests
         await LoggedInSessionIdAsync(clientExpired, expired, "quick");
         await LockAsync(admin, alreadyLocked.Id);
         app.Time.Advance(TimeSpan.FromMinutes(2));
+        await BringOnlineAsync(app, running.Id, expired.Id, idle.Id, alreadyLocked.Id);
 
         var affected = await AffectedAsync(await LockManyAsync(admin, running.Id, offline.Id, expired.Id, idle.Id, alreadyLocked.Id, running.Id, 999));
 
-        Assert.Equal(4, affected);
+        Assert.Equal(3, affected);
         Assert.Null((await StoredSessionAsync(app, runningSessionId)).EndedAtUtc);
         Assert.NotNull((await StoredSessionAsync(app, runningSessionId)).PausedAtUtc);
-        Assert.NotNull((await StoredSessionAsync(app, offlineSessionId)).PausedAtUtc);
+        Assert.Null((await StoredSessionAsync(app, offlineSessionId)).PausedAtUtc);
         var expiredSession = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.PcId == expired.Id));
         Assert.Equal(SessionLifecycle.TimeExpired, expiredSession.EndReason);
-        var pcs = await app.WithDbAsync(db => db.Pcs.AsNoTracking().ToListAsync());
-        Assert.All(pcs, pc => Assert.NotNull(pc.LockedAtUtc));
+        var pcs = (await app.WithDbAsync(db => db.Pcs.AsNoTracking().ToListAsync())).ToDictionary(p => p.Id);
+        Assert.NotNull(pcs[running.Id].LockedAtUtc);
+        Assert.NotNull(pcs[expired.Id].LockedAtUtc);
+        Assert.NotNull(pcs[idle.Id].LockedAtUtc);
+        Assert.NotNull(pcs[alreadyLocked.Id].LockedAtUtc);
+        Assert.Null(pcs[offline.Id].LockedAtUtc);
     }
 
     [Fact]
@@ -482,11 +500,12 @@ public class PcLockEndpointTests
     }
 
     [Fact]
-    public async Task LockMany_AtSixtyPcs_LocksEveryPc()
+    public async Task LockMany_AtSixtyPcs_LocksEveryOnlinePc()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
         var pcs = new List<TestPc>();
+        // Every tenth PC is offline, so it is skipped: 54 of the 60 are locked.
         for (var i = 0; i < 60; i++)
         {
             pcs.Add(await AddPcAsync(app, $"PC-{i:00}", seenAgo: i % 10 == 0 ? TimeSpan.FromSeconds(60) : TimeSpan.Zero));
@@ -494,8 +513,8 @@ public class PcLockEndpointTests
 
         var affected = await AffectedAsync(await LockManyAsync(admin, pcs.Select(p => p.Id).ToArray()));
 
-        Assert.Equal(60, affected);
-        Assert.Equal(60, await app.WithDbAsync(db => db.Pcs.CountAsync(p => p.LockedAtUtc != null)));
+        Assert.Equal(54, affected);
+        Assert.Equal(54, await app.WithDbAsync(db => db.Pcs.CountAsync(p => p.LockedAtUtc != null)));
     }
 
     [Fact]
@@ -521,7 +540,7 @@ public class PcLockEndpointTests
         using var clientPaused = app.CreatePcClient("192.168.1.52");
         var lockedIdle = await AddPcAsync(app, "PC-01");
         var idle = await AddPcAsync(app, "PC-02");
-        var lockedOffline = await AddPcAsync(app, "PC-03", seenAgo: TimeSpan.FromMinutes(1));
+        var lockedOffline = await AddPcAsync(app, "PC-03");
         var busy = await AddPcAsync(app, "PC-04");
         var lockedPaused = await AddPcAsync(app, "PC-05");
         await AddAccountAsync(app);
@@ -530,6 +549,9 @@ public class PcLockEndpointTests
         await LockAsync(admin, lockedIdle.Id);
         await LockAsync(admin, lockedOffline.Id);
         await LockAsync(admin, lockedPaused.Id);
+        // lockedOffline goes silent after its lock, so it is offline for the unlock. The others report in again.
+        app.Time.Advance(TimeSpan.FromMinutes(1));
+        await BringOnlineAsync(app, lockedIdle.Id, idle.Id, busy.Id, lockedPaused.Id);
 
         var affected = await AffectedAsync(await UnlockManyAsync(admin, lockedIdle.Id, idle.Id, lockedOffline.Id, busy.Id, lockedPaused.Id, 999));
 
@@ -797,6 +819,7 @@ public class PcLockEndpointTests
         await AddAccountAsync(app, minutes: 10);
         var sessionId = await LoggedInSessionIdAsync(client, pc);
         app.Time.Advance(TimeSpan.FromMinutes(2));
+        await BringOnlineAsync(app, pc.Id);
         await LockAsync(admin, pc.Id);
         app.Time.Advance(TimeSpan.FromMinutes(20));
         await HeartbeatAsync(client, pc, sessionId);
@@ -842,8 +865,9 @@ public class PcLockEndpointTests
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
-        var pc = await AddPcAsync(app, seenAgo: TimeSpan.FromMinutes(1));
+        var pc = await AddPcAsync(app);
         Assert.Equal(HttpStatusCode.NoContent, (await LockAsync(admin, pc.Id)).StatusCode);
+        app.Time.Advance(TimeSpan.FromMinutes(1));
 
         var response = await UnlockAsync(admin, pc.Id);
 

@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
+using LabGuard.Server.Pcs;
 using LabGuard.Server.Sessions;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.Sqlite;
@@ -86,6 +87,20 @@ public class SessionEndpointTests
 
     private static Task<HttpResponseMessage> LogoutAsync(HttpClient client, TestPc pc) =>
         PostAsync(client, "/api/client/logout", pc.Token);
+
+    private static Task<HttpResponseMessage> OfflineAsync(HttpClient client, TestPc pc) =>
+        PostAsync(client, "/api/client/offline", pc.Token);
+
+    private static Task<Pc> StoredPcAsync(TestApp app, int pcId) =>
+        app.WithDbAsync(db => db.Pcs.AsNoTracking().SingleAsync(p => p.Id == pcId));
+
+    private static async Task<DateTimeOffset> LastSeenAsync(TestApp app, int pcId) => (await StoredPcAsync(app, pcId)).LastSeenUtc;
+
+    private static async Task<bool> IsListedOnlineAsync(HttpClient admin, int pcId)
+    {
+        var entries = await JsonOf(await admin.GetAsync("/api/pcs"));
+        return entries.EnumerateArray().Single(entry => entry.GetProperty("id").GetInt32() == pcId).GetProperty("isOnline").GetBoolean();
+    }
 
     private static Task<HttpResponseMessage> HeartbeatAsync(HttpClient client, TestPc pc, int? sessionId = null) =>
         PostAsync(client, "/api/client/heartbeat", pc.Token, sessionId is null ? null : JsonContent.Create(new { sessionId }));
@@ -943,6 +958,143 @@ public class SessionEndpointTests
         await LogoutAsync(clientA, pcA);
 
         Assert.Null((await StoredSessionAsync(app, sessionB)).EndedAtUtc);
+    }
+
+    // Going offline
+
+    [Fact]
+    public async Task Offline_WithAValidToken_ShowsThePcOfflineAtOnce()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        Assert.True(await IsListedOnlineAsync(admin, pc.Id));
+
+        var response = await OfflineAsync(client, pc);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.False(await IsListedOnlineAsync(admin, pc.Id));
+        Assert.Equal(
+            (app.Time.GetUtcNow() - PcEndpoints.OnlineWindow).ToUnixTimeMilliseconds(),
+            (await LastSeenAsync(app, pc.Id)).ToUnixTimeMilliseconds());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("Bearer ")]
+    [InlineData("Basic dXNlcjpwYXNz")]
+    [InlineData("Bearer not-a-registered-token")]
+    public async Task Offline_WithMissingOrUnknownToken_Returns401AndChangesNothing(string? authorization)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var lastSeen = await LastSeenAsync(app, pc.Id);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/client/offline");
+        if (authorization is not null)
+        {
+            request.Headers.TryAddWithoutValidation("Authorization", authorization);
+        }
+
+        await AssertErrorAsync(await client.SendAsync(request), HttpStatusCode.Unauthorized, NotRegisteredMessage);
+        Assert.Equal(lastSeen, await LastSeenAsync(app, pc.Id));
+    }
+
+    [Fact]
+    public async Task Offline_OnTheAdminPort_Returns404AndChangesNothing()
+    {
+        using var app = new TestApp();
+        using var browser = app.CreateBrowser();
+        var pc = await AddPcAsync(app);
+        var lastSeen = await LastSeenAsync(app, pc.Id);
+
+        var response = await OfflineAsync(browser, pc);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(lastSeen, await LastSeenAsync(app, pc.Id));
+    }
+
+    [Fact]
+    public async Task Offline_OnlyAffectsThatPc()
+    {
+        using var app = new TestApp();
+        using var clientA = app.CreatePcClient("192.168.1.50");
+        var pcA = await AddPcAsync(app, "PC-01");
+        var pcB = await AddPcAsync(app, "PC-02");
+        var lastSeenB = await LastSeenAsync(app, pcB.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await OfflineAsync(clientA, pcA)).StatusCode);
+
+        Assert.Equal(lastSeenB, await LastSeenAsync(app, pcB.Id));
+    }
+
+    [Fact]
+    public async Task Offline_KeepsTheSessionAndTheLock()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        var sessionId = await LoggedInSessionIdAsync(client, pc);
+        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync($"/api/pcs/{pc.Id}/lock", new { })).StatusCode);
+        var sessionBefore = await StoredSessionAsync(app, sessionId);
+        var lockedBefore = (await StoredPcAsync(app, pc.Id)).LockedAtUtc;
+
+        Assert.Equal(HttpStatusCode.NoContent, (await OfflineAsync(client, pc)).StatusCode);
+
+        var sessionAfter = await StoredSessionAsync(app, sessionId);
+        Assert.Null(sessionAfter.EndedAtUtc);
+        Assert.Null(sessionAfter.EndReason);
+        Assert.NotNull(sessionBefore.PausedAtUtc);
+        Assert.Equal(sessionBefore.PausedAtUtc, sessionAfter.PausedAtUtc);
+        Assert.Equal(lockedBefore, (await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task Offline_DoesNotMoveLastSeenForward()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        app.Time.Advance(TimeSpan.FromMinutes(1));
+        var lastSeen = await LastSeenAsync(app, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await OfflineAsync(client, pc)).StatusCode);
+
+        Assert.Equal(lastSeen, await LastSeenAsync(app, pc.Id));
+    }
+
+    [Fact]
+    public async Task Offline_ThenLock_Returns409AndLeavesThePcUnlocked()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await OfflineAsync(client, pc);
+
+        var response = await admin.PostAsJsonAsync($"/api/pcs/{pc.Id}/lock", new { });
+
+        await AssertErrorAsync(response, HttpStatusCode.Conflict, "This PC is offline.");
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task Heartbeat_AfterOffline_BringsThePcBackOnline()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await OfflineAsync(client, pc);
+        Assert.False(await IsListedOnlineAsync(admin, pc.Id));
+
+        Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(client, pc)).StatusCode);
+
+        Assert.True(await IsListedOnlineAsync(admin, pc.Id));
     }
 
     // Heartbeat

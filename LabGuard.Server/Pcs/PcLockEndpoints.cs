@@ -22,9 +22,15 @@ public static partial class PcEndpoints
         var now = clock.GetUtcNow();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SessionLifecycle.EndExpiredAsync(db, now, ct);
-        if (!await db.Pcs.AnyAsync(p => p.Id == id, ct))
+        var pc = await db.Pcs.AsNoTracking().FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (pc is null)
         {
             return PcNotFound();
+        }
+
+        if (!IsOnline(pc.LastSeenUtc, now))
+        {
+            return ConflictResponse("This PC is offline.");
         }
 
         await LockPcsAsync(db, [id], now, ct);
@@ -127,12 +133,20 @@ public static partial class PcEndpoints
             return AuthEndpoints.InvalidRequest();
         }
 
-        // The same rules as the single lock, for every listed PC, in one transaction.
+        // The same rules as the single lock, for every listed PC, in one transaction. Offline and unknown PCs are skipped.
         var ct = http.RequestAborted;
         var now = clock.GetUtcNow();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SessionLifecycle.EndExpiredAsync(db, now, ct);
-        var locked = await LockPcsAsync(db, pcIds, now, ct);
+        var onlineIds = (await db.Pcs
+            .AsNoTracking()
+            .Where(p => pcIds.Contains(p.Id))
+            .Select(p => new { p.Id, p.LastSeenUtc })
+            .ToListAsync(ct))
+            .Where(p => IsOnline(p.LastSeenUtc, now))
+            .Select(p => p.Id)
+            .ToArray();
+        var locked = await LockPcsAsync(db, onlineIds, now, ct);
         await transaction.CommitAsync(ct);
         return Results.Ok(new AffectedPcsResponse(locked));
     }

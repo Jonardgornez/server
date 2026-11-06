@@ -131,6 +131,7 @@ public class ChannelGuardTests
     [InlineData("GET", "/api/client/ping")]
     [InlineData("POST", "/api/client/register")]
     [InlineData("POST", "/api/client/heartbeat")]
+    [InlineData("POST", "/api/client/offline")]
     [InlineData("GET", "/API/CLIENT/ping")]
     public async Task AdminPort_ReturnsEmpty404ForApiClientPaths(string method, string path)
     {
