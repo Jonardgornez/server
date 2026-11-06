@@ -1,11 +1,13 @@
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
+using LabGuard.Server.Network;
 using LabGuard.Server.Sessions;
 using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Pcs;
 
+// ShutdownState is null, "shutting-down" or "shutdown". IsServerPc is true for the PC this server runs on.
 public record PcResponse(
     int Id,
     string Name,
@@ -14,7 +16,9 @@ public record PcResponse(
     string? IpAddress,
     DateTimeOffset RegisteredAt,
     DateTimeOffset LastSeenAt,
-    PcSessionSummary? Session);
+    PcSessionSummary? Session,
+    string? ShutdownState,
+    bool IsServerPc);
 
 // Username is null for an admin unlock, which has no account.
 public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
@@ -42,6 +46,8 @@ public static partial class PcEndpoints
         group.MapPost("/{id:int}/time", AdjustTimeAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/lock", LockManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/unlock", UnlockManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/{id:int}/shutdown", ShutdownAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/shutdown", ShutdownManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 
@@ -49,7 +55,11 @@ public static partial class PcEndpoints
     internal static bool IsOnline(DateTimeOffset lastSeen, DateTimeOffset now) =>
         lastSeen <= now && now - lastSeen < OnlineWindow;
 
-    private static async Task<IResult> ListAsync(AppDbContext db, TimeProvider clock, CancellationToken cancellationToken)
+    private static async Task<IResult> ListAsync(
+        AppDbContext db,
+        TimeProvider clock,
+        ILocalAddressSource localAddresses,
+        CancellationToken cancellationToken)
     {
         var pcs = await db.Pcs
             .AsNoTracking()
@@ -65,6 +75,7 @@ public static partial class PcEndpoints
             .ToDictionary(s => s.PcId);
 
         var now = clock.GetUtcNow();
+        var machineAddresses = localAddresses.Read();
         return Results.Ok(pcs.Select(p =>
         {
             var isOnline = IsOnline(p.LastSeenUtc, now);
@@ -78,7 +89,9 @@ public static partial class PcEndpoints
                 p.LastSeenUtc,
                 isOnline && activeSessions.TryGetValue(p.Id, out var session) && !SessionLifecycle.HasExpired(session, now)
                     ? ToSummary(session, now)
-                    : null);
+                    : null,
+                PcShutdownRules.StateOf(p, isOnline, now),
+                ServerPcRule.IsServerPc(p.IpAddress, machineAddresses));
         }));
     }
 

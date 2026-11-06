@@ -72,6 +72,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(p => p.LoginLockedUntilUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.LastFailedLoginUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.LockedAtUtc).HasConversion(unixMilliseconds);
+            entity.Property(p => p.ShutdownRequestedAtUtc).HasConversion(unixMilliseconds);
+            entity.Property(p => p.ShutdownDeliveredAtUtc).HasConversion(unixMilliseconds);
         });
 
         modelBuilder.Entity<PcSession>(entity =>

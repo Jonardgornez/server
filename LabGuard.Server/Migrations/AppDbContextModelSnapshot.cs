@@ -115,6 +115,12 @@ namespace LabGuard.Server.Migrations
                     b.Property<long>("RegisteredAtUtc")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long?>("ShutdownDeliveredAtUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ShutdownRequestedAtUtc")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("TokenHash")
                         .IsRequired()
                         .HasColumnType("TEXT");

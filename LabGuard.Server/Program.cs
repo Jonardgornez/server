@@ -36,6 +36,7 @@ builder.Services.AddOpenApi();
 builder.Services.AddAdminAuth();
 builder.Services.AddClientRateLimiting();
 builder.Services.AddSingleton<DummyLoginCredential>();
+builder.Services.AddSingleton<ILocalAddressSource, NetworkInterfaceAddressSource>();
 builder.Services.AddDbContext<AppDbContext>((services, options) =>
 {
     var configuration = services.GetRequiredService<IConfiguration>();

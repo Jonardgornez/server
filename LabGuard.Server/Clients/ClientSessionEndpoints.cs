@@ -14,7 +14,8 @@ public record PcLoginRequest(string? Username, string? Password);
 public record PcLoginResponse(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining);
 public record HeartbeatRequest(int? SessionId);
 // Notice is the administrator's on-screen notice text, or null when the notice is turned off.
-public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason, bool IsLocked, string? Notice);
+// ShutdownSeconds is set only on the one heartbeat that hands the PC a requested shutdown, and says how long it has to shut down.
+public record HeartbeatResponse(PcSessionInfo? Session, string? EndedReason, bool IsLocked, string? Notice, int? ShutdownSeconds);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -343,8 +344,16 @@ public static partial class ClientEndpoints
         }
 
         var now = clock.GetUtcNow();
+        var shutdownDeliveredAt = await db.Pcs
+            .Where(p => p.Id == pcId)
+            .Select(p => p.ShutdownDeliveredAtUtc)
+            .FirstOrDefaultAsync(ct);
+        // A PC the administrator is shutting down ends its session as an admin shutdown, not as a plain logout.
+        var reason = shutdownDeliveredAt is { } deliveredAt && PcShutdownRules.IsWithin(deliveredAt, now, PcShutdownRules.LogoutWindow)
+            ? SessionLifecycle.AdminShutdown
+            : SessionLifecycle.Logout;
         await SessionLifecycle.EndExpiredForPcAsync(db, pcId, now, ct);
-        await SessionLifecycle.EndForPcAsync(db, pcId, SessionLifecycle.Logout, now, ct);
+        await SessionLifecycle.EndForPcAsync(db, pcId, reason, now, ct);
         return Results.NoContent();
     }
 
@@ -386,7 +395,14 @@ public static partial class ClientEndpoints
         var known = await db.Pcs
             .AsNoTracking()
             .Where(p => p.TokenHash == tokenHash)
-            .Select(p => new { p.Id, p.LastSeenUtc, IsLocked = p.LockedAtUtc != null })
+            .Select(p => new
+            {
+                p.Id,
+                p.LastSeenUtc,
+                IsLocked = p.LockedAtUtc != null,
+                p.ShutdownRequestedAtUtc,
+                p.ShutdownDeliveredAtUtc,
+            })
             .FirstOrDefaultAsync(ct);
         if (known is null)
         {
@@ -429,6 +445,14 @@ public static partial class ClientEndpoints
             return NotRegistered();
         }
 
+        var shutdownSeconds = await DeliverShutdownAsync(
+            db,
+            tokenHash,
+            known.ShutdownRequestedAtUtc,
+            known.ShutdownDeliveredAtUtc,
+            now,
+            ct);
+
         // Only this PC's own ended sessions are ever reported, never another PC's.
         string? endedReason = null;
         if (request?.SessionId is { } sessionId && active?.Id != sessionId)
@@ -444,7 +468,8 @@ public static partial class ClientEndpoints
             active is null ? null : SessionLifecycle.ToInfo(active, now),
             endedReason,
             known.IsLocked,
-            settings.NoticeEnabled ? settings.NoticeText : null));
+            settings.NoticeEnabled ? settings.NoticeText : null,
+            shutdownSeconds));
     }
 
     private static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)

@@ -45,6 +45,12 @@ public sealed class TestApp : WebApplicationFactory<Program>
 
     public FailableTimeProvider Time { get; } = new(DateTimeOffset.UtcNow);
 
+    /// <summary>A LAN address of the machine running the test server. Other PCs in tests use 203.0.113.x.</summary>
+    public const string MachineLanAddress = "198.51.100.10";
+
+    /// <summary>The addresses this machine has, fixed so the server PC rule never depends on the real network adapters.</summary>
+    public FixedLocalAddressSource LocalAddresses { get; } = new([IPAddress.Loopback, IPAddress.Parse(MachineLanAddress)]);
+
     public CapturingLoggerProvider Logs { get; } = new();
 
     public PcChannelStore Channel => Services.GetRequiredService<PcChannelStore>();
@@ -129,6 +135,8 @@ public sealed class TestApp : WebApplicationFactory<Program>
         {
             services.RemoveAll<TimeProvider>();
             services.AddSingleton<TimeProvider>(Time);
+            services.RemoveAll<ILocalAddressSource>();
+            services.AddSingleton<ILocalAddressSource>(LocalAddresses);
             services.AddSingleton<IStartupFilter, SimulatedConnectionFilter>();
             _configureServices?.Invoke(services);
         });
@@ -214,6 +222,14 @@ internal sealed class SimulatedConnectionFilter : IStartupFilter
 
         return IPAddress.TryParse(header, out var address) ? address : null;
     }
+}
+
+/// <summary>Test-only: the addresses this machine is said to have, in place of the real network adapters.</summary>
+public sealed class FixedLocalAddressSource(IEnumerable<IPAddress> addresses) : ILocalAddressSource
+{
+    private readonly IReadOnlyList<IPAddress> _addresses = addresses.ToList();
+
+    public IReadOnlyList<IPAddress> Read() => _addresses;
 }
 
 /// <summary>A fake clock that can be told to fail, to force an unhandled error inside an endpoint.</summary>
