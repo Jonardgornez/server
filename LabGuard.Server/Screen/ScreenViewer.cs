@@ -4,20 +4,35 @@ using System.Text;
 namespace LabGuard.Server.Screen;
 
 // One administrator's live view of one PC: the browser socket, the PC's socket while it is connected, the frame credits,
-// the last state relayed and the lifetime that stops the relay loops. Everything mutable is guarded by one lock.
+// the last state relayed, the lifetime that stops the relay loops and the remote control state. Everything mutable is guarded by one lock.
 public sealed class ScreenViewer : IDisposable
 {
     private readonly Lock _sync = new();
     private readonly Lifetime _lifetime = new();
+    private readonly ScreenInputRateLimiter _moves = new(ScreenProtocol.MaxMovesPerSecond);
+    private readonly ScreenInputRateLimiter _otherInput = new(ScreenProtocol.MaxOtherInputPerSecond);
 
     // Held around each state change and its send, so states reach the browser in the order they were recorded.
+    // Control changes take it too. Closing the view doesn't, so a close never waits behind a send that is stuck.
     public SemaphoreSlim StateGate { get; } = new(1, 1);
     private ScreenSocket? _pc;
     private int _framesInFlight;
     private string? _lastState;
     private bool _isClosed;
+    private ScreenControlState _control = ScreenControlState.Off;
+    private ScreenSocket? _controlPc;
+    private long _controlRequestId;
+    private int? _controlAuditId;
 
-    public ScreenViewer(string viewId, int pcId, string mode, int auditId, DateTimeOffset sessionDeadline, ScreenSocket browser)
+    public ScreenViewer(
+        string viewId,
+        int pcId,
+        string mode,
+        int auditId,
+        DateTimeOffset sessionDeadline,
+        ScreenSocket browser,
+        string adminUserName,
+        string pcName)
     {
         ViewId = viewId;
         PcId = pcId;
@@ -25,6 +40,8 @@ public sealed class ScreenViewer : IDisposable
         AuditId = auditId;
         SessionDeadline = sessionDeadline;
         Browser = browser;
+        AdminUserName = adminUserName;
+        PcName = pcName;
     }
 
     public string ViewId { get; }
@@ -36,6 +53,10 @@ public sealed class ScreenViewer : IDisposable
     public DateTimeOffset SessionDeadline { get; }
     public ScreenSocket Browser { get; }
 
+    // Copied into each control audit row, so the row survives a removed PC or account.
+    public string AdminUserName { get; }
+    public string PcName { get; }
+
     public ScreenSocket? CurrentPc
     {
         get
@@ -43,6 +64,17 @@ public sealed class ScreenViewer : IDisposable
             lock (_sync)
             {
                 return _pc;
+            }
+        }
+    }
+
+    public ScreenControlState ControlState
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _control;
             }
         }
     }
@@ -145,6 +177,95 @@ public sealed class ScreenViewer : IDisposable
         }
     }
 
+    // Starts a request for control of the attached PC. Null when the view is closed, control is already in use or no PC is attached.
+    public ControlRequest? TryBeginControlRequest()
+    {
+        lock (_sync)
+        {
+            if (_isClosed || _control != ScreenControlState.Off || _pc is null)
+            {
+                return null;
+            }
+
+            _control = ScreenControlState.Requesting;
+            _controlPc = _pc;
+            _controlRequestId++;
+            return new ControlRequest(_controlRequestId, _pc);
+        }
+    }
+
+    // True while the PC is the one asked for control and the request is still waiting for its confirmation.
+    public bool IsAwaitingConfirmation(ScreenSocket pc)
+    {
+        lock (_sync)
+        {
+            return IsAwaitingConfirmationLocked(pc);
+        }
+    }
+
+    // Turns control on, with the audit row that records it. False when the request is no longer waiting for this PC, or the view closed.
+    public bool TryConfirmControl(ScreenSocket pc, int auditId)
+    {
+        lock (_sync)
+        {
+            if (!IsAwaitingConfirmationLocked(pc))
+            {
+                return false;
+            }
+
+            _control = ScreenControlState.On;
+            _controlAuditId = auditId;
+            return true;
+        }
+    }
+
+    // Ends whatever control period is in progress. Null when there is none. The PC is handed back only while it is still the attached one.
+    public ControlPeriodEnd? TryEndControl()
+    {
+        lock (_sync)
+        {
+            return _control == ScreenControlState.Off ? null : EndControlLocked();
+        }
+    }
+
+    // Ends the request only while it is still the one with this id, so a timer left over from an earlier request does nothing.
+    public ControlPeriodEnd? TryExpireRequest(long requestId)
+    {
+        lock (_sync)
+        {
+            return _control == ScreenControlState.Requesting && _controlRequestId == requestId ? EndControlLocked() : null;
+        }
+    }
+
+    // The attached PC that input is relayed to. Only while control is on, and only within the cap for this kind of input. Null otherwise.
+    public ScreenSocket? TakeControlInputTarget(InputRate rate, DateTimeOffset now)
+    {
+        lock (_sync)
+        {
+            if (_isClosed || _control != ScreenControlState.On || !ReferenceEquals(_pc, _controlPc))
+            {
+                return null;
+            }
+
+            var allowed = rate switch
+            {
+                InputRate.Move => _moves.TryTake(now),
+                InputRate.Other => _otherInput.TryTake(now),
+                _ => true,
+            };
+            return allowed ? _pc : null;
+        }
+    }
+
+    // Control ends with the view. The audit row it had is handed back, so the caller can end it.
+    public int? EndControlOnClose()
+    {
+        lock (_sync)
+        {
+            return EndControlLocked().AuditId;
+        }
+    }
+
     // True for the first close only. The PC socket that was attached is handed back so it can be closed too.
     public bool TryClose(out ScreenSocket? pc)
     {
@@ -162,4 +283,30 @@ public sealed class ScreenViewer : IDisposable
             return true;
         }
     }
+
+    private bool IsAwaitingConfirmationLocked(ScreenSocket pc) =>
+        !_isClosed && _control == ScreenControlState.Requesting && ReferenceEquals(_pc, pc) && ReferenceEquals(_controlPc, pc);
+
+    // The caller holds the lock.
+    private ControlPeriodEnd EndControlLocked()
+    {
+        var ended = new ControlPeriodEnd(_controlAuditId, ReferenceEquals(_controlPc, _pc) ? _pc : null);
+        _control = ScreenControlState.Off;
+        _controlPc = null;
+        _controlAuditId = null;
+        return ended;
+    }
 }
+
+public enum ScreenControlState
+{
+    Off,
+    Requesting,
+    On,
+}
+
+// A request for control that has started: its id, which a timer uses to tell it apart from a later request, and the PC asked.
+public readonly record struct ControlRequest(long Id, ScreenSocket Pc);
+
+// What a control period leaves behind when it ends: its audit row, and the PC to tell, which is null when the PC is no longer attached.
+public readonly record struct ControlPeriodEnd(int? AuditId, ScreenSocket? AttachedPc);

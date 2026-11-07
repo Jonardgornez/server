@@ -13,7 +13,10 @@ public class ScreenStreamHubTests
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromMilliseconds(100);
 
     private static ScreenStreamHub NewHub(TestApp app) =>
-        new(new ScreenViewAudit(app.Services.GetRequiredService<IServiceScopeFactory>(), NullLogger<ScreenViewAudit>.Instance), app.Time);
+        new(
+            new ScreenViewAudit(app.Services.GetRequiredService<IServiceScopeFactory>(), NullLogger<ScreenViewAudit>.Instance),
+            new ScreenControlAudit(app.Services.GetRequiredService<IServiceScopeFactory>(), NullLogger<ScreenControlAudit>.Instance),
+            app.Time);
 
     private static DateTimeOffset Deadline(TestApp app) => app.Time.GetUtcNow().AddHours(1);
 
@@ -36,7 +39,7 @@ public class ScreenStreamHubTests
     private static async Task<(ScreenViewer Viewer, FakeWebSocket Browser)> OpenAsync(ScreenStreamHub hub, TestApp app, int pcId = 1)
     {
         var browser = new FakeWebSocket();
-        var viewer = await hub.OpenAsync(pcId, ScreenProtocol.NotifiedMode, Deadline(app), 0, new ScreenSocket(browser, ShortTimeout), hub.Epoch);
+        var viewer = await hub.OpenAsync(pcId, ScreenProtocol.NotifiedMode, Deadline(app), 0, new ScreenSocket(browser, ShortTimeout), hub.Epoch, "tester", "PC-01");
         return (viewer!, browser);
     }
 
@@ -98,7 +101,7 @@ public class ScreenStreamHubTests
         await hub.CloseAllAsync(ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
         var auditId = await InsertAuditRowAsync(app);
 
-        var viewer = await hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), auditId, new ScreenSocket(new FakeWebSocket(), ShortTimeout), epoch);
+        var viewer = await hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), auditId, new ScreenSocket(new FakeWebSocket(), ShortTimeout), epoch, "tester", "PC-01");
 
         Assert.Null(viewer);
         Assert.Null(hub.CurrentFor(1));
@@ -113,7 +116,7 @@ public class ScreenStreamHubTests
         var auditId = await InsertAuditRowAsync(app);
         var browser = new FakeWebSocket { StallSends = true };
 
-        var viewer = await hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), auditId, new ScreenSocket(browser, ShortTimeout), hub.Epoch);
+        var viewer = await hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), auditId, new ScreenSocket(browser, ShortTimeout), hub.Epoch, "tester", "PC-01");
 
         Assert.Null(viewer);
         Assert.Null(hub.CurrentFor(1));
@@ -313,7 +316,7 @@ public class ScreenStreamHubTests
         var hub = NewHub(app);
         var rowId = await InsertAuditRowAsync(app);
         var browser = new FakeWebSocket();
-        var viewer = await hub.OpenAsync(1, "notified", Deadline(app), rowId, new ScreenSocket(browser, ShortTimeout), hub.Epoch);
+        var viewer = await hub.OpenAsync(1, "notified", Deadline(app), rowId, new ScreenSocket(browser, ShortTimeout), hub.Epoch, "tester", "PC-01");
 
         await hub.CloseAsync(viewer!, WebSocketCloseStatus.NormalClosure, "The viewer closed.");
 

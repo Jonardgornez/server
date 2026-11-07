@@ -8,7 +8,7 @@ public class ScreenViewerTests
 
     private static ScreenViewer NewViewer(string viewId = ViewId) =>
         new(viewId, pcId: 7, mode: ScreenProtocol.NotifiedMode, auditId: 1, DateTimeOffset.UtcNow.AddMinutes(30),
-            new ScreenSocket(new FakeWebSocket(), TimeSpan.FromSeconds(1)));
+            new ScreenSocket(new FakeWebSocket(), TimeSpan.FromSeconds(1)), adminUserName: "tester", pcName: "PC-01");
 
     private static ScreenSocket NewSocket() => new(new FakeWebSocket(), TimeSpan.FromSeconds(1));
 
@@ -178,5 +178,203 @@ public class ScreenViewerTests
 
         Assert.Null(viewer.LinkLifetime(CancellationToken.None));
         viewer.CancelLifetime();
+    }
+
+    // Remote control
+
+    [Fact]
+    public void ControlState_StartsOff()
+    {
+        Assert.Equal(ScreenControlState.Off, NewViewer().ControlState);
+    }
+
+    [Fact]
+    public void TryBeginControlRequest_NeedsAnAttachedPc_AndOnlyOneAtATime()
+    {
+        var viewer = NewViewer();
+        var pc = NewSocket();
+
+        Assert.Null(viewer.TryBeginControlRequest());
+        viewer.TryAttachPc(pc, out _);
+        var request = viewer.TryBeginControlRequest();
+
+        Assert.NotNull(request);
+        Assert.Same(pc, request!.Value.Pc);
+        Assert.Equal(ScreenControlState.Requesting, viewer.ControlState);
+        Assert.Null(viewer.TryBeginControlRequest());
+    }
+
+    [Fact]
+    public void TryConfirmControl_OnlyFromTheAskedPc_AndOnlyWhileRequesting()
+    {
+        var viewer = NewViewer();
+        var asked = NewSocket();
+        var stranger = NewSocket();
+        viewer.TryAttachPc(asked, out _);
+
+        Assert.False(viewer.TryConfirmControl(asked, 5));
+        viewer.TryBeginControlRequest();
+        Assert.True(viewer.IsAwaitingConfirmation(asked));
+        Assert.False(viewer.IsAwaitingConfirmation(stranger));
+        Assert.False(viewer.TryConfirmControl(stranger, 5));
+        Assert.True(viewer.TryConfirmControl(asked, 5));
+        Assert.Equal(ScreenControlState.On, viewer.ControlState);
+        Assert.False(viewer.TryConfirmControl(asked, 6));
+    }
+
+    [Fact]
+    public void TryConfirmControl_FromAReplacedPc_IsRefused()
+    {
+        var viewer = NewViewer();
+        var replaced = NewSocket();
+        viewer.TryAttachPc(replaced, out _);
+        viewer.TryBeginControlRequest();
+        viewer.TryAttachPc(NewSocket(), out _);
+
+        Assert.False(viewer.TryConfirmControl(replaced, 5));
+        Assert.Equal(ScreenControlState.Requesting, viewer.ControlState);
+    }
+
+    [Fact]
+    public void TryExpireRequest_OnlyTheRequestItWasMadeFor()
+    {
+        var viewer = NewViewer();
+        viewer.TryAttachPc(NewSocket(), out _);
+        var first = viewer.TryBeginControlRequest()!.Value;
+        viewer.TryEndControl();
+        var second = viewer.TryBeginControlRequest()!.Value;
+
+        Assert.Null(viewer.TryExpireRequest(first.Id));
+        Assert.NotNull(viewer.TryExpireRequest(second.Id));
+        Assert.Equal(ScreenControlState.Off, viewer.ControlState);
+    }
+
+    [Fact]
+    public void TryExpireRequest_DoesNothingOnceControlIsOn()
+    {
+        var viewer = NewViewer();
+        var pc = NewSocket();
+        viewer.TryAttachPc(pc, out _);
+        var request = viewer.TryBeginControlRequest()!.Value;
+        viewer.TryConfirmControl(pc, 9);
+
+        Assert.Null(viewer.TryExpireRequest(request.Id));
+        Assert.Equal(ScreenControlState.On, viewer.ControlState);
+    }
+
+    [Fact]
+    public void TryEndControl_HandsBackTheAuditRowAndThePc_WhileThePcIsAttached()
+    {
+        var viewer = NewViewer();
+        var pc = NewSocket();
+        viewer.TryAttachPc(pc, out _);
+        viewer.TryBeginControlRequest();
+        viewer.TryConfirmControl(pc, 9);
+
+        var ended = viewer.TryEndControl();
+
+        Assert.Equal(9, ended!.Value.AuditId);
+        Assert.Same(pc, ended.Value.AttachedPc);
+        Assert.Equal(ScreenControlState.Off, viewer.ControlState);
+        Assert.Null(viewer.TryEndControl());
+    }
+
+    [Fact]
+    public void TryEndControl_AfterThePcWasReplaced_DoesNotHandBackTheOldPc()
+    {
+        var viewer = NewViewer();
+        var first = NewSocket();
+        viewer.TryAttachPc(first, out _);
+        viewer.TryBeginControlRequest();
+        viewer.TryConfirmControl(first, 9);
+        viewer.TryAttachPc(NewSocket(), out _);
+
+        var ended = viewer.TryEndControl();
+
+        Assert.Null(ended!.Value.AttachedPc);
+        Assert.Equal(9, ended.Value.AuditId);
+    }
+
+    [Fact]
+    public void TryEndControl_AfterThePcDetached_DoesNotHandBackThePc()
+    {
+        var viewer = NewViewer();
+        var pc = NewSocket();
+        viewer.TryAttachPc(pc, out _);
+        viewer.TryBeginControlRequest();
+        viewer.TryDetachPc(pc);
+
+        var ended = viewer.TryEndControl();
+
+        Assert.NotNull(ended);
+        Assert.Null(ended!.Value.AttachedPc);
+        Assert.Null(ended.Value.AuditId);
+    }
+
+    [Fact]
+    public void TakeControlInputTarget_OnlyWhileOn_ForTheAttachedPc()
+    {
+        var viewer = NewViewer();
+        var pc = NewSocket();
+        var now = DateTimeOffset.UtcNow;
+        viewer.TryAttachPc(pc, out _);
+        Assert.Null(viewer.TakeControlInputTarget(InputRate.Other, now));
+
+        viewer.TryBeginControlRequest();
+        Assert.Null(viewer.TakeControlInputTarget(InputRate.Other, now));
+
+        viewer.TryConfirmControl(pc, 9);
+        Assert.Same(pc, viewer.TakeControlInputTarget(InputRate.Other, now));
+
+        viewer.TryDetachPc(pc);
+        Assert.Null(viewer.TakeControlInputTarget(InputRate.Other, now));
+    }
+
+    [Fact]
+    public void TakeControlInputTarget_CapsMovesAndOtherInputSeparately()
+    {
+        var viewer = NewViewer();
+        var pc = NewSocket();
+        var now = DateTimeOffset.UtcNow;
+        viewer.TryAttachPc(pc, out _);
+        viewer.TryBeginControlRequest();
+        viewer.TryConfirmControl(pc, 9);
+
+        var moves = Enumerable.Range(0, ScreenProtocol.MaxMovesPerSecond + 10)
+            .Count(_ => viewer.TakeControlInputTarget(InputRate.Move, now) is not null);
+        var others = Enumerable.Range(0, ScreenProtocol.MaxOtherInputPerSecond + 10)
+            .Count(_ => viewer.TakeControlInputTarget(InputRate.Other, now) is not null);
+
+        Assert.Equal(ScreenProtocol.MaxMovesPerSecond, moves);
+        Assert.Equal(ScreenProtocol.MaxOtherInputPerSecond, others);
+    }
+
+    [Fact]
+    public void EndControlOnClose_HandsBackTheAuditRow_AndNothingCanStartAfterwards()
+    {
+        var viewer = NewViewer();
+        var pc = NewSocket();
+        viewer.TryAttachPc(pc, out _);
+        viewer.TryBeginControlRequest();
+        viewer.TryConfirmControl(pc, 9);
+        viewer.TryClose(out _);
+
+        Assert.Equal(9, viewer.EndControlOnClose());
+        Assert.Equal(ScreenControlState.Off, viewer.ControlState);
+        Assert.Null(viewer.EndControlOnClose());
+        Assert.Null(viewer.TryBeginControlRequest());
+    }
+
+    [Fact]
+    public void TryConfirmControl_AfterClose_IsRefused()
+    {
+        var viewer = NewViewer();
+        var pc = NewSocket();
+        viewer.TryAttachPc(pc, out _);
+        viewer.TryBeginControlRequest();
+        viewer.TryClose(out _);
+
+        Assert.False(viewer.IsAwaitingConfirmation(pc));
+        Assert.False(viewer.TryConfirmControl(pc, 9));
     }
 }

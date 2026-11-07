@@ -46,6 +46,12 @@ public static class ScreenProtocol
     // A PC that stops heartbeating is closed by the monitor, so liveness comes from the heartbeat.
     public static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(30);
 
+    // Remote control. Each viewer's input is capped per second; a message over the cap is dropped, never queued.
+    public const int MaxMovesPerSecond = 120;
+    public const int MaxOtherInputPerSecond = 200;
+    // The PC has this long to confirm control after it is asked. Without a confirmation the request is abandoned.
+    public static readonly TimeSpan ControlConfirmTimeout = TimeSpan.FromSeconds(5);
+
     private static readonly byte[] WaitingMessage = "{\"state\":\"waiting\"}"u8.ToArray();
     private static readonly byte[] LiveMessage = "{\"state\":\"live\"}"u8.ToArray();
     private static readonly byte[] PausedMessage = "{\"state\":\"paused\"}"u8.ToArray();
@@ -93,6 +99,16 @@ public static class ScreenProtocol
             {
                 return PcMessageKind.Resumed;
             }
+
+            if (payload.SequenceEqual("control-on"u8))
+            {
+                return PcMessageKind.ControlOn;
+            }
+
+            if (payload.SequenceEqual("control-off"u8))
+            {
+                return PcMessageKind.ControlOff;
+            }
         }
 
         return PcMessageKind.Ignored;
@@ -110,4 +126,6 @@ public enum PcMessageKind
     Frame,
     Paused,
     Resumed,
+    ControlOn,
+    ControlOff,
 }

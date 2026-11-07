@@ -173,11 +173,29 @@ public sealed class TestApp : WebApplicationFactory<Program>
         SqliteConnection.ClearAllPools();
         foreach (var suffix in new[] { "", "-shm", "-wal" })
         {
-            File.Delete(_databasePath + suffix);
+            DeleteWhenReleased(_databasePath + suffix);
         }
 
-        File.Delete(_channelPath);
-        File.Delete(_channelPath + ".tmp");
+        DeleteWhenReleased(_channelPath);
+        DeleteWhenReleased(_channelPath + ".tmp");
+    }
+
+    // A request that is still finishing its last write can hold the database file for a moment after the host stops.
+    // The file is removed once it is released, and a file that never frees up still fails the test.
+    private static void DeleteWhenReleased(string path)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException) when (attempt < 30)
+            {
+                Thread.Sleep(100);
+            }
+        }
     }
 }
 

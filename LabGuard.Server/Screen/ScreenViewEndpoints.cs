@@ -18,6 +18,7 @@ public static class ScreenViewEndpoints
     {
         services.AddSingleton<ScreenStreamHub>();
         services.AddSingleton<ScreenViewAudit>();
+        services.AddSingleton<ScreenControlAudit>();
         services.AddSingleton(provider => new ScreenOrigins(
             provider.GetRequiredService<ServerPorts>(),
             provider.GetRequiredService<IConfiguration>()));
@@ -43,7 +44,8 @@ public static class ScreenViewEndpoints
         TimeProvider clock,
         ScreenStreamHub hub,
         ScreenViewAudit audit,
-        ScreenOrigins origins)
+        ScreenOrigins origins,
+        ILocalAddressSource localAddresses)
     {
         // Read before the session is checked. A logout or password change after this point refuses the open.
         var epoch = hub.Epoch;
@@ -104,7 +106,7 @@ public static class ScreenViewEndpoints
         var browser = new ScreenSocket(socket, ScreenProtocol.SendTimeout);
         try
         {
-            var viewer = await hub.OpenAsync(id, viewMode, sessionDeadline, auditId, browser, epoch);
+            var viewer = await hub.OpenAsync(id, viewMode, sessionDeadline, auditId, browser, epoch, http.User.Identity?.Name ?? "", pc.Name);
             if (viewer is null)
             {
                 await browser.CloseAsync(ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
@@ -120,7 +122,7 @@ public static class ScreenViewEndpoints
                     await hub.CloseAsync(viewer, ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
                 }
 
-                await ReceiveBrowserMessagesAsync(hub, viewer, ct);
+                await ReceiveBrowserMessagesAsync(hub, viewer, db, localAddresses, ct);
             }
             finally
             {
@@ -151,8 +153,13 @@ public static class ScreenViewEndpoints
         return hasAdminId && hasVersion;
     }
 
-    // The browser's only message is "ack". Anything else is ignored, and an oversized message closes the socket.
-    private static async Task ReceiveBrowserMessagesAsync(ScreenStreamHub hub, ScreenViewer viewer, CancellationToken cancellationToken)
+    // The browser sends "ack", control on or off, and input. Anything else is ignored, and an oversized message closes the socket.
+    private static async Task ReceiveBrowserMessagesAsync(
+        ScreenStreamHub hub,
+        ScreenViewer viewer,
+        AppDbContext db,
+        ILocalAddressSource localAddresses,
+        CancellationToken cancellationToken)
     {
         using var linked = viewer.LinkLifetime(cancellationToken);
         if (linked is null)
@@ -165,7 +172,40 @@ public static class ScreenViewEndpoints
             if (ScreenProtocol.IsBrowserAck(message.Type, message.Payload.Span))
             {
                 await hub.RelayAckAsync(viewer);
+                continue;
+            }
+
+            var input = ScreenControlMessages.Parse(message.Type, message.Payload);
+            switch (input.Kind)
+            {
+                case BrowserControlKind.ControlOn:
+                    await hub.RequestControlAsync(viewer, await IsServerPcAsync(db, viewer.PcId, localAddresses, cancellationToken));
+                    break;
+                case BrowserControlKind.ControlOff:
+                    await hub.StopControlAsync(viewer);
+                    break;
+                case BrowserControlKind.Move:
+                case BrowserControlKind.Input:
+                    await hub.RelayInputAsync(viewer, input);
+                    break;
             }
         }
+    }
+
+    // Read when control is asked for, from the stored address, the same way the shutdown checks read it.
+    // Fails closed: when the machine's addresses can't be read, the PC is treated as the server's own and refused.
+    private static async Task<bool> IsServerPcAsync(AppDbContext db, int pcId, ILocalAddressSource localAddresses, CancellationToken cancellationToken)
+    {
+        if (localAddresses.ReadOrNull() is not { } machineAddresses)
+        {
+            return true;
+        }
+
+        var stored = await db.Pcs
+            .AsNoTracking()
+            .Where(p => p.Id == pcId)
+            .Select(p => new { p.IpAddress })
+            .FirstOrDefaultAsync(cancellationToken);
+        return ServerPcRule.IsServerPc(stored?.IpAddress, machineAddresses);
     }
 }

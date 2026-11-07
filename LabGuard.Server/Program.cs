@@ -75,6 +75,9 @@ using (var scope = app.Services.CreateScope())
     await services.GetRequiredService<ScreenViewAudit>().CloseOrphanedAsync(
         services.GetRequiredService<TimeProvider>().GetUtcNow(),
         CancellationToken.None);
+    await services.GetRequiredService<ScreenControlAudit>().CloseOrphanedAsync(
+        services.GetRequiredService<TimeProvider>().GetUtcNow(),
+        CancellationToken.None);
 }
 
 app.UseMiddleware<ChannelGuard>();

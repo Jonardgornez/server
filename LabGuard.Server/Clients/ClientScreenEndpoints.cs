@@ -86,6 +86,12 @@ public static partial class ClientEndpoints
                 case PcMessageKind.Resumed:
                     await hub.RelayPcStateAsync(viewer, pc, ScreenProtocol.LiveState);
                     break;
+                case PcMessageKind.ControlOn:
+                    await hub.ConfirmControlAsync(viewer, pc);
+                    break;
+                case PcMessageKind.ControlOff:
+                    await hub.EndControlAsync(viewer, ControlReasons.PcEnded);
+                    break;
             }
         }
     }
