@@ -234,6 +234,8 @@ public class ScreenControlEndpointTests
         var view = await OpenViewAsync(app);
         using var pc = await ConnectPcAsync(app, view);
         await ControlOnAsync(view, pc);
+        await LiveViewClient.SendTextAsync(view.Browser, "{\"t\":\"key\",\"c\":\"KeyA\",\"d\":true}");
+        await LiveViewClient.SendTextAsync(view.Browser, "{\"t\":\"down\",\"b\":0,\"x\":1,\"y\":1}");
 
         for (var attempt = 0; attempt < ScreenProtocol.MaxMovesPerSecond + 10; attempt++)
         {
@@ -246,7 +248,6 @@ public class ScreenControlEndpointTests
         }
 
         await LiveViewClient.SendTextAsync(view.Browser, "{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}");
-        await LiveViewClient.SendTextAsync(view.Browser, "{\"t\":\"release\"}");
         await LiveViewClient.SendTextAsync(view.Browser, Up);
 
         var relayed = new List<string>();
@@ -258,10 +259,72 @@ public class ScreenControlEndpointTests
         }
         while (text != Up);
 
+        // The key press and the button press use two of the other-input allowance, so the wheel gets the rest.
         Assert.Equal(ScreenProtocol.MaxMovesPerSecond, relayed.Count(t => t.StartsWith("{\"t\":\"move\"", StringComparison.Ordinal)));
-        Assert.Equal(ScreenProtocol.MaxOtherInputPerSecond, relayed.Count(t => t.StartsWith("{\"t\":\"wheel\"", StringComparison.Ordinal)));
+        Assert.Equal(ScreenProtocol.MaxOtherInputPerSecond - 2, relayed.Count(t => t.StartsWith("{\"t\":\"wheel\"", StringComparison.Ordinal)));
         Assert.Contains("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}", relayed);
-        Assert.Contains("{\"t\":\"release\"}", relayed);
+        await FinishAsync(app, view);
+    }
+
+    [Fact]
+    public async Task ControlOn_IsAnsweredAtMostOncePerSecond_AndTheExcessIsIgnored()
+    {
+        using var app = new TestApp();
+        var view = await OpenViewAsync(app);
+
+        await LiveViewClient.SendTextAsync(view.Browser, BrowserOn);
+        await LiveViewClient.SendTextAsync(view.Browser, BrowserOn);
+        await LiveViewClient.SendTextAsync(view.Browser, BrowserOff);
+
+        // The second request was ignored, so the first answer is followed directly by the stop answer.
+        Assert.Equal(OffMessage("waiting"), await TextAsync(view.Browser));
+        Assert.Equal(OffMessage("stopped"), await TextAsync(view.Browser));
+
+        app.Time.Advance(TimeSpan.FromSeconds(1));
+        await LiveViewClient.SendTextAsync(view.Browser, BrowserOn);
+        Assert.Equal(OffMessage("waiting"), await TextAsync(view.Browser));
+        await FinishAsync(app, view);
+    }
+
+    [Fact]
+    public async Task Input_WithAMalformedSurrogateEscape_IsDropped_AndTheViewStaysOpen()
+    {
+        using var app = new TestApp();
+        var view = await OpenViewAsync(app);
+        using var pc = await ConnectPcAsync(app, view);
+        await ControlOnAsync(view, pc);
+
+        await LiveViewClient.SendTextAsync(view.Browser, "{\"t\":\"key\",\"c\":\"\\ud800\",\"d\":true}");
+        await LiveViewClient.SendTextAsync(view.Browser, "{\"t\":\"move\",\"x\":3,\"y\":4}");
+
+        Assert.Equal("{\"t\":\"move\",\"x\":3,\"y\":4}", await TextAsync(pc));
+        await FinishAsync(app, view);
+    }
+
+    [Fact]
+    public async Task ControlOn_WhenThePcsLiveAddressIsThisMachine_IsRefusedAsServerPc()
+    {
+        using var app = new TestApp();
+        // The stored address is another machine's, but the live connection comes from this one.
+        var view = await OpenViewAsync(app, pcIp: "192.168.1.50");
+        using var pc = await ConnectPcAsync(app, view, TestApp.MachineLanAddress);
+
+        await LiveViewClient.SendTextAsync(view.Browser, BrowserOn);
+
+        Assert.Equal(OffMessage("server-pc"), await TextAsync(view.Browser));
+        await FinishAsync(app, view);
+    }
+
+    [Fact]
+    public async Task ControlOn_WhenTheStoredAddressIsMissing_IsRefusedAsServerPc()
+    {
+        using var app = new TestApp();
+        var view = await OpenViewAsync(app);
+        await app.WithDbAsync(db => db.Pcs.Where(p => p.Id == view.PcId).ExecuteUpdateAsync(s => s.SetProperty(p => p.IpAddress, (string?)null)));
+
+        await LiveViewClient.SendTextAsync(view.Browser, BrowserOn);
+
+        Assert.Equal(OffMessage("server-pc"), await TextAsync(view.Browser));
         await FinishAsync(app, view);
     }
 

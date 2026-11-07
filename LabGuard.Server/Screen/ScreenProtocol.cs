@@ -51,6 +51,18 @@ public static class ScreenProtocol
     public const int MaxOtherInputPerSecond = 200;
     // The PC has this long to confirm control after it is asked. Without a confirmation the request is abandoned.
     public static readonly TimeSpan ControlConfirmTimeout = TimeSpan.FromSeconds(5);
+    // Up, key-up and release are never capped by the limits above. This backstop bounds them anyway.
+    public const int MaxExemptInputPerSecond = 1000;
+    // The keys and buttons the server has relayed as held at once. A press beyond this is dropped.
+    public const int MaxHeldInputs = 256;
+    // A viewer may ask for control this often. Requests beyond it are ignored.
+    public const int ControlRequestsPerSecond = 1;
+    // Input that doesn't reach the PC within this time is dropped, and the PC connection is then aborted.
+    public static readonly TimeSpan ControlInputSendTimeout = TimeSpan.FromSeconds(1);
+    // Recording a control period has this long. A write that is not done in time ends the request as unsupported.
+    public static readonly TimeSpan ControlStartTimeout = TimeSpan.FromSeconds(3);
+    // The machine's addresses are reused for this long, so a control request doesn't read the adapters each time.
+    public static readonly TimeSpan LocalAddressCacheLifetime = TimeSpan.FromSeconds(5);
 
     private static readonly byte[] WaitingMessage = "{\"state\":\"waiting\"}"u8.ToArray();
     private static readonly byte[] LiveMessage = "{\"state\":\"live\"}"u8.ToArray();

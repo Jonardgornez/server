@@ -40,7 +40,8 @@ public static partial class ClientEndpoints
         }
 
         var socket = await http.WebSockets.AcceptWebSocketAsync();
-        var pc = new ScreenSocket(socket, ScreenProtocol.SendTimeout);
+        // The live address is kept on the socket, so a control request can check it against this machine's addresses.
+        var pc = new ScreenSocket(socket, ScreenProtocol.SendTimeout) { RemoteAddress = http.Connection.RemoteIpAddress };
         try
         {
             if (await hub.AttachPcAsync(viewer, pc))

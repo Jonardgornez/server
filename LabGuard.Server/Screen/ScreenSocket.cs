@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.WebSockets;
 
 namespace LabGuard.Server.Screen;
@@ -16,22 +17,26 @@ public sealed class ScreenSocket(WebSocket socket, TimeSpan sendTimeout, TimeSpa
     private readonly byte[] _receiveChunk = new byte[ReceiveChunkBytes];
     private readonly TimeSpan _messageStallTimeout = messageStallTimeout ?? ScreenProtocol.MessageStallTimeout;
 
+    // The address the peer connected from, as the server saw it on the connection. Null when unknown.
+    public IPAddress? RemoteAddress { get; init; }
+
     // Every way a socket can be gone: the peer left, the connection failed, the receive was cancelled or the socket was disposed.
     private static bool IsSocketGone(Exception exception) =>
         exception is WebSocketException or OperationCanceledException or InvalidOperationException or ObjectDisposedException or IOException;
 
-    // False when the send failed or timed out. Never throws.
-    public async Task<bool> SendAsync(ReadOnlyMemory<byte> payload, WebSocketMessageType type)
+    // False when the send failed or timed out. Never throws. A caller can give a shorter timeout than the socket's own.
+    public async Task<bool> SendAsync(ReadOnlyMemory<byte> payload, WebSocketMessageType type, TimeSpan? timeout = null)
     {
-        if (!await _writeGate.WaitAsync(sendTimeout))
+        var limit = timeout ?? sendTimeout;
+        if (!await _writeGate.WaitAsync(limit))
         {
             return false;
         }
 
         try
         {
-            using var timeout = new CancellationTokenSource(sendTimeout);
-            await socket.SendAsync(payload, type, endOfMessage: true, timeout.Token);
+            using var deadline = new CancellationTokenSource(limit);
+            await socket.SendAsync(payload, type, endOfMessage: true, deadline.Token);
             return true;
         }
         catch (Exception exception) when (IsSocketGone(exception))

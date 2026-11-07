@@ -34,10 +34,10 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         int auditId,
         ScreenSocket browser,
         long epoch,
-        string adminUserName,
+        ScreenViewOwner owner,
         string pcName)
     {
-        var viewer = new ScreenViewer(NewViewId(), pcId, mode, auditId, sessionDeadline, browser, adminUserName, pcName);
+        var viewer = new ScreenViewer(NewViewId(), pcId, mode, auditId, sessionDeadline, browser, owner, pcName);
         var published = false;
         try
         {
@@ -213,7 +213,12 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
             }
 
             await SendControlMessageAsync(viewer, ScreenControlMessages.RequestingMessage);
-            await request.Pc.SendAsync(ScreenControlMessages.PcOnMessage, WebSocketMessageType.Text);
+            // Bounded, and a PC that doesn't take the request in time is cut off, which ends the request through its connection.
+            if (!await request.Pc.SendAsync(ScreenControlMessages.PcOnMessage, WebSocketMessageType.Text, ScreenProtocol.ControlInputSendTimeout))
+            {
+                request.Pc.Abort();
+            }
+
             ScheduleConfirmTimeout(viewer, request.Id);
         }
         finally
@@ -222,31 +227,61 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         }
     }
 
+    // Whether a control request may go on to the server-PC check. Only an off view, before its deadline and within the request rate.
+    // Nothing here reads the database, so a flood of requests costs little.
+    public async Task<bool> PrepareControlRequestAsync(ScreenViewer viewer)
+    {
+        if (clock.GetUtcNow() >= viewer.SessionDeadline)
+        {
+            await CloseAsync(viewer, ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
+            return false;
+        }
+
+        return viewer.ControlState == ScreenControlState.Off && viewer.TryTakeControlRequestSlot(clock.GetUtcNow());
+    }
+
     // The PC has shown the notice and will replay input. Only the attached PC that was asked can confirm, while the request is pending.
-    // The audit row is written before control turns on, so a failed write leaves control off rather than unrecorded.
+    // The audit row is written before control turns on, so control is never on unrecorded. The write is bounded. A write that fails or
+    // runs out of time ends the request as unsupported, and the PC stream stays open.
     public async Task ConfirmControlAsync(ScreenViewer viewer, ScreenSocket pc)
     {
+        if (!viewer.IsAwaitingConfirmation(pc))
+        {
+            return;
+        }
+
+        int auditId;
+        try
+        {
+            using var timeout = new CancellationTokenSource(ScreenProtocol.ControlStartTimeout);
+            auditId = await controlAudit.StartAsync(viewer.AdminUserName, viewer.PcName, clock.GetUtcNow(), timeout.Token);
+        }
+        catch (Exception)
+        {
+            // Any failure to record the period ends the request, so control is never turned on without its row.
+            await EndControlPeriodAsync(viewer, () => viewer.TryEndRequestFrom(pc), ControlReasons.Unsupported);
+            return;
+        }
+
+        var confirmed = false;
         await viewer.StateGate.WaitAsync();
         try
         {
-            if (!viewer.IsAwaitingConfirmation(pc))
+            confirmed = viewer.TryConfirmControl(pc, auditId);
+            if (confirmed)
             {
-                return;
+                await SendControlMessageAsync(viewer, ScreenControlMessages.OnMessage);
             }
-
-            var auditId = await controlAudit.StartAsync(viewer.AdminUserName, viewer.PcName, clock.GetUtcNow(), CancellationToken.None);
-            if (!viewer.TryConfirmControl(pc, auditId))
-            {
-                // The view closed while the row was being written, so the row is ended at once.
-                await controlAudit.EndAsync(auditId, clock.GetUtcNow());
-                return;
-            }
-
-            await SendControlMessageAsync(viewer, ScreenControlMessages.OnMessage);
         }
         finally
         {
             viewer.StateGate.Release();
+        }
+
+        if (!confirmed)
+        {
+            // The request ended or the view closed while the row was being written, so the row is ended at once.
+            await controlAudit.EndAsync(auditId, clock.GetUtcNow());
         }
     }
 
@@ -270,18 +305,24 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
             return;
         }
 
-        if (viewer.TakeControlInputTarget(input.Rate, now) is not { } pc)
+        if (viewer.TakeControlInputTarget(input, now) is not { } pc)
         {
             return;
         }
 
-        await pc.SendAsync(Encoding.UTF8.GetBytes(input.Canonical), WebSocketMessageType.Text);
+        // Bounded, so one slow PC can't hold the browser's loop. A PC that doesn't take input in time is cut off, which ends control.
+        if (!await pc.SendAsync(Encoding.UTF8.GetBytes(input.Canonical), WebSocketMessageType.Text, ScreenProtocol.ControlInputSendTimeout))
+        {
+            pc.Abort();
+        }
     }
 
     // Closes the view and its sockets with the same code, then ends the audit rows. Only the first call does anything.
     // The sockets close first, so the administrator sees the close without waiting for the database.
     public async Task CloseAsync(ScreenViewer viewer, WebSocketCloseStatus status, string reason)
     {
+        // Taken before the close handshake, so both audit rows record the moment the view closed.
+        var closedAt = clock.GetUtcNow();
         if (!viewer.TryClose(out var pc))
         {
             return;
@@ -312,10 +353,10 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
             // Control ends with the view. Nothing more is sent to the PC, since its socket is closing.
             if (viewer.EndControlOnClose() is { } controlAuditId)
             {
-                await controlAudit.EndAsync(controlAuditId, clock.GetUtcNow());
+                await controlAudit.EndAsync(controlAuditId, closedAt);
             }
 
-            await audit.EndAsync(viewer.AuditId, clock.GetUtcNow());
+            await audit.EndAsync(viewer.AuditId, closedAt);
         }
     }
 

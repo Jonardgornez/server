@@ -63,6 +63,18 @@ public sealed class ScreenViewMonitor(
             .Select(p => new { p.Id, p.LastSeenUtc })
             .ToDictionaryAsync(p => p.Id, p => p.LastSeenUtc, cancellationToken);
 
+        // A view ends when the administrator's session stops being current: the password changed, or the account is gone.
+        var adminIds = watched.Select(viewer => viewer.Owner.AdminId).Distinct().ToArray();
+        var versionByAdmin = await db.AdminAccounts
+            .AsNoTracking()
+            .Where(a => adminIds.Contains(a.Id))
+            .Select(a => new { a.Id, a.SessionVersion })
+            .ToDictionaryAsync(a => a.Id, a => a.SessionVersion, cancellationToken);
+        var stale = watched.Where(viewer =>
+            !versionByAdmin.TryGetValue(viewer.Owner.AdminId, out var version) || version != viewer.Owner.SessionVersion);
+        await Task.WhenAll(stale.Select(viewer =>
+            hub.CloseAsync(viewer, ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason)));
+
         // A PC that is missing was removed, and one that isn't online is offline. Both use the same close code.
         var offline = watched
             .Where(viewer => !lastSeenByPc.TryGetValue(viewer.PcId, out var lastSeen) || !PcEndpoints.IsOnline(lastSeen, now));

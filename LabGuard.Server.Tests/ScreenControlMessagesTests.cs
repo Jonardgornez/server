@@ -154,6 +154,40 @@ public class ScreenControlMessagesTests
         Assert.Equal("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":true}", message.Canonical);
     }
 
+    [Theory]
+    [InlineData("{\"t\":\"key\",\"c\":\"\\ud800\",\"d\":true}")]
+    [InlineData("{\"t\":\"key\",\"c\":\"Key\\udc00\",\"d\":false}")]
+    [InlineData("{\"t\":\"\\ud800\"}")]
+    [InlineData("{\"t\":\"release\",\"\\ud800\":1}")]
+    public void Parse_ALoneSurrogateEscape_IsDroppedNotThrown(string json)
+    {
+        Assert.Equal(BrowserControlKind.Invalid, Parse(json).Kind);
+    }
+
+    [Theory]
+    [InlineData("{\"t\":\"down\",\"b\":0,\"x\":1,\"y\":1}", HeldEffect.Press, "b0")]
+    [InlineData("{\"t\":\"up\",\"b\":4,\"x\":1,\"y\":1}", HeldEffect.Release, "b4")]
+    [InlineData("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":true}", HeldEffect.Press, "kKeyA")]
+    [InlineData("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}", HeldEffect.Release, "kKeyA")]
+    [InlineData("{\"t\":\"release\"}", HeldEffect.ReleaseAll, "")]
+    [InlineData("{\"t\":\"move\",\"x\":1,\"y\":1}", HeldEffect.None, "")]
+    [InlineData("{\"t\":\"wheel\",\"dx\":0,\"dy\":120}", HeldEffect.None, "")]
+    public void Parse_SetsWhatTheInputDoesToHeldKeys(string json, HeldEffect expected, string heldKey)
+    {
+        var message = Parse(json);
+
+        Assert.Equal(expected, message.Held);
+        Assert.Equal(heldKey, message.HeldKey);
+    }
+
+    [Fact]
+    public void Parse_KeyUpAndUpAndRelease_AreExemptFromTheCaps()
+    {
+        Assert.Equal(InputRate.Exempt, Parse("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}").Rate);
+        Assert.Equal(InputRate.Exempt, Parse("{\"t\":\"up\",\"b\":0,\"x\":1,\"y\":1}").Rate);
+        Assert.Equal(InputRate.Exempt, Parse("{\"t\":\"release\"}").Rate);
+    }
+
     [Fact]
     public void Parse_ABinaryMessage_IsDroppedEvenWithValidJson()
     {

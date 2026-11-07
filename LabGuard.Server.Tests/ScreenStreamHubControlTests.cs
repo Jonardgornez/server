@@ -38,7 +38,7 @@ public class ScreenStreamHubControlTests
         DateTimeOffset? deadline = null)
     {
         var browser = new FakeWebSocket();
-        var viewer = await hub.OpenAsync(1, mode, deadline ?? Deadline(app), 0, NewSocket(browser), hub.Epoch, "tester", "PC-01");
+        var viewer = await hub.OpenAsync(1, mode, deadline ?? Deadline(app), 0, NewSocket(browser), hub.Epoch, new ScreenViewOwner(1, 1, "tester"), "PC-01");
         return (viewer!, browser);
     }
 
@@ -247,19 +247,77 @@ public class ScreenStreamHubControlTests
     }
 
     [Fact]
-    public async Task ConfirmControl_WhenTheAuditCannotBeWritten_LeavesControlRequesting_AndDoesNotTurnItOn()
+    public async Task ConfirmControl_WhenTheAuditCannotBeWritten_EndsTheRequestAsUnsupported_AndKeepsThePcStream()
     {
         using var app = new TestApp();
         var hub = NewHub(app);
         var (viewer, browser) = await OpenAsync(hub, app);
-        var (pc, _) = await AttachAsync(hub, viewer);
+        var (pc, pcSocket) = await AttachAsync(hub, viewer);
         await hub.RequestControlAsync(viewer, isServerPc: false);
         await app.WithDbAsync(db => db.Database.ExecuteSqlRawAsync("DROP TABLE \"ScreenControlEvents\""));
 
-        await Assert.ThrowsAnyAsync<Exception>(() => hub.ConfirmControlAsync(viewer, pc));
+        await hub.ConfirmControlAsync(viewer, pc);
 
-        Assert.Equal(ScreenControlState.Requesting, viewer.ControlState);
+        Assert.Equal(ScreenControlState.Off, viewer.ControlState);
+        Assert.Equal(OffMessage("unsupported"), TextsOf(browser).Last());
+        Assert.Equal(PcOff, TextsOf(pcSocket).Last());
         Assert.DoesNotContain(On, TextsOf(browser));
+        Assert.False(pcSocket.Aborted);
+    }
+
+    [Fact]
+    public async Task RelayInput_ToAPcThatStopsReading_IsDroppedAndThePcIsAborted()
+    {
+        using var app = new TestApp();
+        var (hub, viewer, _, _, pcSocket) = await OnControlAsync(app);
+        pcSocket.StallSends = true;
+
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"move\",\"x\":1,\"y\":1}"));
+
+        Assert.True(pcSocket.Aborted);
+    }
+
+    [Fact]
+    public async Task RequestControl_ToAPcThatStopsReading_AbortsThePc()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (viewer, _) = await OpenAsync(hub, app);
+        var (_, pcSocket) = await AttachAsync(hub, viewer);
+        pcSocket.StallSends = true;
+
+        await hub.RequestControlAsync(viewer, isServerPc: false);
+
+        Assert.True(pcSocket.Aborted);
+    }
+
+    [Fact]
+    public async Task PrepareControlRequest_OnlyOncePerSecond_AndNotWhileControlIsInUse()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (viewer, _) = await OpenAsync(hub, app);
+        await AttachAsync(hub, viewer);
+
+        Assert.True(await hub.PrepareControlRequestAsync(viewer));
+        Assert.False(await hub.PrepareControlRequestAsync(viewer));
+        app.Time.Advance(TimeSpan.FromSeconds(1));
+        Assert.True(await hub.PrepareControlRequestAsync(viewer));
+        await hub.RequestControlAsync(viewer, isServerPc: false);
+        app.Time.Advance(TimeSpan.FromSeconds(1));
+        Assert.False(await hub.PrepareControlRequestAsync(viewer));
+    }
+
+    [Fact]
+    public async Task PrepareControlRequest_PastTheDeadline_ClosesTheViewAndAsksNothing()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (viewer, browser) = await OpenAsync(hub, app, deadline: app.Time.GetUtcNow().AddMinutes(10));
+        app.Time.Advance(TimeSpan.FromMinutes(11));
+
+        Assert.False(await hub.PrepareControlRequestAsync(viewer));
+        Assert.Equal(ScreenProtocol.SessionEndedCloseStatus, browser.CloseSent!.Value.Status);
     }
 
     // The timeout
@@ -367,6 +425,7 @@ public class ScreenStreamHubControlTests
             await hub.RelayInputAsync(viewer, Input("{\"t\":\"move\",\"x\":1,\"y\":1}"));
         }
 
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"down\",\"b\":0,\"x\":1,\"y\":1}"));
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"up\",\"b\":0,\"x\":1,\"y\":1}"));
 
         var texts = TextsOf(pcSocket);
@@ -389,27 +448,25 @@ public class ScreenStreamHubControlTests
     }
 
     [Fact]
-    public async Task KeyUpReleaseAndUp_AreNeverDropped_EvenWhenTheOtherCapIsSpent()
+    public async Task KeyUpAndUp_AreNotCappedByTheOtherCap_ButOnlyRelayedForWhatIsHeld()
     {
         using var app = new TestApp();
         var (hub, viewer, _, _, pcSocket) = await OnControlAsync(app);
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":true}"));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"down\",\"b\":0,\"x\":1,\"y\":1}"));
 
         for (var attempt = 0; attempt < ScreenProtocol.MaxOtherInputPerSecond + 10; attempt++)
         {
             await hub.RelayInputAsync(viewer, Input("{\"t\":\"wheel\",\"dx\":0,\"dy\":120}"));
         }
 
-        for (var attempt = 0; attempt < 250; attempt++)
-        {
-            await hub.RelayInputAsync(viewer, Input("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}"));
-            await hub.RelayInputAsync(viewer, Input("{\"t\":\"up\",\"b\":0,\"x\":1,\"y\":1}"));
-            await hub.RelayInputAsync(viewer, Input("{\"t\":\"release\"}"));
-        }
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}"));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"up\",\"b\":0,\"x\":1,\"y\":1}"));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"up\",\"b\":0,\"x\":1,\"y\":1}"));
 
         var texts = TextsOf(pcSocket);
-        Assert.Equal(250, texts.Count(text => text == "{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}"));
-        Assert.Equal(250, texts.Count(text => text == "{\"t\":\"up\",\"b\":0,\"x\":1,\"y\":1}"));
-        Assert.Equal(250, texts.Count(text => text == "{\"t\":\"release\"}"));
+        Assert.Contains("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}", texts);
+        Assert.Equal(1, texts.Count(text => text == "{\"t\":\"up\",\"b\":0,\"x\":1,\"y\":1}"));
     }
 
     [Fact]

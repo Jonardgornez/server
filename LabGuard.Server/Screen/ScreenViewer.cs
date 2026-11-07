@@ -11,6 +11,11 @@ public sealed class ScreenViewer : IDisposable
     private readonly Lifetime _lifetime = new();
     private readonly ScreenInputRateLimiter _moves = new(ScreenProtocol.MaxMovesPerSecond);
     private readonly ScreenInputRateLimiter _otherInput = new(ScreenProtocol.MaxOtherInputPerSecond);
+    private readonly ScreenInputRateLimiter _exemptInput = new(ScreenProtocol.MaxExemptInputPerSecond);
+    private readonly ScreenInputRateLimiter _controlRequests = new(ScreenProtocol.ControlRequestsPerSecond);
+
+    // The keys and buttons the server has relayed as down. An up or release is relayed only for one of these, and the set is cleared when control ends.
+    private readonly HashSet<string> _held = [];
 
     // Held around each state change and its send, so states reach the browser in the order they were recorded.
     // Control changes take it too. Closing the view doesn't, so a close never waits behind a send that is stuck.
@@ -31,7 +36,7 @@ public sealed class ScreenViewer : IDisposable
         int auditId,
         DateTimeOffset sessionDeadline,
         ScreenSocket browser,
-        string adminUserName,
+        ScreenViewOwner owner,
         string pcName)
     {
         ViewId = viewId;
@@ -40,7 +45,7 @@ public sealed class ScreenViewer : IDisposable
         AuditId = auditId;
         SessionDeadline = sessionDeadline;
         Browser = browser;
-        AdminUserName = adminUserName;
+        Owner = owner;
         PcName = pcName;
     }
 
@@ -53,8 +58,11 @@ public sealed class ScreenViewer : IDisposable
     public DateTimeOffset SessionDeadline { get; }
     public ScreenSocket Browser { get; }
 
+    // The administrator who opened the view, and the session version it was opened under. The monitor ends the view if that session stops being current.
+    public ScreenViewOwner Owner { get; }
+
     // Copied into each control audit row, so the row survives a removed PC or account.
-    public string AdminUserName { get; }
+    public string AdminUserName => Owner.AdminUserName;
     public string PcName { get; }
 
     public ScreenSocket? CurrentPc
@@ -177,6 +185,9 @@ public sealed class ScreenViewer : IDisposable
         }
     }
 
+    // Takes one of the control requests this viewer may make per second. False when it has made its share for this second.
+    public bool TryTakeControlRequestSlot(DateTimeOffset now) => _controlRequests.TryTake(now);
+
     // Starts a request for control of the attached PC. Null when the view is closed, control is already in use or no PC is attached.
     public ControlRequest? TryBeginControlRequest()
     {
@@ -219,6 +230,15 @@ public sealed class ScreenViewer : IDisposable
         }
     }
 
+    // Ends the request if it is still waiting for this PC. Null otherwise, so a request that moved on is left alone.
+    public ControlPeriodEnd? TryEndRequestFrom(ScreenSocket pc)
+    {
+        lock (_sync)
+        {
+            return _control == ScreenControlState.Requesting && ReferenceEquals(_controlPc, pc) ? EndControlLocked() : null;
+        }
+    }
+
     // Ends whatever control period is in progress. Null when there is none. The PC is handed back only while it is still the attached one.
     public ControlPeriodEnd? TryEndControl()
     {
@@ -237,8 +257,9 @@ public sealed class ScreenViewer : IDisposable
         }
     }
 
-    // The attached PC that input is relayed to. Only while control is on, and only within the cap for this kind of input. Null otherwise.
-    public ScreenSocket? TakeControlInputTarget(InputRate rate, DateTimeOffset now)
+    // The attached PC that the input is relayed to. Only while control is on, only for a key or button that is held when it must be,
+    // and only within the cap for its kind. Null otherwise. A relayed input updates what the server holds down on the PC.
+    public ScreenSocket? TakeControlInputTarget(BrowserControlMessage input, DateTimeOffset now)
     {
         lock (_sync)
         {
@@ -247,13 +268,13 @@ public sealed class ScreenViewer : IDisposable
                 return null;
             }
 
-            var allowed = rate switch
+            if (!HeldAllowsLocked(input) || !TakeRateLocked(input.Rate, now))
             {
-                InputRate.Move => _moves.TryTake(now),
-                InputRate.Other => _otherInput.TryTake(now),
-                _ => true,
-            };
-            return allowed ? _pc : null;
+                return null;
+            }
+
+            ApplyHeldLocked(input);
+            return _pc;
         }
     }
 
@@ -287,6 +308,38 @@ public sealed class ScreenViewer : IDisposable
     private bool IsAwaitingConfirmationLocked(ScreenSocket pc) =>
         !_isClosed && _control == ScreenControlState.Requesting && ReferenceEquals(_pc, pc) && ReferenceEquals(_controlPc, pc);
 
+    // An up or release needs something held. A press needs room to be held, unless the same key is already held.
+    private bool HeldAllowsLocked(BrowserControlMessage input) => input.Held switch
+    {
+        HeldEffect.Press => _held.Contains(input.HeldKey) || _held.Count < ScreenProtocol.MaxHeldInputs,
+        HeldEffect.Release => _held.Contains(input.HeldKey),
+        HeldEffect.ReleaseAll => _held.Count > 0,
+        _ => true,
+    };
+
+    private void ApplyHeldLocked(BrowserControlMessage input)
+    {
+        switch (input.Held)
+        {
+            case HeldEffect.Press:
+                _held.Add(input.HeldKey);
+                break;
+            case HeldEffect.Release:
+                _held.Remove(input.HeldKey);
+                break;
+            case HeldEffect.ReleaseAll:
+                _held.Clear();
+                break;
+        }
+    }
+
+    private bool TakeRateLocked(InputRate rate, DateTimeOffset now) => rate switch
+    {
+        InputRate.Move => _moves.TryTake(now),
+        InputRate.Other => _otherInput.TryTake(now),
+        _ => _exemptInput.TryTake(now),
+    };
+
     // The caller holds the lock.
     private ControlPeriodEnd EndControlLocked()
     {
@@ -294,6 +347,7 @@ public sealed class ScreenViewer : IDisposable
         _control = ScreenControlState.Off;
         _controlPc = null;
         _controlAuditId = null;
+        _held.Clear();
         return ended;
     }
 }
@@ -310,3 +364,6 @@ public readonly record struct ControlRequest(long Id, ScreenSocket Pc);
 
 // What a control period leaves behind when it ends: its audit row, and the PC to tell, which is null when the PC is no longer attached.
 public readonly record struct ControlPeriodEnd(int? AuditId, ScreenSocket? AttachedPc);
+
+// Who opened a view, and the session they opened it under. The session version is what the monitor checks while the view is open.
+public readonly record struct ScreenViewOwner(int AdminId, int SessionVersion, string AdminUserName);

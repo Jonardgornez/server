@@ -44,6 +44,11 @@ public static class ScreenControlMessages
         {
             return Dropped;
         }
+        catch (InvalidOperationException)
+        {
+            // A lone surrogate escape is rejected when its text is read. That is a malformed message too.
+            return Dropped;
+        }
     }
 
     private static BrowserControlMessage ParseObject(JsonElement root)
@@ -66,7 +71,9 @@ public static class ScreenControlMessages
             "up" => ParseButton("up", fields),
             "wheel" => ParseWheel(fields),
             "key" => ParseKey(fields),
-            "release" => HasExactly(fields, "t") ? new BrowserControlMessage(BrowserControlKind.Input, "{\"t\":\"release\"}") : Dropped,
+            "release" => HasExactly(fields, "t")
+                ? new BrowserControlMessage(BrowserControlKind.Input, "{\"t\":\"release\"}", InputRate.Exempt, HeldEffect.ReleaseAll)
+                : Dropped,
             _ => Dropped,
         };
     }
@@ -103,9 +110,14 @@ public static class ScreenControlMessages
             return Dropped;
         }
 
-        // A press is capped like a scroll. A release is never capped, so a held button can always be let go.
-        var rate = name == "down" ? InputRate.Other : InputRate.Exempt;
-        return new BrowserControlMessage(BrowserControlKind.Input, FormattableString.Invariant($"{{\"t\":\"{name}\",\"b\":{button},\"x\":{x},\"y\":{y}}}"), rate);
+        // A press is capped like a scroll. A release is exempt from the caps, so a held button can always be let go.
+        var isPress = name == "down";
+        return new BrowserControlMessage(
+            BrowserControlKind.Input,
+            FormattableString.Invariant($"{{\"t\":\"{name}\",\"b\":{button},\"x\":{x},\"y\":{y}}}"),
+            isPress ? InputRate.Other : InputRate.Exempt,
+            isPress ? HeldEffect.Press : HeldEffect.Release,
+            $"b{button}");
     }
 
     // A wheel amount beyond the range is clamped to it, as the protocol says, rather than dropped.
@@ -134,10 +146,14 @@ public static class ScreenControlMessages
             return Dropped;
         }
 
-        var isDown = fields["d"].ValueKind == JsonValueKind.True ? "true" : "false";
-        // Only a key going down is capped. A key coming up is never dropped, or a key could stay held on the PC.
-        var rate = fields["d"].ValueKind == JsonValueKind.True ? InputRate.Other : InputRate.Exempt;
-        return new BrowserControlMessage(BrowserControlKind.Input, FormattableString.Invariant($"{{\"t\":\"key\",\"c\":\"{code}\",\"d\":{isDown}}}"), rate);
+        // Only a key going down is capped. A key coming up is exempt, so a key can always be let go.
+        var isDown = fields["d"].ValueKind == JsonValueKind.True;
+        return new BrowserControlMessage(
+            BrowserControlKind.Input,
+            FormattableString.Invariant($"{{\"t\":\"key\",\"c\":\"{code}\",\"d\":{(isDown ? "true" : "false")}}}"),
+            isDown ? InputRate.Other : InputRate.Exempt,
+            isDown ? HeldEffect.Press : HeldEffect.Release,
+            $"k{code}");
     }
 
     // Letters and digits only, so the code can go into the canonical text without escaping. The client holds the allow-list.
@@ -205,7 +221,7 @@ public enum BrowserControlKind
     Input,
 }
 
-// How often the input may be relayed. Only moves and the press or scroll inputs are capped. Releases and key-ups never are.
+// How often the input may be relayed. Only moves and the press or scroll inputs have their own caps. Exempt inputs have a backstop.
 public enum InputRate
 {
     Exempt,
@@ -213,7 +229,21 @@ public enum InputRate
     Other,
 }
 
-public readonly record struct BrowserControlMessage(BrowserControlKind Kind, string Canonical = "", InputRate Rate = InputRate.Exempt);
+// What an input does to the keys and buttons held on the PC. The server relays an up or release only for something it relayed as down.
+public enum HeldEffect
+{
+    None,
+    Press,
+    Release,
+    ReleaseAll,
+}
+
+public readonly record struct BrowserControlMessage(
+    BrowserControlKind Kind,
+    string Canonical = "",
+    InputRate Rate = InputRate.Exempt,
+    HeldEffect Held = HeldEffect.None,
+    string HeldKey = "");
 
 // Why a control request was refused or ended. These are the reasons the browser is told, and they are part of the wire contract.
 public static class ControlReasons

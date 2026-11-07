@@ -8,7 +8,7 @@ public class ScreenViewerTests
 
     private static ScreenViewer NewViewer(string viewId = ViewId) =>
         new(viewId, pcId: 7, mode: ScreenProtocol.NotifiedMode, auditId: 1, DateTimeOffset.UtcNow.AddMinutes(30),
-            new ScreenSocket(new FakeWebSocket(), TimeSpan.FromSeconds(1)), adminUserName: "tester", pcName: "PC-01");
+            new ScreenSocket(new FakeWebSocket(), TimeSpan.FromSeconds(1)), owner: new ScreenViewOwner(1, 1, "tester"), pcName: "PC-01");
 
     private static ScreenSocket NewSocket() => new(new FakeWebSocket(), TimeSpan.FromSeconds(1));
 
@@ -311,6 +311,24 @@ public class ScreenViewerTests
         Assert.Null(ended.Value.AuditId);
     }
 
+    private static readonly BrowserControlMessage MoveInput = new(BrowserControlKind.Move, "{}", InputRate.Move);
+    private static readonly BrowserControlMessage WheelInput = new(BrowserControlKind.Input, "{}", InputRate.Other);
+    private static readonly BrowserControlMessage ReleaseAllInput = new(BrowserControlKind.Input, "{}", InputRate.Exempt, HeldEffect.ReleaseAll);
+
+    private static BrowserControlMessage PressInput(string key) => new(BrowserControlKind.Input, "{}", InputRate.Other, HeldEffect.Press, key);
+    private static BrowserControlMessage ReleaseInput(string key) => new(BrowserControlKind.Input, "{}", InputRate.Exempt, HeldEffect.Release, key);
+
+    // A viewer with control on, held by the returned PC.
+    private static ScreenViewer ConfirmedViewer(out ScreenSocket pc)
+    {
+        var viewer = NewViewer();
+        pc = NewSocket();
+        viewer.TryAttachPc(pc, out _);
+        viewer.TryBeginControlRequest();
+        viewer.TryConfirmControl(pc, 9);
+        return viewer;
+    }
+
     [Fact]
     public void TakeControlInputTarget_OnlyWhileOn_ForTheAttachedPc()
     {
@@ -318,35 +336,130 @@ public class ScreenViewerTests
         var pc = NewSocket();
         var now = DateTimeOffset.UtcNow;
         viewer.TryAttachPc(pc, out _);
-        Assert.Null(viewer.TakeControlInputTarget(InputRate.Other, now));
+        Assert.Null(viewer.TakeControlInputTarget(MoveInput, now));
 
         viewer.TryBeginControlRequest();
-        Assert.Null(viewer.TakeControlInputTarget(InputRate.Other, now));
+        Assert.Null(viewer.TakeControlInputTarget(MoveInput, now));
 
         viewer.TryConfirmControl(pc, 9);
-        Assert.Same(pc, viewer.TakeControlInputTarget(InputRate.Other, now));
+        Assert.Same(pc, viewer.TakeControlInputTarget(MoveInput, now));
 
         viewer.TryDetachPc(pc);
-        Assert.Null(viewer.TakeControlInputTarget(InputRate.Other, now));
+        Assert.Null(viewer.TakeControlInputTarget(MoveInput, now));
     }
 
     [Fact]
     public void TakeControlInputTarget_CapsMovesAndOtherInputSeparately()
     {
-        var viewer = NewViewer();
-        var pc = NewSocket();
+        var viewer = ConfirmedViewer(out _);
         var now = DateTimeOffset.UtcNow;
-        viewer.TryAttachPc(pc, out _);
-        viewer.TryBeginControlRequest();
-        viewer.TryConfirmControl(pc, 9);
 
         var moves = Enumerable.Range(0, ScreenProtocol.MaxMovesPerSecond + 10)
-            .Count(_ => viewer.TakeControlInputTarget(InputRate.Move, now) is not null);
-        var others = Enumerable.Range(0, ScreenProtocol.MaxOtherInputPerSecond + 10)
-            .Count(_ => viewer.TakeControlInputTarget(InputRate.Other, now) is not null);
+            .Count(_ => viewer.TakeControlInputTarget(MoveInput, now) is not null);
+        var wheels = Enumerable.Range(0, ScreenProtocol.MaxOtherInputPerSecond + 10)
+            .Count(_ => viewer.TakeControlInputTarget(WheelInput, now) is not null);
 
         Assert.Equal(ScreenProtocol.MaxMovesPerSecond, moves);
-        Assert.Equal(ScreenProtocol.MaxOtherInputPerSecond, others);
+        Assert.Equal(ScreenProtocol.MaxOtherInputPerSecond, wheels);
+    }
+
+    [Fact]
+    public void TakeControlInputTarget_AnUpOrReleaseIsRelayedOnlyForSomethingHeld()
+    {
+        var viewer = ConfirmedViewer(out _);
+        var now = DateTimeOffset.UtcNow;
+
+        Assert.Null(viewer.TakeControlInputTarget(ReleaseInput("kKeyA"), now));
+        Assert.Null(viewer.TakeControlInputTarget(ReleaseAllInput, now));
+        Assert.NotNull(viewer.TakeControlInputTarget(PressInput("kKeyA"), now));
+        Assert.NotNull(viewer.TakeControlInputTarget(ReleaseInput("kKeyA"), now));
+        Assert.Null(viewer.TakeControlInputTarget(ReleaseInput("kKeyA"), now));
+    }
+
+    [Fact]
+    public void TakeControlInputTarget_ReleaseAll_IsRelayedOnlyWhileSomethingIsHeld_AndClearsIt()
+    {
+        var viewer = ConfirmedViewer(out _);
+        var now = DateTimeOffset.UtcNow;
+        viewer.TakeControlInputTarget(PressInput("kKeyA"), now);
+        viewer.TakeControlInputTarget(PressInput("b0"), now);
+
+        Assert.NotNull(viewer.TakeControlInputTarget(ReleaseAllInput, now));
+        Assert.Null(viewer.TakeControlInputTarget(ReleaseAllInput, now));
+        Assert.Null(viewer.TakeControlInputTarget(ReleaseInput("kKeyA"), now));
+    }
+
+    [Fact]
+    public void TakeControlInputTarget_ExemptInputIsNotCappedByTheMoveOrOtherCaps()
+    {
+        var viewer = ConfirmedViewer(out _);
+        var now = DateTimeOffset.UtcNow;
+        viewer.TakeControlInputTarget(PressInput("kKeyA"), now);
+        for (var attempt = 0; attempt < ScreenProtocol.MaxOtherInputPerSecond; attempt++)
+        {
+            viewer.TakeControlInputTarget(WheelInput, now);
+        }
+
+        Assert.Null(viewer.TakeControlInputTarget(WheelInput, now));
+        Assert.NotNull(viewer.TakeControlInputTarget(ReleaseInput("kKeyA"), now));
+    }
+
+    [Fact]
+    public void TakeControlInputTarget_HeldKeysAreBounded_AndAPressBeyondTheBoundIsDropped()
+    {
+        var viewer = ConfirmedViewer(out _);
+        var now = DateTimeOffset.UtcNow;
+
+        // Presses are capped at 200 a second, so the bound is reached over two seconds.
+        for (var index = 0; index < ScreenProtocol.MaxHeldInputs; index++)
+        {
+            Assert.NotNull(viewer.TakeControlInputTarget(PressInput($"k{index}"), now.AddSeconds(index / 200)));
+        }
+
+        var later = now.AddSeconds(2);
+        Assert.Null(viewer.TakeControlInputTarget(PressInput("kOverflow"), later));
+        Assert.NotNull(viewer.TakeControlInputTarget(PressInput("k0"), later));
+    }
+
+    [Fact]
+    public void EndingControl_ClearsWhatWasHeld()
+    {
+        var viewer = ConfirmedViewer(out _);
+        var now = DateTimeOffset.UtcNow;
+        viewer.TakeControlInputTarget(PressInput("kKeyA"), now);
+        viewer.TryEndControl();
+
+        var pc = NewSocket();
+        viewer.TryAttachPc(pc, out _);
+        viewer.TryBeginControlRequest();
+        viewer.TryConfirmControl(pc, 10);
+
+        Assert.Null(viewer.TakeControlInputTarget(ReleaseInput("kKeyA"), now));
+    }
+
+    [Fact]
+    public void TryTakeControlRequestSlot_AllowsOneRequestPerSecond()
+    {
+        var viewer = NewViewer();
+        var now = DateTimeOffset.UtcNow;
+
+        Assert.True(viewer.TryTakeControlRequestSlot(now));
+        Assert.False(viewer.TryTakeControlRequestSlot(now.AddMilliseconds(999)));
+        Assert.True(viewer.TryTakeControlRequestSlot(now.AddSeconds(1)));
+    }
+
+    [Fact]
+    public void TryEndRequestFrom_OnlyEndsARequestForThatPc()
+    {
+        var viewer = NewViewer();
+        var asked = NewSocket();
+        var stranger = NewSocket();
+        viewer.TryAttachPc(asked, out _);
+        viewer.TryBeginControlRequest();
+
+        Assert.Null(viewer.TryEndRequestFrom(stranger));
+        Assert.NotNull(viewer.TryEndRequestFrom(asked));
+        Assert.Equal(ScreenControlState.Off, viewer.ControlState);
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Net.WebSockets;
 using System.Security.Claims;
 using LabGuard.Server.Auth;
@@ -19,6 +20,7 @@ public static class ScreenViewEndpoints
         services.AddSingleton<ScreenStreamHub>();
         services.AddSingleton<ScreenViewAudit>();
         services.AddSingleton<ScreenControlAudit>();
+        services.AddSingleton<LocalAddressCache>();
         services.AddSingleton(provider => new ScreenOrigins(
             provider.GetRequiredService<ServerPorts>(),
             provider.GetRequiredService<IConfiguration>()));
@@ -45,10 +47,12 @@ public static class ScreenViewEndpoints
         ScreenStreamHub hub,
         ScreenViewAudit audit,
         ScreenOrigins origins,
-        ILocalAddressSource localAddresses)
+        LocalAddressCache localAddresses,
+        ILoggerFactory loggerFactory)
     {
         // Read before the session is checked. A logout or password change after this point refuses the open.
         var epoch = hub.Epoch;
+        var logger = loggerFactory.CreateLogger(nameof(ScreenViewEndpoints));
 
         if (!http.WebSockets.IsWebSocketRequest)
         {
@@ -106,7 +110,8 @@ public static class ScreenViewEndpoints
         var browser = new ScreenSocket(socket, ScreenProtocol.SendTimeout);
         try
         {
-            var viewer = await hub.OpenAsync(id, viewMode, sessionDeadline, auditId, browser, epoch, http.User.Identity?.Name ?? "", pc.Name);
+            var owner = new ScreenViewOwner(adminId, sessionVersion, http.User.Identity?.Name ?? "");
+            var viewer = await hub.OpenAsync(id, viewMode, sessionDeadline, auditId, browser, epoch, owner, pc.Name);
             if (viewer is null)
             {
                 await browser.CloseAsync(ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
@@ -122,7 +127,7 @@ public static class ScreenViewEndpoints
                     await hub.CloseAsync(viewer, ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
                 }
 
-                await ReceiveBrowserMessagesAsync(hub, viewer, db, localAddresses, ct);
+                await ReceiveBrowserMessagesAsync(hub, viewer, db, localAddresses, logger, ct);
             }
             finally
             {
@@ -154,11 +159,13 @@ public static class ScreenViewEndpoints
     }
 
     // The browser sends "ack", control on or off, and input. Anything else is ignored, and an oversized message closes the socket.
+    // Each message is handled on its own: a failure in one is logged by type and the view stays open.
     private static async Task ReceiveBrowserMessagesAsync(
         ScreenStreamHub hub,
         ScreenViewer viewer,
         AppDbContext db,
-        ILocalAddressSource localAddresses,
+        LocalAddressCache localAddresses,
+        ILogger logger,
         CancellationToken cancellationToken)
     {
         using var linked = viewer.LinkLifetime(cancellationToken);
@@ -169,32 +176,80 @@ public static class ScreenViewEndpoints
 
         while (await viewer.Browser.ReceiveAsync(ScreenProtocol.BrowserLimits, linked.Token) is { } message)
         {
-            if (ScreenProtocol.IsBrowserAck(message.Type, message.Payload.Span))
+            try
             {
-                await hub.RelayAckAsync(viewer);
-                continue;
+                await HandleBrowserMessageAsync(hub, viewer, db, localAddresses, logger, message, cancellationToken);
             }
-
-            var input = ScreenControlMessages.Parse(message.Type, message.Payload);
-            switch (input.Kind)
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
-                case BrowserControlKind.ControlOn:
-                    await hub.RequestControlAsync(viewer, await IsServerPcAsync(db, viewer.PcId, localAddresses, cancellationToken));
-                    break;
-                case BrowserControlKind.ControlOff:
-                    await hub.StopControlAsync(viewer);
-                    break;
-                case BrowserControlKind.Move:
-                case BrowserControlKind.Input:
-                    await hub.RelayInputAsync(viewer, input);
-                    break;
+                logger.LogWarning("Couldn't handle a live view message: {ExceptionType}.", exception.GetType().Name);
             }
         }
     }
 
-    // Read when control is asked for, from the stored address, the same way the shutdown checks read it.
-    // Fails closed: when the machine's addresses can't be read, the PC is treated as the server's own and refused.
-    private static async Task<bool> IsServerPcAsync(AppDbContext db, int pcId, ILocalAddressSource localAddresses, CancellationToken cancellationToken)
+    private static async Task HandleBrowserMessageAsync(
+        ScreenStreamHub hub,
+        ScreenViewer viewer,
+        AppDbContext db,
+        LocalAddressCache localAddresses,
+        ILogger logger,
+        ScreenMessage message,
+        CancellationToken cancellationToken)
+    {
+        if (ScreenProtocol.IsBrowserAck(message.Type, message.Payload.Span))
+        {
+            await hub.RelayAckAsync(viewer);
+            return;
+        }
+
+        var input = ScreenControlMessages.Parse(message.Type, message.Payload);
+        switch (input.Kind)
+        {
+            case BrowserControlKind.ControlOn:
+                // The cheap checks come first, so the database is only read for a request that may be answered.
+                if (await hub.PrepareControlRequestAsync(viewer))
+                {
+                    await hub.RequestControlAsync(viewer, await IsServerPcOrRefusedAsync(db, viewer, localAddresses, logger, cancellationToken));
+                }
+
+                break;
+            case BrowserControlKind.ControlOff:
+                await hub.StopControlAsync(viewer);
+                break;
+            case BrowserControlKind.Move:
+            case BrowserControlKind.Input:
+                await hub.RelayInputAsync(viewer, input);
+                break;
+        }
+    }
+
+    // A failed check is refused as the server's own PC, so control is never granted on an error.
+    private static async Task<bool> IsServerPcOrRefusedAsync(
+        AppDbContext db,
+        ScreenViewer viewer,
+        LocalAddressCache localAddresses,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await IsServerPcAsync(db, viewer, localAddresses, cancellationToken);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("Couldn't check whether this PC is the server: {ExceptionType}.", exception.GetType().Name);
+            return true;
+        }
+    }
+
+    // Read when control is asked for. Both the stored address and the live address of the attached PC are checked against the
+    // machine's addresses, so a PC is refused if either one is this machine. Fails closed: unreadable machine addresses, or a stored
+    // address that is missing or not an IP address, count as the server's own PC.
+    private static async Task<bool> IsServerPcAsync(
+        AppDbContext db,
+        ScreenViewer viewer,
+        LocalAddressCache localAddresses,
+        CancellationToken cancellationToken)
     {
         if (localAddresses.ReadOrNull() is not { } machineAddresses)
         {
@@ -203,9 +258,20 @@ public static class ScreenViewEndpoints
 
         var stored = await db.Pcs
             .AsNoTracking()
-            .Where(p => p.Id == pcId)
+            .Where(p => p.Id == viewer.PcId)
             .Select(p => new { p.IpAddress })
             .FirstOrDefaultAsync(cancellationToken);
-        return ServerPcRule.IsServerPc(stored?.IpAddress, machineAddresses);
+        if (!IPAddress.TryParse(stored?.IpAddress, out var storedAddress))
+        {
+            return true;
+        }
+
+        if (ServerPcRule.IsServerPc(storedAddress.ToString(), machineAddresses))
+        {
+            return true;
+        }
+
+        return viewer.CurrentPc?.RemoteAddress is { } liveAddress
+            && ServerPcRule.IsServerPc(liveAddress.ToString(), machineAddresses);
     }
 }
