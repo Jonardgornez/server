@@ -225,9 +225,9 @@ public class PcMessageRulesTests
     }
 
     [Theory]
-    [InlineData("‌")]
-    [InlineData("‍")]
-    [InlineData("­")]
+    [InlineData("\u200c")]
+    [InlineData("\u200d")]
+    [InlineData("\u00ad")]
     public void TryCheckText_JoinersAndOtherFormatCharacters_AreAccepted(string character)
     {
         Assert.True(Check("a" + character + "b").Accepted);
@@ -237,7 +237,7 @@ public class PcMessageRulesTests
     public void TryCheckText_ZeroWidthJoinerInAnEmojiSequence_IsAccepted()
     {
         // Man, zero-width joiner, woman.
-        Assert.True(Check("👨‍👩").Accepted);
+        Assert.True(Check("👨\u200d👩").Accepted);
     }
 
     [Fact]

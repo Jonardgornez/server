@@ -1,6 +1,6 @@
 namespace LabGuard.Server.Data;
 
-// One message an administrator sent to one PC. Kept for the audit trail; nothing deletes it.
+// One message an administrator sent to one PC. Kept for the audit trail for 90 days (PcMessageRetention removes older rows at startup).
 // PcName and AdminUserName are copies, so the record survives a removed PC or account. PcId is not a foreign key for that reason.
 // HandedOverUtc is set when a heartbeat hands the message to the PC, once. DeliveredUtc is set when the PC acknowledges it in time.
 public class PcMessage

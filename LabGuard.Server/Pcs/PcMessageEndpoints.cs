@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
 using Microsoft.EntityFrameworkCore;
@@ -158,6 +159,7 @@ public static partial class PcEndpoints
     }
 
     // Polls until every message is delivered or the deadline has passed. The poll pace is real time; the deadline is read from the clock.
+    // A real-time limit of the same length also ends the wait, so a wall clock that jumps back can't hold a send slot for longer.
     private static async Task WaitForDeliveryAsync(
         AppDbContext db,
         long[] messageIds,
@@ -165,9 +167,16 @@ public static partial class PcEndpoints
         TimeProvider clock,
         CancellationToken ct)
     {
+        var started = Stopwatch.GetTimestamp();
         while (messageIds.Length > 0)
         {
             var remaining = deadline - clock.GetUtcNow();
+            var realRemaining = PcMessageRules.DeliveryWindow - Stopwatch.GetElapsedTime(started);
+            if (realRemaining < remaining)
+            {
+                remaining = realRemaining;
+            }
+
             if (remaining <= TimeSpan.Zero)
             {
                 return;
