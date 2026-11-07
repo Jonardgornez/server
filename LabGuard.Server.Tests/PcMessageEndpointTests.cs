@@ -328,6 +328,68 @@ public class PcMessageEndpointTests
     }
 
     [Fact]
+    public async Task Send_MessagesDatedInTheFuture_DoNotCountTowardBusy()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        var future = app.Time.GetUtcNow() + TimeSpan.FromSeconds(1);
+        for (var index = 0; index < 5; index++)
+        {
+            await SeedMessageAsync(app, pc, createdUtc: future);
+        }
+
+        var sending = SendMessageAsync(admin, new { pcIds = new[] { pc.Id }, text = Hello });
+        await WaitForStoredMessagesAsync(app, pc.Id, 6);
+        app.Time.Advance(TimeSpan.FromSeconds(6));
+
+        var response = await sending;
+        Assert.Equal("failed", (await JsonOf(response)).GetProperty("results")[0].GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Send_DirectionOverrideCharacter_Returns400AndStoresNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+
+        var response = await SendMessageAsync(admin, new { pcIds = new[] { pc.Id }, text = "a\u202Eb" });
+
+        await AssertRefusedAsync(app, response, "The message can't contain direction or invisible formatting characters.");
+    }
+
+    [Fact]
+    public async Task Send_WhileTwoSendsAreInFlight_Returns429AndStoresNothingNew_AndTheSlotIsFreedAfterwards()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var first = await AddPcAsync(app, name: "PC-01");
+        var second = await AddPcAsync(app, name: "PC-02");
+        var third = await AddPcAsync(app, name: "PC-03");
+        var offline = await AddPcAsync(app, name: "PC-04", seenAgo: TimeSpan.FromMinutes(1));
+
+        var sendingFirst = SendMessageAsync(admin, new { pcIds = new[] { first.Id }, text = Hello });
+        await WaitForStoredMessagesAsync(app, first.Id, 1);
+        var sendingSecond = SendMessageAsync(admin, new { pcIds = new[] { second.Id }, text = Hello });
+        await WaitForStoredMessagesAsync(app, second.Id, 1);
+
+        var refused = await SendMessageAsync(admin, new { pcIds = new[] { third.Id }, text = Hello });
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, refused.StatusCode);
+        Assert.Equal("A message is already being sent. Try again in a moment.", (await JsonOf(refused)).GetProperty("error").GetString());
+        Assert.Equal(2, (await StoredMessagesAsync(app)).Length);
+
+        app.Time.Advance(TimeSpan.FromSeconds(6));
+        Assert.Equal(HttpStatusCode.OK, (await sendingFirst).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await sendingSecond).StatusCode);
+
+        // Both slots are free again. An offline PC answers at once, so this only checks that a send is accepted.
+        var after = await SendMessageAsync(admin, new { pcIds = new[] { offline.Id }, text = Hello });
+        Assert.Equal(HttpStatusCode.OK, after.StatusCode);
+    }
+
+    [Fact]
     public async Task Send_PcAcknowledgesInTime_ReportsDelivered_AndLogsEveryField()
     {
         using var app = new TestApp();

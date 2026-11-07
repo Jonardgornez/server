@@ -39,6 +39,7 @@ builder.Services.AddAdminAuth();
 builder.Services.AddClientRateLimiting();
 builder.Services.AddScreenViewing();
 builder.Services.AddSingleton<DummyLoginCredential>();
+builder.Services.AddSingleton<PcMessageSends>();
 builder.Services.AddSingleton<ILocalAddressSource, NetworkInterfaceAddressSource>();
 builder.Services.AddDbContext<AppDbContext>((services, options) =>
 {
@@ -76,6 +77,10 @@ using (var scope = app.Services.CreateScope())
         services.GetRequiredService<TimeProvider>().GetUtcNow(),
         CancellationToken.None);
     await services.GetRequiredService<ScreenControlAudit>().CloseOrphanedAsync(
+        services.GetRequiredService<TimeProvider>().GetUtcNow(),
+        CancellationToken.None);
+    await PcMessageRetention.DeleteOlderThanAsync(
+        db,
         services.GetRequiredService<TimeProvider>().GetUtcNow(),
         CancellationToken.None);
 }

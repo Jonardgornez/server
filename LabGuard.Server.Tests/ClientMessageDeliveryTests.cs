@@ -107,6 +107,20 @@ public class ClientMessageDeliveryTests
     }
 
     [Fact]
+    public async Task Heartbeat_DoesNotHandOverAMessageDatedInTheFuture()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await SeedMessageAsync(app, pc, createdUtc: app.Time.GetUtcNow() + TimeSpan.FromSeconds(1));
+
+        var messages = await HandedMessagesAsync(client, pc);
+
+        Assert.Empty(messages);
+        Assert.Null((await StoredMessageAsync(app, id)).HandedOverUtc);
+    }
+
+    [Fact]
     public async Task Heartbeat_OfAnotherPc_DoesNotHandOverThisPcsMessage()
     {
         using var app = new TestApp();

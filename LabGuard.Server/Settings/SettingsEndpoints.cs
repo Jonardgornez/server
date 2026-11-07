@@ -1,5 +1,6 @@
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Auth;
+using LabGuard.Server.Common;
 using LabGuard.Server.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -87,6 +88,11 @@ public static class SettingsEndpoints
         }
 
         var noticeText = notice.Text?.Trim() ?? "";
+        if (UnpairedSurrogates.IsPresentIn(noticeText))
+        {
+            return "The notice can't contain a character that can't be shown.";
+        }
+
         if (noticeText.Length > ServerSettings.MaxNoticeLength)
         {
             return $"Notice must be {ServerSettings.MaxNoticeLength} characters or fewer.";

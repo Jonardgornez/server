@@ -14,11 +14,7 @@ public static partial class PcEndpoints
 {
     private static readonly TimeSpan MessagePollInterval = TimeSpan.FromMilliseconds(150);
 
-    // Held only for the checks and the insert, never while waiting for the PCs, so one send can't hold up another.
-    // It keeps two sends from both filling a PC's last free slot.
-    private static readonly SemaphoreSlim MessageGate = new(1, 1);
-
-    private static async Task<IResult> SendMessageAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    private static async Task<IResult> SendMessageAsync(HttpContext http, AppDbContext db, TimeProvider clock, PcMessageSends sends)
     {
         var request = await AuthEndpoints.ReadBodyAsync<PcMessageRequest>(http.Request);
         if (request is null)
@@ -37,9 +33,35 @@ public static partial class PcEndpoints
             return AuthEndpoints.BadRequest(recipientsError);
         }
 
+        // Refused rather than queued when both slots are taken.
+        if (!sends.InFlight.Wait(0))
+        {
+            return Results.Json(
+                new ErrorResponse("A message is already being sent. Try again in a moment."),
+                statusCode: StatusCodes.Status429TooManyRequests);
+        }
+
+        try
+        {
+            return await SendAcceptedMessageAsync(http, db, clock, sends, pcIds, text);
+        }
+        finally
+        {
+            sends.InFlight.Release();
+        }
+    }
+
+    private static async Task<IResult> SendAcceptedMessageAsync(
+        HttpContext http,
+        AppDbContext db,
+        TimeProvider clock,
+        PcMessageSends sends,
+        int[] pcIds,
+        string text)
+    {
         var ct = http.RequestAborted;
         var now = clock.GetUtcNow();
-        var (refused, stored) = await StoreMessagesAsync(db, pcIds, text, http.User.Identity?.Name ?? "", now, ct);
+        var (refused, stored) = await StoreMessagesAsync(db, sends, pcIds, text, http.User.Identity?.Name ?? "", now, ct);
 
         // Every stored message is resolved when it is delivered, or when its delivery window closes. The window is read from the clock.
         var messageIds = stored.Select(m => m.Id).ToArray();
@@ -68,13 +90,14 @@ public static partial class PcEndpoints
     // decided at once (offline, not found or busy), keyed by PC id, and the messages stored.
     private static async Task<(Dictionary<int, PcMessageResult> Refused, List<PcMessage> Stored)> StoreMessagesAsync(
         AppDbContext db,
+        PcMessageSends sends,
         int[] pcIds,
         string text,
         string adminUserName,
         DateTimeOffset now,
         CancellationToken ct)
     {
-        await MessageGate.WaitAsync(ct);
+        await sends.Store.WaitAsync(ct);
         try
         {
             var pcs = await db.Pcs
@@ -82,9 +105,14 @@ public static partial class PcEndpoints
                 .Where(p => pcIds.Contains(p.Id))
                 .Select(p => new { p.Id, p.Name, p.LastSeenUtc })
                 .ToDictionaryAsync(p => p.Id, ct);
+
+            // Only messages inside the delivery window count. A message dated in the future is not fresh, so it doesn't count either.
             var undeliveredByPc = (await db.PcMessages
                 .AsNoTracking()
-                .Where(m => pcIds.Contains(m.PcId) && m.DeliveredUtc == null && m.CreatedUtc > now - PcMessageRules.DeliveryWindow)
+                .Where(m => pcIds.Contains(m.PcId)
+                    && m.DeliveredUtc == null
+                    && m.CreatedUtc > now - PcMessageRules.DeliveryWindow
+                    && m.CreatedUtc <= now)
                 .Select(m => m.PcId)
                 .ToListAsync(ct))
                 .CountBy(pcId => pcId)
@@ -125,7 +153,7 @@ public static partial class PcEndpoints
         }
         finally
         {
-            MessageGate.Release();
+            sends.Store.Release();
         }
     }
 

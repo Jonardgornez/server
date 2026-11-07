@@ -401,4 +401,19 @@ public class SettingsEndpointTests
 
         Assert.Equal("Lab rules apply.", body.GetProperty("notice").GetString());
     }
+
+    // The JSON reader refuses a lone surrogate escape, so this is refused before the notice check. The check is a second guard.
+    [Fact]
+    public async Task Put_NoticeWithALoneSurrogateEscape_Returns400AndChangesNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var body = "{\"defaultApproval\":{\"mode\":\"time-limit\",\"minutes\":60},\"notice\":{\"isEnabled\":true,\"text\":\"a\\ud800b\"},\"idleTimeoutMinutes\":30,\"defaultViewMode\":\"notified\",\"powerCountdownSeconds\":30}";
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var response = await admin.PutAsync("/api/settings", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(DefaultNotice, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("notice").GetProperty("text").GetString());
+    }
 }

@@ -19,7 +19,10 @@ public static partial class ClientEndpoints
     {
         var candidates = await db.PcMessages
             .AsNoTracking()
-            .Where(m => m.PcId == pcId && m.HandedOverUtc == null && m.CreatedUtc > now - PcMessageRules.DeliveryWindow)
+            .Where(m => m.PcId == pcId
+                && m.HandedOverUtc == null
+                && m.CreatedUtc > now - PcMessageRules.DeliveryWindow
+                && m.CreatedUtc <= now)
             .OrderBy(m => m.CreatedUtc)
             .ThenBy(m => m.Id)
             .Take(PcMessageRules.MaxHandOverPerHeartbeat)

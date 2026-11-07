@@ -1,3 +1,5 @@
+using LabGuard.Server.Common;
+
 namespace LabGuard.Server.Pcs;
 
 // Rules for messages an administrator sends to PCs: what text is accepted, how many PCs one send may name, and the timings of delivery.
@@ -21,8 +23,10 @@ public static class PcMessageRules
     // A PC may acknowledge a message this long after it was created. Only an acknowledgement inside the delivery window counts as delivered.
     public static readonly TimeSpan AckWindow = TimeSpan.FromSeconds(60);
 
-    // Less than the delivery window old. A message this old can still be handed over and delivered.
-    public static bool IsInDeliveryWindow(DateTimeOffset createdUtc, DateTimeOffset now) => now - createdUtc < DeliveryWindow;
+    // Created no later than now and less than the delivery window old. A message created in the future, by a clock moved
+    // back, is not fresh, so it is neither handed over nor counted as pending.
+    public static bool IsInDeliveryWindow(DateTimeOffset createdUtc, DateTimeOffset now) =>
+        now >= createdUtc && now - createdUtc < DeliveryWindow;
 
     // Not older than the ack window. A time in the future counts as recent, so a clock moved back never refuses an acknowledgement.
     public static bool IsInAckWindow(DateTimeOffset createdUtc, DateTimeOffset now) => now - createdUtc <= AckWindow;
@@ -67,7 +71,11 @@ public static class PcMessageRules
             // char.IsControl covers exactly U+0000 to U+001F and U+007F to U+009F. A line break is the one control character kept.
             error = "A message can't contain control characters.";
         }
-        else if (HasUnpairedSurrogate(normalized))
+        else if (normalized.Any(IsDirectionOrInvisibleFormatting))
+        {
+            error = "The message can't contain direction or invisible formatting characters.";
+        }
+        else if (UnpairedSurrogates.IsPresentIn(normalized))
         {
             error = "A message contains a character that can't be shown.";
         }
@@ -79,28 +87,10 @@ public static class PcMessageRules
         return error.Length == 0;
     }
 
-    private static bool HasUnpairedSurrogate(string text)
-    {
-        for (var index = 0; index < text.Length; index++)
-        {
-            if (char.IsLowSurrogate(text[index]))
-            {
-                return true;
-            }
-
-            if (!char.IsHighSurrogate(text[index]))
-            {
-                continue;
-            }
-
-            if (index + 1 == text.Length || !char.IsLowSurrogate(text[index + 1]))
-            {
-                return true;
-            }
-
-            index++;
-        }
-
-        return false;
-    }
+    // Bidi controls, which can reorder the text on screen, and invisible separators and marks. Zero-width joiners and
+    // non-joiners are not listed, since they are needed for some scripts and emoji. Other format characters are allowed.
+    private static bool IsDirectionOrInvisibleFormatting(char c) =>
+        c is (char)0x061C or (char)0x200B or (char)0x200E or (char)0x200F or (char)0x2028 or (char)0x2029 or (char)0xFEFF
+            or (>= (char)0x202A and <= (char)0x202E)
+            or (>= (char)0x2066 and <= (char)0x2069);
 }

@@ -192,6 +192,55 @@ public class PcMessageRulesTests
     }
 
     [Fact]
+    public void IsInDeliveryWindow_CreatedInTheFuture_IsNotFresh()
+    {
+        // A message dated ahead of the clock, as after a clock moved back, is neither handed over nor counted as pending.
+        Assert.False(PcMessageRules.IsInDeliveryWindow(Now.AddSeconds(1), Now));
+    }
+
+    [Theory]
+    [InlineData("\u061C")]
+    [InlineData("\u200B")]
+    [InlineData("\u200E")]
+    [InlineData("\u200F")]
+    [InlineData("\u202A")]
+    [InlineData("\u202B")]
+    [InlineData("\u202C")]
+    [InlineData("\u202D")]
+    [InlineData("\u202E")]
+    [InlineData("\u2066")]
+    [InlineData("\u2067")]
+    [InlineData("\u2068")]
+    [InlineData("\u2069")]
+    [InlineData("\u2028")]
+    [InlineData("\u2029")]
+    [InlineData("\uFEFF")]
+    public void TryCheckText_DirectionOrInvisibleFormatting_IsRefused(string character)
+    {
+        // Inside the text, since a separator at either end is trimmed away first.
+        var result = Check("a" + character + "b");
+
+        Assert.False(result.Accepted);
+        Assert.Equal("The message can't contain direction or invisible formatting characters.", result.Error);
+    }
+
+    [Theory]
+    [InlineData("‌")]
+    [InlineData("‍")]
+    [InlineData("­")]
+    public void TryCheckText_JoinersAndOtherFormatCharacters_AreAccepted(string character)
+    {
+        Assert.True(Check("a" + character + "b").Accepted);
+    }
+
+    [Fact]
+    public void TryCheckText_ZeroWidthJoinerInAnEmojiSequence_IsAccepted()
+    {
+        // Man, zero-width joiner, woman.
+        Assert.True(Check("👨‍👩").Accepted);
+    }
+
+    [Fact]
     public void IsInAckWindow_CreatedInTheFuture_IsRecent()
     {
         // A clock moved back must not refuse an acknowledgement.
