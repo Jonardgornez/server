@@ -14,6 +14,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ServerSettings> ServerSettingsRows => Set<ServerSettings>();
     public DbSet<ScreenViewEvent> ScreenViewEvents => Set<ScreenViewEvent>();
     public DbSet<ScreenControlEvent> ScreenControlEvents => Set<ScreenControlEvent>();
+    public DbSet<PcMessage> PcMessages => Set<PcMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -109,6 +110,17 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(e => e.PcName).HasMaxLength(32).IsRequired();
             entity.Property(e => e.StartedUtc).HasConversion(unixMilliseconds);
             entity.Property(e => e.EndedUtc).HasConversion(unixMilliseconds);
+        });
+
+        modelBuilder.Entity<PcMessage>(entity =>
+        {
+            entity.Property(m => m.PcName).HasMaxLength(32).IsRequired();
+            entity.Property(m => m.AdminUserName).HasMaxLength(64).IsRequired();
+            entity.Property(m => m.Text).HasMaxLength(500).IsRequired();
+            entity.Property(m => m.CreatedUtc).HasConversion(unixMilliseconds);
+            entity.Property(m => m.HandedOverUtc).HasConversion(unixMilliseconds);
+            entity.Property(m => m.DeliveredUtc).HasConversion(unixMilliseconds);
+            entity.HasIndex(m => new { m.PcId, m.CreatedUtc });
         });
 
         modelBuilder.Entity<ServerSettings>(entity =>

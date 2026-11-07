@@ -146,6 +146,46 @@ namespace LabGuard.Server.Migrations
                     b.ToTable("Pcs");
                 });
 
+            modelBuilder.Entity("LabGuard.Server.Data.PcMessage", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AdminUserName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("DeliveredUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("HandedOverUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("PcId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PcName")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PcId", "CreatedUtc");
+
+                    b.ToTable("PcMessages");
+                });
+
             modelBuilder.Entity("LabGuard.Server.Data.PcRegistrationRequest", b =>
                 {
                     b.Property<int>("Id")

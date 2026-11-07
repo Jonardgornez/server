@@ -89,6 +89,8 @@ public static partial class ClientEndpoints
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapGet("/screen/stream", ScreenStreamAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapPost("/messages/{id:long}/ack", AckMessageAsync).RequireRateLimiting(TrafficRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
         return app;
     }
 

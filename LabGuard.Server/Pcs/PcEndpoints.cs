@@ -52,6 +52,7 @@ public static partial class PcEndpoints
         group.MapPost("/reboot", RebootManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/cancel-power", CancelPowerAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/cancel-power", CancelPowerManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/messages", SendMessageAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 

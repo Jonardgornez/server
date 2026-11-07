@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Serialization;
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
@@ -24,6 +25,7 @@ public record HeartbeatScreenView(string ViewId, string Mode);
 // and say how long it has to go down: the countdown stored with that delivery. Exactly one of them is set, so an older client
 // that only reads ShutdownSeconds never shuts down for a restart.
 // PowerCancelled is true while an administrator's cancel of the shutdown or restart waits for this PC to acknowledge it.
+// Messages are the administrator's messages handed to the PC on this heartbeat. The field is left out when there are none.
 public record HeartbeatResponse(
     PcSessionInfo? Session,
     string? EndedReason,
@@ -32,7 +34,8 @@ public record HeartbeatResponse(
     int? ShutdownSeconds,
     int? RestartSeconds,
     bool PowerCancelled,
-    HeartbeatScreenView? ScreenView);
+    HeartbeatScreenView? ScreenView,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PcMessageDelivery[]? Messages = null);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -514,6 +517,8 @@ public static partial class ClientEndpoints
                 .FirstOrDefaultAsync(ct);
         }
 
+        var messages = await HandOverMessagesAsync(db, pcId, now, ct);
+
         var settings = await ServerSettingsStore.GetAsync(db, ct);
         var screenView = screens.CurrentFor(pcId) is { } viewer ? new HeartbeatScreenView(viewer.ViewId, viewer.Mode) : null;
         return Results.Ok(new HeartbeatResponse(
@@ -524,7 +529,8 @@ public static partial class ClientEndpoints
             handOff.Delivery?.Action == PcShutdownRules.ShutdownAction ? handOff.Delivery.CountdownSeconds : null,
             handOff.Delivery?.Action == PcShutdownRules.RestartAction ? handOff.Delivery.CountdownSeconds : null,
             handOff.IsCancelled,
-            screenView));
+            screenView,
+            messages.Length == 0 ? null : messages));
     }
 
     private static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)
