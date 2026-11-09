@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Auth;
+using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
 using Microsoft.EntityFrameworkCore;
 using LoginRequest = LabGuard.Server.Data.LoginRequest;
@@ -45,7 +46,15 @@ public static class LoginRequestEndpoints
     private static async Task<IResult> ListAsync(AppDbContext db, TimeProvider clock, CancellationToken cancellationToken)
     {
         // Expired requests are closed first, so they appear in history and never as pending.
-        await LoginRequestLifecycle.ExpireStaleAsync(db, clock.GetUtcNow(), cancellationToken);
+        try
+        {
+            await LoginRequestLifecycle.ExpireStaleAsync(db, clock.GetUtcNow(), cancellationToken);
+        }
+        catch (Exception exception) when (ClientStorageErrorFilter.IsDatabaseBusy(exception))
+        {
+            // A busy database must not fail the poll. The expiry is retried on the next one, and approve refuses
+            // a stale request whatever the list shows.
+        }
 
         var pending = await db.LoginRequests
             .AsNoTracking()

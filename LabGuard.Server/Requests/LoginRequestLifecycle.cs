@@ -34,40 +34,47 @@ public static class LoginRequestLifecycle
     // The moment a pending request expired. It is recorded as the decision time, not the moment the expiry was noticed.
     public static DateTimeOffset ExpiredAt(DateTimeOffset requestedAt) => requestedAt + PendingLifetime;
 
-    // Expires every pending request past its lifetime. Runs before the requests are read, so they show as history.
-    public static Task<int> ExpireStaleAsync(AppDbContext db, DateTimeOffset now, CancellationToken cancellationToken) =>
-        ExpireStalePendingAsync(db, db.LoginRequests, now, cancellationToken);
+    // Expires every pending request past its lifetime, in one statement. Runs before the requests are read, so they show as history.
+    public static Task<int> ExpireStaleAsync(AppDbContext db, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var cancelled = nameof(LoginRequestStatus.Cancelled);
+        var pending = nameof(LoginRequestStatus.Pending);
+        var lifetimeMilliseconds = (long)PendingLifetime.TotalMilliseconds;
+        var cutoffMilliseconds = (now - PendingLifetime).ToUnixTimeMilliseconds();
+        return db.Database.ExecuteSqlAsync($"""
+            UPDATE "LoginRequests"
+            SET "Status" = {cancelled}, "Reason" = {Expired}, "DecidedAtUtc" = "RequestedAtUtc" + {lifetimeMilliseconds}
+            WHERE "Status" = {pending} AND "RequestedAtUtc" <= {cutoffMilliseconds}
+            """, cancellationToken);
+    }
 
     // Expires this PC's pending request if it is past its lifetime. Runs inside the caller's transaction.
-    public static Task<int> ExpireStaleForPcAsync(AppDbContext db, int pcId, DateTimeOffset now, CancellationToken cancellationToken) =>
-        ExpireStalePendingAsync(db, db.LoginRequests.Where(r => r.PcId == pcId), now, cancellationToken);
-
-    // SQLite can't add the lifetime to a stored time inside an update, so each stale row gets one conditional update
-    // with its own expiry time. A row decided meanwhile (by an approval, say) no longer matches and is left alone.
-    private static async Task<int> ExpireStalePendingAsync(
-        AppDbContext db,
-        IQueryable<LoginRequest> requests,
-        DateTimeOffset now,
-        CancellationToken cancellationToken)
+    public static Task<int> ExpireStaleForPcAsync(AppDbContext db, int pcId, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var stale = await requests
-            .AsNoTracking()
-            .Where(r => r.Status == LoginRequestStatus.Pending && r.RequestedAtUtc <= now - PendingLifetime)
-            .Select(r => new { r.Id, r.RequestedAtUtc })
-            .ToListAsync(cancellationToken);
+        var cancelled = nameof(LoginRequestStatus.Cancelled);
+        var pending = nameof(LoginRequestStatus.Pending);
+        var lifetimeMilliseconds = (long)PendingLifetime.TotalMilliseconds;
+        var cutoffMilliseconds = (now - PendingLifetime).ToUnixTimeMilliseconds();
+        return db.Database.ExecuteSqlAsync($"""
+            UPDATE "LoginRequests"
+            SET "Status" = {cancelled}, "Reason" = {Expired}, "DecidedAtUtc" = "RequestedAtUtc" + {lifetimeMilliseconds}
+            WHERE "Status" = {pending} AND "PcId" = {pcId} AND "RequestedAtUtc" <= {cutoffMilliseconds}
+            """, cancellationToken);
+    }
 
-        var expired = 0;
-        foreach (var request in stale)
-        {
-            expired += await db.LoginRequests
-                .Where(r => r.Id == request.Id && r.Status == LoginRequestStatus.Pending)
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(r => r.Status, LoginRequestStatus.Cancelled)
-                    .SetProperty(r => r.Reason, Expired)
-                    .SetProperty(r => r.DecidedAtUtc, ExpiredAt(request.RequestedAtUtc)), cancellationToken);
-        }
-
-        return expired;
+    // Approves a request only while it is still pending and unexpired at the moment of the write, so a request that aged past
+    // its lifetime while the write waited for the database lock is not approved. The clock is read here, right before the write.
+    // Returns how many were approved, which is 0 when the request expired or was decided.
+    public static Task<int> ApproveIfFreshAsync(AppDbContext db, int requestId, int? minutes, TimeProvider clock, CancellationToken cancellationToken)
+    {
+        var writtenAt = clock.GetUtcNow();
+        var cutoff = writtenAt - PendingLifetime;
+        return db.LoginRequests
+            .Where(r => r.Id == requestId && r.Status == LoginRequestStatus.Pending && r.RequestedAtUtc > cutoff)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(r => r.Status, LoginRequestStatus.Approved)
+                .SetProperty(r => r.ApprovedMinutes, minutes)
+                .SetProperty(r => r.DecidedAtUtc, writtenAt), cancellationToken);
     }
 
     // Whole seconds the PC must still wait, rounded up so it never retries early. Null when it may send a request now.

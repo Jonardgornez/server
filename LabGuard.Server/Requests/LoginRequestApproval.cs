@@ -129,7 +129,7 @@ internal static class LoginRequestApproval
             return await CloseAsync(db, transaction, requestId, InUseRefusal, now, ct);
         }
 
-        return await OpenAsync(db, transaction, requestId, pc, minutes, now, ct);
+        return await OpenAsync(db, transaction, requestId, pc, minutes, now, clock, ct);
     }
 
     private static async Task<IResult> OpenAsync(
@@ -139,26 +139,37 @@ internal static class LoginRequestApproval
         Pc pc,
         int? minutes,
         DateTimeOffset now,
+        TimeProvider clock,
         CancellationToken ct)
     {
         db.PcSessions.Add(SessionLifecycle.NewLoginRequestSession(pc, requestId, minutes, now));
         await db.SaveChangesAsync(ct);
 
-        var approved = await db.LoginRequests
-            .Where(r => r.Id == requestId && r.Status == LoginRequestStatus.Pending)
-            .ExecuteUpdateAsync(setters => setters
-                .SetProperty(r => r.Status, LoginRequestStatus.Approved)
-                .SetProperty(r => r.ApprovedMinutes, minutes)
-                .SetProperty(r => r.DecidedAtUtc, now), ct);
-        if (approved == 0)
+        if (await LoginRequestLifecycle.ApproveIfFreshAsync(db, requestId, minutes, clock, ct) == 0)
         {
-            // Not committed, so the session opened above is rolled back with it.
-            return AlreadyDecided();
+            return await NotApprovedAsync(db, transaction, requestId, clock, ct);
         }
 
         var stored = await db.LoginRequests.AsNoTracking().SingleAsync(r => r.Id == requestId, ct);
         await transaction.CommitAsync(ct);
         return Results.Ok(LoginRequestEndpoints.ToResponse(stored));
+    }
+
+    // Nothing was approved, so the session opened above is rolled back. The request may have aged past its lifetime while the
+    // write waited for the database lock; if so it is stored as expired, as the earlier check would have done.
+    private static async Task<IResult> NotApprovedAsync(
+        AppDbContext db,
+        IDbContextTransaction transaction,
+        int requestId,
+        TimeProvider clock,
+        CancellationToken ct)
+    {
+        await transaction.RollbackAsync(ct);
+        db.ChangeTracker.Clear();
+        await LoginRequestLifecycle.ExpireStaleAsync(db, clock.GetUtcNow(), ct);
+
+        var request = await db.LoginRequests.AsNoTracking().SingleAsync(r => r.Id == requestId, ct);
+        return request.Reason == LoginRequestLifecycle.Expired ? Conflict(ExpiredMessage) : AlreadyDecided();
     }
 
     // Closes a request that can't be approved. Committed, unlike the other paths, so the refusal is kept.

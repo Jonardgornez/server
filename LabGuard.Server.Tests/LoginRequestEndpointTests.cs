@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using LabGuard.Server.Data;
 using LabGuard.Server.Requests;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using LoginRequest = LabGuard.Server.Data.LoginRequest;
@@ -238,6 +239,41 @@ public class LoginRequestEndpointTests
         Assert.Equal("expired", history[0].GetProperty("reason").GetString());
         Assert.Equal(requestedAt.AddMinutes(10).ToUnixTimeMilliseconds(), history[0].GetProperty("decidedAt").GetDateTimeOffset().ToUnixTimeMilliseconds());
         Assert.Equal(LoginRequestStatus.Cancelled, (await StoredAsync(app, id)).Status);
+    }
+
+    [Fact]
+    public async Task List_WhileTheDatabaseIsBusy_StillAnswers_AndExpiresOnALaterPoll()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        var stale = await AddAsync(app, requestedAgo: TimeSpan.FromMinutes(10));
+        var connectionString = await app.WithDbAsync(db => Task.FromResult(db.Database.GetConnectionString()!));
+
+        // A second connection holds the write lock, so the expiry write fails with SQLITE_BUSY.
+        using var blocker = new SqliteConnection(connectionString);
+        await blocker.OpenAsync();
+        await ExecuteAsync(blocker, "BEGIN IMMEDIATE");
+        try
+        {
+            var busy = await client.GetAsync("/api/login-requests");
+
+            Assert.Equal(HttpStatusCode.OK, busy.StatusCode);
+        }
+        finally
+        {
+            await ExecuteAsync(blocker, "ROLLBACK");
+        }
+
+        var body = await JsonOf(await client.GetAsync("/api/login-requests"));
+        Assert.Equal(0, body.GetProperty("pending").GetArrayLength());
+        Assert.Equal([stale], Ids(body.GetProperty("history")));
+    }
+
+    private static async Task ExecuteAsync(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync();
     }
 
     [Fact]
