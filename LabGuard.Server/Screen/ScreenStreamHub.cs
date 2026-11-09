@@ -182,7 +182,7 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         }
     }
 
-    // The administrator asks for control. Refused when the view is anonymous, when the PC is the server's own, or when no PC is attached.
+    // The administrator asks for control, from either view mode. Refused when the PC is the server's own, or when no PC is attached.
     // The PC is asked with control on, and has ScreenProtocol.ControlConfirmTimeout to confirm before the request is abandoned.
     public async Task RequestControlAsync(ScreenViewer viewer, bool isServerPc)
     {
@@ -200,7 +200,7 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
                 return;
             }
 
-            if (ControlRefusalFor(viewer, isServerPc) is { } refusal)
+            if (ControlRefusalFor(isServerPc) is { } refusal)
             {
                 await SendControlMessageAsync(viewer, ScreenControlMessages.OffMessage(refusal));
                 return;
@@ -464,11 +464,10 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         await ExpireRequestAsync(viewer, requestId);
     }
 
-    // The first refusal that applies. Anonymous views and the server's own PC are refused before anything else is checked.
-    private static string? ControlRefusalFor(ScreenViewer viewer, bool isServerPc) =>
-        viewer.Mode != ScreenProtocol.NotifiedMode ? ControlReasons.Anonymous
-        : isServerPc ? ControlReasons.ServerPc
-        : null;
+    // The server's own PC is refused before anything else is checked. Either view mode may take control: the PC always shows its
+    // controlling notice while control is on, so an anonymous view becomes visible on the PC for exactly that time.
+    private static string? ControlRefusalFor(bool isServerPc) =>
+        isServerPc ? ControlReasons.ServerPc : null;
 
     private Task CloseStalledAsync(ScreenViewer viewer) =>
         CloseAsync(viewer, WebSocketCloseStatus.PolicyViolation, "The viewer stopped reading.");

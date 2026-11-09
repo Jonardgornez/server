@@ -249,7 +249,6 @@ public readonly record struct BrowserControlMessage(
 public static class ControlReasons
 {
     public const string Stopped = "stopped";
-    public const string Anonymous = "anonymous";
     public const string ServerPc = "server-pc";
     public const string Waiting = "waiting";
     public const string Unsupported = "unsupported";

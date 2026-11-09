@@ -226,11 +226,10 @@ public class ScreenControlMessagesTests
     public void ControlReasons_MatchTheContract()
     {
         Assert.Equal(
-            new[] { "stopped", "anonymous", "server-pc", "waiting", "unsupported", "connection", "pc-ended" },
+            new[] { "stopped", "server-pc", "waiting", "unsupported", "connection", "pc-ended" },
             new[]
             {
                 ControlReasons.Stopped,
-                ControlReasons.Anonymous,
                 ControlReasons.ServerPc,
                 ControlReasons.Waiting,
                 ControlReasons.Unsupported,

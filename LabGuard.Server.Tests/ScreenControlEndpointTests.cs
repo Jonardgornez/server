@@ -96,14 +96,14 @@ public class ScreenControlEndpointTests
     // Refusals, in the order the rules apply
 
     [Fact]
-    public async Task ControlOn_OnAnAnonymousView_IsRefusedAsAnonymous_EvenWithNoPcAttached()
+    public async Task ControlOn_OnAnAnonymousView_WithNoPcAttached_IsRefusedAsWaiting_NotForTheMode()
     {
         using var app = new TestApp();
         var view = await OpenViewAsync(app, query: "?mode=anonymous");
 
         await LiveViewClient.SendTextAsync(view.Browser, BrowserOn);
 
-        Assert.Equal(OffMessage("anonymous"), await TextAsync(view.Browser));
+        Assert.Equal(OffMessage("waiting"), await TextAsync(view.Browser));
         Assert.Empty(await ControlRowsAsync(app));
         await FinishAsync(app, view);
     }

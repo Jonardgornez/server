@@ -89,18 +89,21 @@ public class ScreenStreamHubControlTests
     // Refusals
 
     [Fact]
-    public async Task RequestControl_OnAnAnonymousView_IsRefusedAsAnonymous()
+    public async Task RequestControl_OnAnAnonymousView_AsksThePc()
     {
         using var app = new TestApp();
         var hub = NewHub(app);
         var (viewer, browser) = await OpenAsync(hub, app, mode: ScreenProtocol.AnonymousMode);
-        var (_, pcSocket) = await AttachAsync(hub, viewer);
+        var (pc, pcSocket) = await AttachAsync(hub, viewer);
 
         await hub.RequestControlAsync(viewer, isServerPc: false);
 
-        Assert.Equal(OffMessage("anonymous"), TextsOf(browser).Last());
-        Assert.DoesNotContain(PcOn, TextsOf(pcSocket));
-        Assert.Equal(ScreenControlState.Off, viewer.ControlState);
+        Assert.Contains(PcOn, TextsOf(pcSocket));
+        Assert.DoesNotContain(TextsOf(browser), text => text.Contains("\"control\":\"off\""));
+
+        await hub.ConfirmControlAsync(viewer, pc);
+
+        Assert.Equal(ScreenControlState.On, viewer.ControlState);
     }
 
     [Fact]
@@ -132,7 +135,7 @@ public class ScreenStreamHubControlTests
     }
 
     [Fact]
-    public async Task RequestControl_AnAnonymousRefusal_TakesPrecedenceOverTheServersOwnPc()
+    public async Task RequestControl_OnAnAnonymousView_StillRefusesTheServersOwnPc()
     {
         using var app = new TestApp();
         var hub = NewHub(app);
@@ -140,7 +143,7 @@ public class ScreenStreamHubControlTests
 
         await hub.RequestControlAsync(viewer, isServerPc: true);
 
-        Assert.Equal(OffMessage("anonymous"), TextsOf(browser).Last());
+        Assert.Equal(OffMessage("server-pc"), TextsOf(browser).Last());
     }
 
     // The request and its confirmation
