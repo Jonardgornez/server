@@ -35,10 +35,14 @@ public static class SessionLogEndpoints
 
     private static async Task<IResult> ListAsync(
         [AsParameters] SessionLogListQuery query,
+        HttpContext http,
         AppDbContext db,
         TimeProvider clock,
         CancellationToken cancellationToken)
     {
+        // Usernames and PC names must not sit in a browser or proxy cache.
+        http.Response.Headers.CacheControl = "no-store";
+
         if (!SessionLogFilter.TryParse(query, out var filter, out var error))
         {
             return AuthEndpoints.BadRequest(error);
@@ -68,6 +72,9 @@ public static class SessionLogEndpoints
         TimeProvider clock,
         CancellationToken cancellationToken)
     {
+        // Usernames and PC names must not sit in a browser or proxy cache.
+        http.Response.Headers.CacheControl = "no-store";
+
         // An export takes every matching row, so the paging values are not checked.
         if (!SessionLogFilter.TryParse(query with { Page = null, PageSize = null }, out var filter, out var error))
         {
