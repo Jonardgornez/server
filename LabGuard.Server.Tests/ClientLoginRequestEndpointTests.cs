@@ -497,6 +497,23 @@ public class ClientLoginRequestEndpointTests
     }
 
     [Fact]
+    public async Task AdminUnlock_CancelsThePendingRequest_WithLoggedInReason()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        var id = await CreatedRequestIdAsync(client, pc);
+
+        var unlock = await admin.PostAsJsonAsync($"/api/pcs/{pc.Id}/unlock", new { });
+
+        Assert.True(unlock.IsSuccessStatusCode);
+        var stored = await StoredRequestAsync(app, id);
+        Assert.Equal(LoginRequestStatus.Cancelled, stored.Status);
+        Assert.Equal("logged-in", stored.Reason);
+    }
+
+    [Fact]
     public async Task Login_Failure_LeavesThePendingRequestAlone()
     {
         using var app = new TestApp();

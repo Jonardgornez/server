@@ -386,7 +386,13 @@ public class LoginRequestApprovalTests
         using var pcClient = app.CreatePcClient();
         var pc = await AddPcAsync(app);
         var requestId = await RequestAsync(pcClient, pc);
-        Assert.Equal(HttpStatusCode.NoContent, (await admin.PostAsJsonAsync($"/api/pcs/{pc.Id}/unlock", new { })).StatusCode);
+        // Written directly: an admin unlock or a login through the API would already close the pending request.
+        await app.WithDbAsync(async db =>
+        {
+            var stored = await db.Pcs.SingleAsync(p => p.Id == pc.Id);
+            db.PcSessions.Add(SessionLifecycle.NewAdminUnlock(stored, app.Time.GetUtcNow()));
+            return await db.SaveChangesAsync();
+        });
         var runningId = Assert.Single(await OpenSessionsOfAsync(app, pc.Id)).Id;
 
         var response = await ApproveAsync(admin, requestId, ThirtyMinutes);

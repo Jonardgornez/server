@@ -1,6 +1,7 @@
 using LabGuard.Server.Auth;
 using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
+using LabGuard.Server.Requests;
 using LabGuard.Server.Sessions;
 using Microsoft.EntityFrameworkCore;
 
@@ -113,13 +114,16 @@ public static partial class PcEndpoints
         try
         {
             await db.SaveChangesAsync(ct);
-            return true;
         }
         catch (DbUpdateException exception) when (ClientEndpoints.IsUniqueViolation(exception))
         {
             db.Entry(session).State = EntityState.Detached;
             return false;
         }
+
+        // The PC is now open, so an older login request from it must not open a second session later.
+        await LoginRequestLifecycle.CancelPendingForPcAsync(db, pc.Id, LoginRequestLifecycle.LoggedIn, now, ct);
+        return true;
     }
 
     // Most PCs one bulk request may name. The lab has 60, so this only keeps a single request bounded.
