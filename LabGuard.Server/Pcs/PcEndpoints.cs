@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 namespace LabGuard.Server.Pcs;
 
 // ShutdownState is null, "shutting-down", "shutdown", "restarting", "rebooting" or "cancelling". IsServerPc is true for the PC this server runs on.
+// InternetBlocked is what the administrator wants. InternetBlockApplied is what the PC last reported, null until it has reported.
 public record PcResponse(
     int Id,
     string Name,
@@ -19,7 +20,9 @@ public record PcResponse(
     DateTimeOffset LastSeenAt,
     PcSessionSummary? Session,
     string? ShutdownState,
-    bool IsServerPc);
+    bool IsServerPc,
+    bool InternetBlocked,
+    bool? InternetBlockApplied);
 
 // Username is null for an admin unlock, which has no account.
 public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
@@ -54,6 +57,7 @@ public static partial class PcEndpoints
         group.MapPost("/{id:int}/cancel-power", CancelPowerAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/cancel-power", CancelPowerManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/messages", SendMessageAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/internet", SetInternetBlockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 
@@ -98,7 +102,9 @@ public static partial class PcEndpoints
                     ? ToSummary(session, now)
                     : null,
                 PcShutdownRules.StateOf(p, isOnline, now),
-                machineAddresses is not null && ServerPcRule.IsServerPc(p.IpAddress, machineAddresses));
+                machineAddresses is not null && ServerPcRule.IsServerPc(p.IpAddress, machineAddresses),
+                p.InternetBlocked,
+                p.InternetBlockApplied);
         }));
     }
 

@@ -34,6 +34,7 @@ public class ChannelGuardTests
     [InlineData("POST", "/api/auth/logout")]
     [InlineData("GET", "/api/pcs")]
     [InlineData("DELETE", "/api/pcs/1")]
+    [InlineData("POST", "/api/pcs/internet")]
     [InlineData("GET", "/api/pcs/1/screen/live")]
     [InlineData("GET", "/api/accounts")]
     [InlineData("GET", "/api/login-requests")]

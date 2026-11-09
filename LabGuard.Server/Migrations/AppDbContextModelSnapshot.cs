@@ -104,6 +104,12 @@ namespace LabGuard.Server.Migrations
                     b.Property<int>("FailedLoginCount")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool?>("InternetBlockApplied")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("InternetBlocked")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("IpAddress")
                         .HasMaxLength(45)
                         .HasColumnType("TEXT");

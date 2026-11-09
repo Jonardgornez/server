@@ -18,7 +18,8 @@ public record PcLoginRequest(string? Username, string? Password);
 public record PcLoginResponse(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining);
 // PowerCancelHandled is sent by a PC that has acted on a cancel of its shutdown or restart. It only matters while a cancel is recorded.
 // PowerCountdownRunning is sent by a PC that is counting down a shutdown or restart it was handed. Null from an older client.
-public record HeartbeatRequest(int? SessionId, bool? PowerCancelHandled, bool? PowerCountdownRunning);
+// InternetBlockApplied is the internet block the PC has in effect. Null from an older client, which leaves the stored value as it is.
+public record HeartbeatRequest(int? SessionId, bool? PowerCancelHandled, bool? PowerCountdownRunning, bool? InternetBlockApplied);
 // ScreenView is set while an administrator has a live view of this PC open. The PC streams only then, and an older client ignores it.
 public record HeartbeatScreenView(string ViewId, string Mode);
 // Notice is the administrator's on-screen notice text, or null when the notice is turned off.
@@ -26,6 +27,7 @@ public record HeartbeatScreenView(string ViewId, string Mode);
 // and say how long it has to go down: the countdown stored with that delivery. Exactly one of them is set, so an older client
 // that only reads ShutdownSeconds never shuts down for a restart.
 // PowerCancelled is true while an administrator's cancel of the shutdown or restart waits for this PC to acknowledge it.
+// InternetBlocked is true while the administrator wants this PC's internet blocked. The PC applies it and reports it back.
 // Messages are the administrator's messages handed to the PC on this heartbeat. The field is left out when there are none.
 // LoginRequest is this PC's latest login request while it is pending or was decided a moment ago. The field is left out otherwise.
 public record HeartbeatResponse(
@@ -36,6 +38,7 @@ public record HeartbeatResponse(
     int? ShutdownSeconds,
     int? RestartSeconds,
     bool PowerCancelled,
+    bool InternetBlocked,
     HeartbeatScreenView? ScreenView,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PcMessageDelivery[]? Messages = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatLoginRequest? LoginRequest = null);
@@ -449,6 +452,8 @@ public static partial class ClientEndpoints
                 p.PowerAction,
                 p.PowerCountdownSeconds,
                 p.PowerCancelRequestedAtUtc,
+                p.InternetBlockApplied,
+                p.InternetBlocked,
             })
             .FirstOrDefaultAsync(ct);
         if (known is null)
@@ -485,12 +490,14 @@ public static partial class ClientEndpoints
         }
 
         // Written after the decision above, so a heartbeat that dies partway can't make the PC look online with the
-        // unlock still open. A single conditional update, so a PC removed a moment ago can't be revived.
+        // unlock still open. A single conditional update, so a PC removed a moment ago can't be revived. The applied internet
+        // block rides in the same update, and a null from the PC keeps the stored value.
         var changed = await db.Pcs
             .Where(p => p.TokenHash == tokenHash)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(p => p.LastSeenUtc, now)
-                .SetProperty(p => p.IpAddress, address), ct);
+                .SetProperty(p => p.IpAddress, address)
+                .SetProperty(p => p.InternetBlockApplied, request?.InternetBlockApplied ?? known.InternetBlockApplied), ct);
         if (changed == 0)
         {
             return NotRegistered();
@@ -536,6 +543,7 @@ public static partial class ClientEndpoints
             handOff.Delivery?.Action == PcShutdownRules.ShutdownAction ? handOff.Delivery.CountdownSeconds : null,
             handOff.Delivery?.Action == PcShutdownRules.RestartAction ? handOff.Delivery.CountdownSeconds : null,
             handOff.IsCancelled,
+            known.InternetBlocked,
             screenView,
             messages.Length == 0 ? null : messages,
             loginRequest));

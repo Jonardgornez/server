@@ -28,6 +28,11 @@ public class Pc
     // acknowledges the cancel, or with the delivery, so a cancel never outlives its delivery.
     public DateTimeOffset? PowerCancelRequestedAtUtc { get; set; }
 
+    // What the administrator wants for this PC's internet access: true blocks it. The PC applies it from its next heartbeat.
+    public bool InternetBlocked { get; set; }
+    // What the PC last reported it applied. Null until a client that reports it has sent a heartbeat, so older clients show as unknown.
+    public bool? InternetBlockApplied { get; set; }
+
     // Lockout for user logins attempted from this PC.
     public int FailedLoginCount { get; set; }
     // Failures older than this are forgotten, so the count doesn't build up across days.
