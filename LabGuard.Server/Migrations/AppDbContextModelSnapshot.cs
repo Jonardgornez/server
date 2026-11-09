@@ -304,6 +304,8 @@ namespace LabGuard.Server.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("LoginRequestId");
+
                     b.HasIndex("PcId")
                         .IsUnique()
                         .HasFilter("\"EndedAtUtc\" IS NULL");

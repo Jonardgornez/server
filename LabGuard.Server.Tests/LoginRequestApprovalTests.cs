@@ -13,6 +13,7 @@ public class LoginRequestApprovalTests
 {
     private const string OfflineMessage = "That PC is offline, so the request was closed.";
     private const string RemovedMessage = "That PC is no longer registered, so the request was closed.";
+    private const string UnknownMessage = "This request came from an older version and can't be approved. Ask the student to request again.";
     private const string LockedMessage = "That PC is locked. Unlock it first, then ask the student to request again.";
     private const string InUseMessage = "Someone is already using that PC, so the request was closed.";
     private const string AlreadyDecidedMessage = "This request has already been decided.";
@@ -305,7 +306,7 @@ public class LoginRequestApprovalTests
     // Refusals: each closes the request as denied, with its reason, and opens nothing
 
     [Fact]
-    public async Task Approve_WithNoPc_ClosesTheRequestAsPcRemoved()
+    public async Task Approve_WithNoPcLink_ClosesTheRequestAsPcUnknown()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -319,7 +320,7 @@ public class LoginRequestApprovalTests
 
         var response = await ApproveAsync(admin, requestId, ThirtyMinutes);
 
-        await AssertRefusedAsync(app, response, requestId, RemovedMessage, "pc-removed");
+        await AssertRefusedAsync(app, response, requestId, UnknownMessage, "pc-unknown");
         Assert.Empty(await app.WithDbAsync(db => db.PcSessions.AsNoTracking().ToListAsync()));
     }
 

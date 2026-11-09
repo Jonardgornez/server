@@ -22,6 +22,15 @@ public static partial class ClientEndpoints
     private const int MaxLoginRequestAttempts = 2;
     private const string InUseMessage = "This PC is already in use.";
 
+    // What decides a create: the PC's pending request, whether the PC exists and is locked, whether a session holds it,
+    // and when it last asked. PcName is null when the PC no longer exists.
+    private sealed record LoginRequestState(
+        ClientLoginRequestResponse? Pending,
+        string? PcName,
+        bool IsLocked,
+        bool IsInUse,
+        DateTimeOffset? LatestRequestedAt);
+
     private static async Task<IResult> CreateLoginRequestAsync(HttpContext http, AppDbContext db, TimeProvider clock)
     {
         if (ReadBearerToken(http.Request) is not { } token)
@@ -40,11 +49,18 @@ public static partial class ClientEndpoints
             return AuthEndpoints.InvalidRequest();
         }
 
+        // Read-only first. A request that is already answered (pending, refused) never takes the database write lock.
+        var now = clock.GetUtcNow();
+        if (DecideWithoutInsert(http, await ReadStateAsync(db, pcId, now, ct), now) is { } answer)
+        {
+            return answer;
+        }
+
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                return await CreateOrReturnPendingAsync(http, db, pcId, clock.GetUtcNow(), ct);
+                return await CreateInTransactionAsync(http, db, pcId, now, ct);
             }
             catch (DbUpdateException exception) when (IsUniqueViolation(exception))
             {
@@ -60,50 +76,51 @@ public static partial class ClientEndpoints
         }
     }
 
-    // One transaction. It starts with the expiry write, which takes the database lock, so two requests from the same PC
-    // can't both see no pending request and both insert one. The unique index is the backstop for that.
-    private static async Task<IResult> CreateOrReturnPendingAsync(HttpContext http, AppDbContext db, int pcId, DateTimeOffset now, CancellationToken ct)
+    // The authoritative decision. It starts with the expiry write, which takes the database lock, so two requests from the
+    // same PC can't both see no pending request and both insert one. The unique index is the backstop for that.
+    private static async Task<IResult> CreateInTransactionAsync(HttpContext http, AppDbContext db, int pcId, DateTimeOffset now, CancellationToken ct)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SessionLifecycle.EndExpiredForPcAsync(db, pcId, now, ct);
-        var result = await CreateIfAllowedAsync(http, db, pcId, now, ct);
+
+        var state = await ReadStateAsync(db, pcId, now, ct);
+        if (DecideWithoutInsert(http, state, now) is { } answer)
+        {
+            await transaction.CommitAsync(ct);
+            return answer;
+        }
+
+        var request = new LoginRequest
+        {
+            PcId = pcId,
+            PcName = state.PcName!,
+            RequestedAtUtc = now,
+            Status = LoginRequestStatus.Pending,
+        };
+        db.LoginRequests.Add(request);
+        await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        return result;
+        return Results.Ok(new ClientLoginRequestResponse(request.Id, LoginRequestLifecycle.WireStatus(LoginRequestStatus.Pending), now));
     }
 
-    private static async Task<IResult> CreateIfAllowedAsync(HttpContext http, AppDbContext db, int pcId, DateTimeOffset now, CancellationToken ct)
+    // Reads only. A session counts as holding the PC only while it is unexpired (or paused, which only a lock does).
+    private static async Task<LoginRequestState> ReadStateAsync(AppDbContext db, int pcId, DateTimeOffset now, CancellationToken ct)
     {
-        // Asking again while one is pending returns that request, without a new row and without the cooldown.
         var pending = await db.LoginRequests
             .AsNoTracking()
             .Where(r => r.PcId == pcId && r.Status == LoginRequestStatus.Pending)
             .Select(r => new { r.Id, r.RequestedAtUtc })
             .FirstOrDefaultAsync(ct);
-        if (pending is not null)
-        {
-            return Results.Ok(new ClientLoginRequestResponse(pending.Id, LoginRequestLifecycle.WireStatus(LoginRequestStatus.Pending), pending.RequestedAtUtc));
-        }
 
         var pc = await db.Pcs
             .AsNoTracking()
             .Where(p => p.Id == pcId)
             .Select(p => new { p.Name, p.LockedAtUtc })
             .FirstOrDefaultAsync(ct);
-        if (pc is null)
-        {
-            return NotRegistered();
-        }
 
-        if (pc.LockedAtUtc is not null)
-        {
-            return LockedByAdministrator();
-        }
-
-        // Expired sessions were closed above, so any session still open holds the PC.
-        if (await db.PcSessions.AnyAsync(s => s.PcId == pcId && s.EndedAtUtc == null, ct))
-        {
-            return PcEndpoints.ConflictResponse(InUseMessage);
-        }
+        var isInUse = await db.PcSessions.AnyAsync(
+            s => s.PcId == pcId && s.EndedAtUtc == null && (s.PausedAtUtc != null || s.ExpiresAtUtc == null || s.ExpiresAtUtc > now),
+            ct);
 
         var latestRequestedAt = await db.LoginRequests
             .AsNoTracking()
@@ -111,21 +128,45 @@ public static partial class ClientEndpoints
             .OrderByDescending(r => r.RequestedAtUtc)
             .Select(r => (DateTimeOffset?)r.RequestedAtUtc)
             .FirstOrDefaultAsync(ct);
-        if (latestRequestedAt is { } last && LoginRequestLifecycle.CooldownSecondsLeft(last, now) is { } seconds)
+
+        return new LoginRequestState(
+            pending is null ? null : new ClientLoginRequestResponse(pending.Id, LoginRequestLifecycle.WireStatus(LoginRequestStatus.Pending), pending.RequestedAtUtc),
+            pc?.Name,
+            pc?.LockedAtUtc is not null,
+            isInUse,
+            latestRequestedAt);
+    }
+
+    // The answer when no request should be stored: the pending one, or the refusal. Null when a new request may be stored.
+    private static IResult? DecideWithoutInsert(HttpContext http, LoginRequestState state, DateTimeOffset now)
+    {
+        if (state.Pending is { } pending)
+        {
+            // Asking again while one is pending returns that request, without a new row and without the cooldown.
+            return Results.Ok(pending);
+        }
+
+        if (state.PcName is null)
+        {
+            return NotRegistered();
+        }
+
+        if (state.IsLocked)
+        {
+            return LockedByAdministrator();
+        }
+
+        if (state.IsInUse)
+        {
+            return PcEndpoints.ConflictResponse(InUseMessage);
+        }
+
+        if (state.LatestRequestedAt is { } last && LoginRequestLifecycle.CooldownSecondsLeft(last, now) is { } seconds)
         {
             return CooldownResponse(http, seconds);
         }
 
-        var request = new LoginRequest
-        {
-            PcId = pcId,
-            PcName = pc.Name,
-            RequestedAtUtc = now,
-            Status = LoginRequestStatus.Pending,
-        };
-        db.LoginRequests.Add(request);
-        await db.SaveChangesAsync(ct);
-        return Results.Ok(new ClientLoginRequestResponse(request.Id, LoginRequestLifecycle.WireStatus(LoginRequestStatus.Pending), now));
+        return null;
     }
 
     // Only this PC's pending request changes. A PC with nothing pending gets the same 204.
@@ -151,8 +192,8 @@ public static partial class ClientEndpoints
         return Results.NoContent();
     }
 
-    // This PC's most recent request, while it is pending or was decided within the report window. Null otherwise.
-    // Only this PC's own requests are ever read, and the query uses the index on PcId and RequestedAtUtc.
+    // This PC's most recent request, while it is pending, or was decided within the report window and, for an approved one,
+    // its session is still open or never ended. Null otherwise. Only this PC's own requests are read, through the PcId index.
     private static async Task<HeartbeatLoginRequest?> HeartbeatLoginRequestAsync(AppDbContext db, int pcId, DateTimeOffset now, CancellationToken ct)
     {
         var latest = await db.LoginRequests
@@ -160,7 +201,15 @@ public static partial class ClientEndpoints
             .Where(r => r.PcId == pcId)
             .OrderByDescending(r => r.RequestedAtUtc)
             .ThenByDescending(r => r.Id)
-            .Select(r => new { r.Id, r.Status, r.Reason, r.DecidedAtUtc })
+            .Select(r => new
+            {
+                r.Id,
+                r.Status,
+                r.Reason,
+                r.DecidedAtUtc,
+                // An approved request is done once the session it opened has ended, however it ended.
+                SessionEnded = db.PcSessions.Any(s => s.LoginRequestId == r.Id && s.EndedAtUtc != null),
+            })
             .FirstOrDefaultAsync(ct);
         if (latest is null)
         {
@@ -168,7 +217,9 @@ public static partial class ClientEndpoints
         }
 
         var isReported = latest.Status == LoginRequestStatus.Pending
-            || (latest.DecidedAtUtc is { } decidedAt && LoginRequestLifecycle.IsDecisionReported(decidedAt, now));
+            || (latest.DecidedAtUtc is { } decidedAt
+                && LoginRequestLifecycle.IsDecisionReported(decidedAt, now)
+                && !(latest.Status == LoginRequestStatus.Approved && latest.SessionEnded));
         return isReported
             ? new HeartbeatLoginRequest(latest.Id, LoginRequestLifecycle.WireStatus(latest.Status), latest.Reason)
             : null;

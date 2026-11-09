@@ -101,6 +101,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             // At most one active (not ended) session per PC, enforced by the database.
             entity.HasIndex(s => s.PcId).IsUnique().HasFilter("\"EndedAtUtc\" IS NULL");
             entity.HasIndex(s => s.UserAccountId);
+            // Finds the session an approved login request opened, to know whether it has ended.
+            entity.HasIndex(s => s.LoginRequestId);
         });
 
         modelBuilder.Entity<ScreenViewEvent>(entity =>

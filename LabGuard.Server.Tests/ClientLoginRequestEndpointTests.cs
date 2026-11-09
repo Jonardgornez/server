@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using LabGuard.Server.Data;
+using LabGuard.Server.Sessions;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -525,6 +526,110 @@ public class ClientLoginRequestEndpointTests
         var stored = await StoredRequestAsync(app, id);
         Assert.Equal(LoginRequestStatus.Cancelled, stored.Status);
         Assert.Equal("pc-removed", stored.Reason);
+    }
+
+    // A session that has run out but was never closed. Creating a request must not close it on a refusal.
+    private static async Task<int> AddExpiredSessionAsync(TestApp app, TestPc pc)
+    {
+        var now = app.Time.GetUtcNow();
+        return await app.WithDbAsync(async db =>
+        {
+            var session = new PcSession
+            {
+                PcId = pc.Id,
+                PcName = "PC-01",
+                UserAccountId = 1,
+                Username = "student",
+                StartedAtUtc = now.AddHours(-1),
+                ExpiresAtUtc = now.AddMinutes(-1),
+                DefaultTimeMinutes = 60,
+            };
+            db.PcSessions.Add(session);
+            await db.SaveChangesAsync();
+            return session.Id;
+        });
+    }
+
+    [Fact]
+    public async Task CreateLoginRequest_ReturningThePendingOne_DoesNotCloseAnExpiredSession()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await CreatedRequestIdAsync(client, pc);
+        var sessionId = await AddExpiredSessionAsync(app, pc);
+
+        var again = await CreateRequestAsync(client, pc);
+
+        Assert.Equal(id, (await JsonOf(again)).GetProperty("id").GetInt32());
+        var session = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.Id == sessionId));
+        Assert.Null(session.EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task CreateLoginRequest_RefusedByTheCooldown_DoesNotCloseAnExpiredSession()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await CreatedRequestIdAsync(client, pc);
+        await CancelRequestAsync(client, pc);
+        var sessionId = await AddExpiredSessionAsync(app, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(10));
+
+        var limited = await CreateRequestAsync(client, pc);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
+        var session = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.Id == sessionId));
+        Assert.Null(session.EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task CreateLoginRequest_AfterTheSessionRanOut_StoresARequestAndClosesIt()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var sessionId = await AddExpiredSessionAsync(app, pc);
+
+        var response = await CreateRequestAsync(client, pc);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var session = await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync(s => s.Id == sessionId));
+        Assert.Equal(SessionLifecycle.TimeExpired, session.EndReason);
+    }
+
+    [Fact]
+    public async Task Heartbeat_StopsReportingAnApprovedRequest_WhenItsSessionIsLoggedOut()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await CreatedRequestIdAsync(client, pc);
+        Assert.Equal(HttpStatusCode.OK, (await admin.PostAsJsonAsync($"/api/login-requests/{id}/approve", new { time = new { mode = "open-time" } })).StatusCode);
+        Assert.Equal("approved", (await HeartbeatLoginRequestAsync(client, pc))!.Value.GetProperty("status").GetString());
+
+        Assert.Equal(HttpStatusCode.NoContent, (await PostAsync(client, "/api/client/logout", pc.Token)).StatusCode);
+
+        Assert.Null(await HeartbeatLoginRequestAsync(client, pc));
+    }
+
+    [Fact]
+    public async Task Heartbeat_StopsReportingAnApprovedRequest_WhenItsTimeRunsOut()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await CreatedRequestIdAsync(client, pc);
+        Assert.Equal(HttpStatusCode.OK, (await admin.PostAsJsonAsync($"/api/login-requests/{id}/approve", new { time = new { mode = "time-limit", minutes = 1 } })).StatusCode);
+        app.Time.Advance(TimeSpan.FromMinutes(2));
+
+        var body = await JsonOf(await HeartbeatAsync(client, pc));
+
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("session").ValueKind);
+        Assert.Null(await HeartbeatLoginRequestAsync(client, pc));
     }
 
     // Schema

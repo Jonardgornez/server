@@ -17,9 +17,11 @@ internal static class LoginRequestApproval
     private const string NotFoundMessage = "Login request not found.";
     private const string AlreadyDecidedMessage = "This request has already been decided.";
     private const string OpenFailedMessage = "Couldn't open that session. Try again.";
+    private const string UnknownMessage = "This request came from an older version and can't be approved. Ask the student to request again.";
 
     private sealed record Refusal(string Reason, string Message);
 
+    private static readonly Refusal UnknownRefusal = new(LoginRequestLifecycle.PcUnknown, UnknownMessage);
     private static readonly Refusal RemovedRefusal = new(
         LoginRequestLifecycle.PcRemoved,
         "That PC is no longer registered, so the request was closed.");
@@ -85,10 +87,13 @@ internal static class LoginRequestApproval
             return AlreadyDecided();
         }
 
-        // A request with no PC (the samples) or whose PC has gone is closed like any other refusal.
-        var pc = request.PcId is { } pcId
-            ? await db.Pcs.AsNoTracking().FirstOrDefaultAsync(p => p.Id == pcId, ct)
-            : null;
+        // A request with no PC predates the PC link (or is a development sample), so it can't be matched to any PC.
+        if (request.PcId is not { } pcId)
+        {
+            return await CloseAsync(db, transaction, requestId, UnknownRefusal, now, ct);
+        }
+
+        var pc = await db.Pcs.AsNoTracking().FirstOrDefaultAsync(p => p.Id == pcId, ct);
         if (pc is null)
         {
             return await CloseAsync(db, transaction, requestId, RemovedRefusal, now, ct);

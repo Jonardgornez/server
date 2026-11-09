@@ -11,6 +11,8 @@ public static class LoginRequestLifecycle
     public const string PcLocked = "pc-locked";
     public const string PcInUse = "pc-in-use";
     public const string PcRemoved = "pc-removed";
+    // A request with no PC on it, from an older version or a development sample. It can't be approved.
+    public const string PcUnknown = "pc-unknown";
     public const string LoggedIn = "logged-in";
     public const string CancelledByPc = "cancelled-by-pc";
 

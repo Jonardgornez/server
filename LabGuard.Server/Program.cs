@@ -83,6 +83,10 @@ using (var scope = app.Services.CreateScope())
         db,
         services.GetRequiredService<TimeProvider>().GetUtcNow(),
         CancellationToken.None);
+    await LoginRequestRetention.DeleteDecidedOlderThanAsync(
+        db,
+        services.GetRequiredService<TimeProvider>().GetUtcNow(),
+        CancellationToken.None);
 }
 
 app.UseMiddleware<ChannelGuard>();
