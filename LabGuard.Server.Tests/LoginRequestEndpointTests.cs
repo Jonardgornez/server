@@ -220,6 +220,40 @@ public class LoginRequestEndpointTests
         Assert.Equal(app.Time.GetUtcNow().AddMinutes(-3).ToUnixTimeMilliseconds(), entry.GetProperty("requestedAt").GetDateTimeOffset().ToUnixTimeMilliseconds());
     }
 
+    [Fact]
+    public async Task List_MovesAPendingRequestTenMinutesOldToHistoryAsExpired()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        var requestedAt = app.Time.GetUtcNow().AddMinutes(-10);
+        var id = await AddAsync(app, requestedAgo: TimeSpan.FromMinutes(10));
+
+        var body = await JsonOf(await client.GetAsync("/api/login-requests"));
+
+        Assert.Equal(0, body.GetProperty("pending").GetArrayLength());
+        var history = body.GetProperty("history");
+        Assert.Equal(1, history.GetArrayLength());
+        Assert.Equal(id, history[0].GetProperty("id").GetInt32());
+        Assert.Equal("cancelled", history[0].GetProperty("status").GetString());
+        Assert.Equal("expired", history[0].GetProperty("reason").GetString());
+        Assert.Equal(requestedAt.AddMinutes(10).ToUnixTimeMilliseconds(), history[0].GetProperty("decidedAt").GetDateTimeOffset().ToUnixTimeMilliseconds());
+        Assert.Equal(LoginRequestStatus.Cancelled, (await StoredAsync(app, id)).Status);
+    }
+
+    [Fact]
+    public async Task List_KeepsAPendingRequestNineMinutesFiftyNineSecondsOldAsPending()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        var id = await AddAsync(app, requestedAgo: TimeSpan.FromSeconds(599));
+
+        var body = await JsonOf(await client.GetAsync("/api/login-requests"));
+
+        Assert.Equal([id], Ids(body.GetProperty("pending")));
+        Assert.Equal(0, body.GetProperty("history").GetArrayLength());
+        Assert.Equal(LoginRequestStatus.Pending, (await StoredAsync(app, id)).Status);
+    }
+
     // Approve
 
     [Fact]

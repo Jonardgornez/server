@@ -18,6 +18,7 @@ public class LoginRequestApprovalTests
     private const string InUseMessage = "Someone is already using that PC, so the request was closed.";
     private const string AlreadyDecidedMessage = "This request has already been decided.";
     private const string OpenFailedMessage = "Couldn't open that session. Try again.";
+    private const string ExpiredMessage = "This request expired. Ask the student to request again.";
     private static readonly object ThirtyMinutes = new { mode = "time-limit", minutes = 30 };
     private static readonly object OpenTime = new { mode = "open-time" };
 
@@ -273,6 +274,47 @@ public class LoginRequestApprovalTests
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Equal(AlreadyDecidedMessage, (await JsonOf(response)).GetProperty("error").GetString());
         Assert.Equal(LoginRequestStatus.Cancelled, (await StoredRequestAsync(app, requestId)).Status);
+        Assert.Empty(await SessionsOfAsync(app, pc.Id));
+    }
+
+    [Fact]
+    public async Task Approve_AStaleRequest_Returns409ExpiredStoresItExpiredAndOpensNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pcClient = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var requestId = await RequestAsync(pcClient, pc);
+        var requestedAt = app.Time.GetUtcNow();
+        app.Time.Advance(TimeSpan.FromMinutes(10));
+
+        var response = await ApproveAsync(admin, requestId, ThirtyMinutes);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(ExpiredMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        var stored = await StoredRequestAsync(app, requestId);
+        Assert.Equal(LoginRequestStatus.Cancelled, stored.Status);
+        Assert.Equal("expired", stored.Reason);
+        Assert.Null(stored.ApprovedMinutes);
+        Assert.Equal(requestedAt.AddMinutes(10).ToUnixTimeMilliseconds(), stored.DecidedAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.Empty(await SessionsOfAsync(app, pc.Id));
+    }
+
+    [Fact]
+    public async Task Approve_ARequestTheListAlreadyExpired_ReturnsTheExpiredMessage()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pcClient = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var requestId = await RequestAsync(pcClient, pc);
+        app.Time.Advance(TimeSpan.FromMinutes(10));
+        Assert.Equal(HttpStatusCode.OK, (await admin.GetAsync("/api/login-requests")).StatusCode);
+
+        var response = await ApproveAsync(admin, requestId, ThirtyMinutes);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(ExpiredMessage, (await JsonOf(response)).GetProperty("error").GetString());
         Assert.Empty(await SessionsOfAsync(app, pc.Id));
     }
 

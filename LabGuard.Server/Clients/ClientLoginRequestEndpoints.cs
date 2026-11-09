@@ -82,6 +82,7 @@ public static partial class ClientEndpoints
     {
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await SessionLifecycle.EndExpiredForPcAsync(db, pcId, now, ct);
+        await LoginRequestLifecycle.ExpireStaleForPcAsync(db, pcId, now, ct);
 
         var state = await ReadStateAsync(db, pcId, now, ct);
         if (DecideWithoutInsert(http, state, now) is { } answer)
@@ -104,11 +105,14 @@ public static partial class ClientEndpoints
     }
 
     // Reads only. A session counts as holding the PC only while it is unexpired (or paused, which only a lock does).
+    // A pending request past its lifetime is treated as absent, so the create writes its expiry and stores a new one.
     private static async Task<LoginRequestState> ReadStateAsync(AppDbContext db, int pcId, DateTimeOffset now, CancellationToken ct)
     {
         var pending = await db.LoginRequests
             .AsNoTracking()
-            .Where(r => r.PcId == pcId && r.Status == LoginRequestStatus.Pending)
+            .Where(r => r.PcId == pcId
+                && r.Status == LoginRequestStatus.Pending
+                && r.RequestedAtUtc > now - LoginRequestLifecycle.PendingLifetime)
             .Select(r => new { r.Id, r.RequestedAtUtc })
             .FirstOrDefaultAsync(ct);
 
@@ -206,6 +210,7 @@ public static partial class ClientEndpoints
                 r.Id,
                 r.Status,
                 r.Reason,
+                r.RequestedAtUtc,
                 r.DecidedAtUtc,
                 // An approved request is done once the session it opened has ended, however it ended.
                 SessionEnded = db.PcSessions.Any(s => s.LoginRequestId == r.Id && s.EndedAtUtc != null),
@@ -216,12 +221,19 @@ public static partial class ClientEndpoints
             return null;
         }
 
-        var isReported = latest.Status == LoginRequestStatus.Pending
-            || (latest.DecidedAtUtc is { } decidedAt
-                && LoginRequestLifecycle.IsDecisionReported(decidedAt, now)
-                && !(latest.Status == LoginRequestStatus.Approved && latest.SessionEnded));
+        // A pending request past its lifetime is reported as expired, from the stored row, without a write on every heartbeat.
+        // The stored row is closed by the next list, create or approve.
+        var isExpired = latest.Status == LoginRequestStatus.Pending && LoginRequestLifecycle.IsExpired(latest.RequestedAtUtc, now);
+        var status = isExpired ? LoginRequestStatus.Cancelled : latest.Status;
+        var reason = isExpired ? LoginRequestLifecycle.Expired : latest.Reason;
+        var decidedAt = isExpired ? LoginRequestLifecycle.ExpiredAt(latest.RequestedAtUtc) : latest.DecidedAtUtc;
+
+        var isReported = status == LoginRequestStatus.Pending
+            || (decidedAt is { } decided
+                && LoginRequestLifecycle.IsDecisionReported(decided, now)
+                && !(status == LoginRequestStatus.Approved && latest.SessionEnded));
         return isReported
-            ? new HeartbeatLoginRequest(latest.Id, LoginRequestLifecycle.WireStatus(latest.Status), latest.Reason)
+            ? new HeartbeatLoginRequest(latest.Id, LoginRequestLifecycle.WireStatus(status), reason)
             : null;
     }
 

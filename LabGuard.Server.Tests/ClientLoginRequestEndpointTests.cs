@@ -252,6 +252,60 @@ public class ClientLoginRequestEndpointTests
         Assert.Single(await RequestsOfAsync(app, pc.Id));
     }
 
+    [Fact]
+    public async Task CreateLoginRequest_At959_ReturnsThePendingOneWithoutANewRow()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await CreatedRequestIdAsync(client, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(599));
+
+        var again = await CreateRequestAsync(client, pc);
+
+        Assert.Equal(HttpStatusCode.OK, again.StatusCode);
+        Assert.Equal(id, (await JsonOf(again)).GetProperty("id").GetInt32());
+        Assert.Equal(LoginRequestStatus.Pending, (await StoredRequestAsync(app, id)).Status);
+        Assert.Single(await RequestsOfAsync(app, pc.Id));
+    }
+
+    [Fact]
+    public async Task CreateLoginRequest_AfterThePendingOneExpired_ExpiresItAndStoresANewPending()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var expiredId = await CreatedRequestIdAsync(client, pc);
+        var requestedAt = app.Time.GetUtcNow();
+        app.Time.Advance(TimeSpan.FromMinutes(10));
+
+        var newId = await CreatedRequestIdAsync(client, pc);
+
+        Assert.NotEqual(expiredId, newId);
+        var expired = await StoredRequestAsync(app, expiredId);
+        Assert.Equal(LoginRequestStatus.Cancelled, expired.Status);
+        Assert.Equal("expired", expired.Reason);
+        Assert.Equal(requestedAt.AddMinutes(10).ToUnixTimeMilliseconds(), expired.DecidedAtUtc!.Value.ToUnixTimeMilliseconds());
+        var created = await StoredRequestAsync(app, newId);
+        Assert.Equal(LoginRequestStatus.Pending, created.Status);
+        Assert.Null(created.DecidedAtUtc);
+    }
+
+    [Fact]
+    public async Task CreateLoginRequest_ExpiresOnlyThisPcsStalePendingRequest()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var requesting = await AddPcAsync(app, "PC-01");
+        var other = await AddPcAsync(app, "PC-02");
+        var otherId = await CreatedRequestIdAsync(client, other);
+        app.Time.Advance(TimeSpan.FromMinutes(10));
+
+        await CreatedRequestIdAsync(client, requesting);
+
+        Assert.Equal(LoginRequestStatus.Pending, (await StoredRequestAsync(app, otherId)).Status);
+    }
+
     [Theory]
     [InlineData(CreatePath, null)]
     [InlineData(CreatePath, "nope")]
@@ -442,6 +496,28 @@ public class ClientLoginRequestEndpointTests
         Assert.Equal(id, report!.Value.GetProperty("id").GetInt32());
         Assert.Equal("cancelled", report.Value.GetProperty("status").GetString());
         Assert.Equal("cancelled-by-pc", report.Value.GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task Heartbeat_ReportsAPendingRequestPastItsLifetimeAsExpired_ForTwoMinutesOnly()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await CreatedRequestIdAsync(client, pc);
+
+        app.Time.Advance(TimeSpan.FromSeconds(599));
+        var justBefore = await HeartbeatLoginRequestAsync(client, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(1));
+        var atTenMinutes = await HeartbeatLoginRequestAsync(client, pc);
+        app.Time.Advance(TimeSpan.FromMinutes(2));
+        var afterWindow = await HeartbeatLoginRequestAsync(client, pc);
+
+        Assert.Equal("pending", justBefore!.Value.GetProperty("status").GetString());
+        Assert.Equal(id, atTenMinutes!.Value.GetProperty("id").GetInt32());
+        Assert.Equal("cancelled", atTenMinutes.Value.GetProperty("status").GetString());
+        Assert.Equal("expired", atTenMinutes.Value.GetProperty("reason").GetString());
+        Assert.Null(afterWindow);
     }
 
     [Fact]

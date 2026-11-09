@@ -18,20 +18,26 @@ internal static class LoginRequestApproval
     private const string AlreadyDecidedMessage = "This request has already been decided.";
     private const string OpenFailedMessage = "Couldn't open that session. Try again.";
     private const string UnknownMessage = "This request came from an older version and can't be approved. Ask the student to request again.";
+    private const string ExpiredMessage = "This request expired. Ask the student to request again.";
 
-    private sealed record Refusal(string Reason, string Message);
+    private sealed record Refusal(LoginRequestStatus Status, string Reason, string Message);
 
-    private static readonly Refusal UnknownRefusal = new(LoginRequestLifecycle.PcUnknown, UnknownMessage);
+    private static readonly Refusal ExpiredRefusal = new(LoginRequestStatus.Cancelled, LoginRequestLifecycle.Expired, ExpiredMessage);
+    private static readonly Refusal UnknownRefusal = new(LoginRequestStatus.Denied, LoginRequestLifecycle.PcUnknown, UnknownMessage);
     private static readonly Refusal RemovedRefusal = new(
+        LoginRequestStatus.Denied,
         LoginRequestLifecycle.PcRemoved,
         "That PC is no longer registered, so the request was closed.");
     private static readonly Refusal OfflineRefusal = new(
+        LoginRequestStatus.Denied,
         LoginRequestLifecycle.PcOffline,
         "That PC is offline, so the request was closed.");
     private static readonly Refusal LockedRefusal = new(
+        LoginRequestStatus.Denied,
         LoginRequestLifecycle.PcLocked,
         "That PC is locked. Unlock it first, then ask the student to request again.");
     private static readonly Refusal InUseRefusal = new(
+        LoginRequestStatus.Denied,
         LoginRequestLifecycle.PcInUse,
         "Someone is already using that PC, so the request was closed.");
 
@@ -84,7 +90,14 @@ internal static class LoginRequestApproval
 
         if (request.Status != LoginRequestStatus.Pending)
         {
-            return AlreadyDecided();
+            // A request the list already expired reads as expired, not as an ordinary decision.
+            return request.Reason == LoginRequestLifecycle.Expired ? Conflict(ExpiredMessage) : AlreadyDecided();
+        }
+
+        // Checked before the PC, so a stale request is never opened, whatever state the PC is in.
+        if (LoginRequestLifecycle.IsExpired(request.RequestedAtUtc, now))
+        {
+            return await CloseAsync(db, transaction, requestId, ExpiredRefusal, LoginRequestLifecycle.ExpiredAt(request.RequestedAtUtc), ct);
         }
 
         // A request with no PC predates the PC link (or is a development sample), so it can't be matched to any PC.
@@ -154,16 +167,16 @@ internal static class LoginRequestApproval
         IDbContextTransaction transaction,
         int requestId,
         Refusal refusal,
-        DateTimeOffset now,
+        DateTimeOffset decidedAt,
         CancellationToken ct)
     {
         var closed = await db.LoginRequests
             .Where(r => r.Id == requestId && r.Status == LoginRequestStatus.Pending)
             .ExecuteUpdateAsync(setters => setters
-                .SetProperty(r => r.Status, LoginRequestStatus.Denied)
+                .SetProperty(r => r.Status, refusal.Status)
                 .SetProperty(r => r.ApprovedMinutes, (int?)null)
                 .SetProperty(r => r.Reason, refusal.Reason)
-                .SetProperty(r => r.DecidedAtUtc, now), ct);
+                .SetProperty(r => r.DecidedAtUtc, decidedAt), ct);
         if (closed == 0)
         {
             return AlreadyDecided();

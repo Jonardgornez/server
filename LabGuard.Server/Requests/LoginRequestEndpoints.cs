@@ -42,8 +42,11 @@ public static class LoginRequestEndpoints
         return app;
     }
 
-    private static async Task<IResult> ListAsync(AppDbContext db, CancellationToken cancellationToken)
+    private static async Task<IResult> ListAsync(AppDbContext db, TimeProvider clock, CancellationToken cancellationToken)
     {
+        // Expired requests are closed first, so they appear in history and never as pending.
+        await LoginRequestLifecycle.ExpireStaleAsync(db, clock.GetUtcNow(), cancellationToken);
+
         var pending = await db.LoginRequests
             .AsNoTracking()
             .Where(r => r.Status == LoginRequestStatus.Pending)

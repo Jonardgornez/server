@@ -36,6 +36,21 @@ public class LoginRequestLifecycleTests
     }
 
     [Theory]
+    [InlineData(599, false)]
+    [InlineData(600, true)]
+    [InlineData(601, true)]
+    public void IsExpired_IsTrueFromExactlyTenMinutesAfterTheRequest(int secondsOld, bool expected)
+    {
+        Assert.Equal(expected, LoginRequestLifecycle.IsExpired(Requested, Requested.AddSeconds(secondsOld)));
+    }
+
+    [Fact]
+    public void ExpiredAt_IsTenMinutesAfterTheRequest()
+    {
+        Assert.Equal(Requested.AddMinutes(10), LoginRequestLifecycle.ExpiredAt(Requested));
+    }
+
+    [Theory]
     [InlineData(LoginRequestStatus.Pending, "pending")]
     [InlineData(LoginRequestStatus.Approved, "approved")]
     [InlineData(LoginRequestStatus.Denied, "denied")]
