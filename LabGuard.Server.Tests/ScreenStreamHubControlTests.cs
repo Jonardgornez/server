@@ -201,6 +201,34 @@ public class ScreenStreamHubControlTests
     }
 
     [Fact]
+    public async Task ConfirmControl_FromANotifiedView_RecordsTheNotifiedMode()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (viewer, _) = await OpenAsync(hub, app, mode: ScreenProtocol.NotifiedMode);
+        var (pc, _) = await AttachAsync(hub, viewer);
+        await hub.RequestControlAsync(viewer, isServerPc: false);
+
+        await hub.ConfirmControlAsync(viewer, pc);
+
+        Assert.Equal(ScreenProtocol.NotifiedMode, Assert.Single(await ControlRowsAsync(app)).Mode);
+    }
+
+    [Fact]
+    public async Task ConfirmControl_FromAnAnonymousView_RecordsTheAnonymousMode()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (viewer, _) = await OpenAsync(hub, app, mode: ScreenProtocol.AnonymousMode);
+        var (pc, _) = await AttachAsync(hub, viewer);
+        await hub.RequestControlAsync(viewer, isServerPc: false);
+
+        await hub.ConfirmControlAsync(viewer, pc);
+
+        Assert.Equal(ScreenProtocol.AnonymousMode, Assert.Single(await ControlRowsAsync(app)).Mode);
+    }
+
+    [Fact]
     public async Task ConfirmControl_WithoutARequest_IsIgnored()
     {
         using var app = new TestApp();

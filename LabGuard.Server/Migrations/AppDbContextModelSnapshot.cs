@@ -335,6 +335,11 @@ namespace LabGuard.Server.Migrations
                     b.Property<long?>("EndedUtc")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("PcName")
                         .IsRequired()
                         .HasMaxLength(32)

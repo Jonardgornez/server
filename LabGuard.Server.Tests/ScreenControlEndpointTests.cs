@@ -150,12 +150,27 @@ public class ScreenControlEndpointTests
         var row = Assert.Single(await ControlRowsAsync(app));
         Assert.Equal(TestApp.Username, row.AdminUserName);
         Assert.Equal("Lab-Desk-3", row.PcName);
+        Assert.Equal(ScreenProtocol.NotifiedMode, row.Mode);
         Assert.Null(row.EndedUtc);
 
         // Frames keep flowing while control is on.
         await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("during-control"));
         var frame = await LiveViewClient.ReceiveAsync(view.Browser);
         Assert.Equal("during-control", LiveViewClient.LabelOf(frame.Payload, 14));
+        await FinishAsync(app, view);
+    }
+
+    [Fact]
+    public async Task ControlOn_FromAnAnonymousView_IsAuditedAsAnonymous()
+    {
+        using var app = new TestApp();
+        var view = await OpenViewAsync(app, query: "?mode=anonymous");
+        using var pc = await ConnectPcAsync(app, view);
+
+        await ControlOnAsync(view, pc);
+
+        var row = Assert.Single(await ControlRowsAsync(app));
+        Assert.Equal(ScreenProtocol.AnonymousMode, row.Mode);
         await FinishAsync(app, view);
     }
 

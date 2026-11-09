@@ -254,7 +254,7 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         try
         {
             using var timeout = new CancellationTokenSource(ScreenProtocol.ControlStartTimeout);
-            auditId = await controlAudit.StartAsync(viewer.AdminUserName, viewer.PcName, clock.GetUtcNow(), timeout.Token);
+            auditId = await controlAudit.StartAsync(viewer.AdminUserName, viewer.PcName, viewer.Mode, clock.GetUtcNow(), timeout.Token);
         }
         catch (Exception)
         {
@@ -464,8 +464,8 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         await ExpireRequestAsync(viewer, requestId);
     }
 
-    // The server's own PC is refused before anything else is checked. Either view mode may take control: the PC always shows its
-    // controlling notice while control is on, so an anonymous view becomes visible on the PC for exactly that time.
+    // The server's own PC is refused before anything else is checked. Either view mode may take control: a notified view's PC
+    // shows its controlling notice, while an anonymous view's control is silent on the PC. Every control period is audited with its mode.
     private static string? ControlRefusalFor(bool isServerPc) =>
         isServerPc ? ControlReasons.ServerPc : null;
 

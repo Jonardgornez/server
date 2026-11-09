@@ -28,17 +28,18 @@ public class ScreenControlAuditTests
         app.WithDbAsync(db => db.ScreenControlEvents.AsNoTracking().SingleAsync(e => e.Id == id));
 
     [Fact]
-    public async Task StartAsync_RecordsTheAdminPcAndStart_WithoutAnEnd()
+    public async Task StartAsync_RecordsTheAdminPcModeAndStart_WithoutAnEnd()
     {
         using var app = new TestApp();
         var audit = app.Services.GetRequiredService<ScreenControlAudit>();
         var startedAt = app.Time.GetUtcNow();
 
-        var id = await audit.StartAsync("tester", "Lab-Desk-3", startedAt, CancellationToken.None);
+        var id = await audit.StartAsync("tester", "Lab-Desk-3", ScreenProtocol.AnonymousMode, startedAt, CancellationToken.None);
 
         var stored = await StoredAsync(app, id);
         Assert.Equal("tester", stored.AdminUserName);
         Assert.Equal("Lab-Desk-3", stored.PcName);
+        Assert.Equal(ScreenProtocol.AnonymousMode, stored.Mode);
         Assert.Equal(startedAt.ToUnixTimeMilliseconds(), stored.StartedUtc.ToUnixTimeMilliseconds());
         Assert.Null(stored.EndedUtc);
     }

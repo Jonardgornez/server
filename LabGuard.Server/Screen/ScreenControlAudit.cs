@@ -10,7 +10,7 @@ public sealed class ScreenControlAudit(IServiceScopeFactory scopes, ILogger<Scre
     private static readonly TimeSpan EndRetryDelay = TimeSpan.FromMilliseconds(250);
     private const int EndAttempts = 2;
 
-    public async Task<int> StartAsync(string adminUserName, string pcName, DateTimeOffset startedAt, CancellationToken cancellationToken)
+    public async Task<int> StartAsync(string adminUserName, string pcName, string mode, DateTimeOffset startedAt, CancellationToken cancellationToken)
     {
         await using var scope = scopes.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -18,6 +18,7 @@ public sealed class ScreenControlAudit(IServiceScopeFactory scopes, ILogger<Scre
         {
             AdminUserName = adminUserName,
             PcName = pcName,
+            Mode = mode,
             StartedUtc = startedAt,
         };
         db.ScreenControlEvents.Add(entry);

@@ -118,6 +118,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         {
             entity.Property(e => e.AdminUserName).HasMaxLength(64).IsRequired();
             entity.Property(e => e.PcName).HasMaxLength(32).IsRequired();
+            entity.Property(e => e.Mode).HasMaxLength(16).IsRequired();
             entity.Property(e => e.StartedUtc).HasConversion(unixMilliseconds);
             entity.Property(e => e.EndedUtc).HasConversion(unixMilliseconds);
         });
