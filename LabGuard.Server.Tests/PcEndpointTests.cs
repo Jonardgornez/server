@@ -163,7 +163,7 @@ public class PcEndpointTests
     }
 
     [Fact]
-    public async Task List_IsOrderedByNameIgnoringCase()
+    public async Task List_IsOrderedByRegistration_NewestLast()
     {
         using var app = new TestApp();
         using var client = await SignedInAsync(app);
@@ -173,7 +173,7 @@ public class PcEndpointTests
 
         var names = (await JsonOf(await client.GetAsync("/api/pcs"))).EnumerateArray().Select(e => e.GetProperty("name").GetString()!).ToArray();
 
-        Assert.Equal(["Lab-1", "PC-02", "pc-10"], names);
+        Assert.Equal(["pc-10", "PC-02", "Lab-1"], names);
     }
 
     [Fact]

@@ -69,8 +69,8 @@ public static partial class PcEndpoints
     {
         var pcs = await db.Pcs
             .AsNoTracking()
-            .OrderBy(p => p.Name)
-            .ThenBy(p => p.Id)
+            // Registration order: the Id grows with each new PC, so a newly added PC appears last.
+            .OrderBy(p => p.Id)
             .ToListAsync(cancellationToken);
 
         // At most one active session per PC (unique index).
