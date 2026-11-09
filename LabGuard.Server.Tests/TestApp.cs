@@ -32,14 +32,12 @@ public sealed class TestApp : WebApplicationFactory<Program>
     private readonly string _channelPath = Path.Combine(Path.GetTempPath(), $"lykantra-test-{Guid.NewGuid():N}.pc-channel.dat");
     private readonly string _environment;
 
-    private readonly bool _seedSampleLoginRequests;
 
     private readonly Action<IServiceCollection>? _configureServices;
 
-    public TestApp(string environment = "Development", bool seedSampleLoginRequests = false, Action<IServiceCollection>? configureServices = null)
+    public TestApp(string environment = "Development", Action<IServiceCollection>? configureServices = null)
     {
         _environment = environment;
-        _seedSampleLoginRequests = seedSampleLoginRequests;
         _configureServices = configureServices;
     }
 
@@ -128,7 +126,6 @@ public sealed class TestApp : WebApplicationFactory<Program>
                 [PcChannelStore.FileConfigurationKey] = _channelPath,
                 ["Seed:AdminUsername"] = Username,
                 ["Seed:AdminPassword"] = Password,
-                ["Seed:SampleLoginRequests"] = _seedSampleLoginRequests ? "true" : "false",
                 ["Screen:AllowedOrigins:0"] = "http://localhost:5173",
                 ["Screen:AllowedOrigins:1"] = "http://localhost:4173",
             }));

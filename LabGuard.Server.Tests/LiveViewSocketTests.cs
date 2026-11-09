@@ -190,7 +190,6 @@ public sealed class LiveViewSocketTests : IAsyncLifetime
                     ["ConnectionStrings:AppDb"] = $"Data Source={Path.Combine(folder, "live.db")}",
                     ["Seed:AdminUsername"] = TestApp.Username,
                     ["Seed:AdminPassword"] = TestApp.Password,
-                    ["Seed:SampleLoginRequests"] = "false",
                     ["Screen:AllowedOrigins:0"] = "http://localhost:5173",
                 }));
         }

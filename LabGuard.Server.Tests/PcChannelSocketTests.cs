@@ -178,7 +178,6 @@ public sealed class PcChannelSocketTests : IAsyncLifetime
                     ["ConnectionStrings:AppDb"] = $"Data Source={Path.Combine(folder, "socket.db")}",
                     ["Seed:AdminUsername"] = TestApp.Username,
                     ["Seed:AdminPassword"] = TestApp.Password,
-                    ["Seed:SampleLoginRequests"] = "false",
                 }));
         }
     }

@@ -66,12 +66,6 @@ using (var scope = app.Services.CreateScope())
         app.Environment,
         services.GetRequiredService<IPasswordHasher<AdminAccount>>(),
         services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(AdminSeeder)));
-    await LoginRequestSeeder.SeedAsync(
-        db,
-        app.Configuration,
-        app.Environment,
-        services.GetRequiredService<TimeProvider>(),
-        services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(LoginRequestSeeder)));
     // No live view survives a restart, so any view row still open from a crash ends now.
     await services.GetRequiredService<ScreenViewAudit>().CloseOrphanedAsync(
         services.GetRequiredService<TimeProvider>().GetUtcNow(),

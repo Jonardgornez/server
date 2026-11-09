@@ -692,92 +692,14 @@ public class LoginRequestEndpointTests
         Assert.Equal(ids.Order(), reported.Order());
     }
 
-    // Development sample requests
-
-    private static Task<List<LoginRequest>> AllRequestsAsync(TestApp app) =>
-        app.WithDbAsync(db => db.LoginRequests.AsNoTracking().OrderBy(r => r.Id).ToListAsync());
+    // Only a real PC creates a request: the server adds no sample requests at startup, even in development.
 
     [Fact]
-    public async Task Seeder_InDevelopmentWhenEnabled_AddsTwoPendingRequests()
-    {
-        using var app = new TestApp(seedSampleLoginRequests: true);
-        using var client = await SignedInAsync(app);
-
-        var requests = await AllRequestsAsync(app);
-
-        Assert.Equal(2, requests.Count);
-        Assert.All(requests, r => Assert.Equal(LoginRequestStatus.Pending, r.Status));
-        var byName = requests.ToDictionary(r => r.PcName);
-        Assert.Equal(app.Time.GetUtcNow().AddMinutes(-1).ToUnixTimeMilliseconds(), byName["PC-11"].RequestedAtUtc.ToUnixTimeMilliseconds());
-        Assert.Equal(app.Time.GetUtcNow().AddMinutes(-3).ToUnixTimeMilliseconds(), byName["PC-03"].RequestedAtUtc.ToUnixTimeMilliseconds());
-
-        var pending = (await JsonOf(await client.GetAsync("/api/login-requests"))).GetProperty("pending");
-        Assert.Equal(["PC-03", "PC-11"], pending.EnumerateArray().Select(e => e.GetProperty("pcName").GetString()!).ToArray());
-    }
-
-    [Fact]
-    public async Task Seeder_WhenPendingRequestsExist_AddsNothing()
-    {
-        using var app = new TestApp(seedSampleLoginRequests: true);
-        _ = app.Services;
-        await AddAsync(app, "PC-50");
-        await app.WithDbAsync(async db =>
-        {
-            db.LoginRequests.RemoveRange(db.LoginRequests.Where(r => r.PcName != "PC-50"));
-            await db.SaveChangesAsync();
-            return 0;
-        });
-
-        using var scope = app.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        await LoginRequestSeeder.SeedAsync(
-            db,
-            app.Services.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>(),
-            app.Services.GetRequiredService<Microsoft.Extensions.Hosting.IHostEnvironment>(),
-            app.Time,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
-
-        Assert.Equal(["PC-50"], (await AllRequestsAsync(app)).Select(r => r.PcName).ToArray());
-    }
-
-    [Fact]
-    public async Task Seeder_WhenOnlyDecidedRequestsExist_StillAddsSamples()
-    {
-        using var app = new TestApp(seedSampleLoginRequests: true);
-        await app.WithDbAsync(async db =>
-        {
-            db.LoginRequests.RemoveRange(db.LoginRequests);
-            await db.SaveChangesAsync();
-            return 0;
-        });
-        await AddAsync(app, "PC-50", status: LoginRequestStatus.Denied);
-
-        using var scope = app.Services.CreateScope();
-        await LoginRequestSeeder.SeedAsync(
-            scope.ServiceProvider.GetRequiredService<AppDbContext>(),
-            app.Services.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>(),
-            app.Services.GetRequiredService<Microsoft.Extensions.Hosting.IHostEnvironment>(),
-            app.Time,
-            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
-
-        Assert.Equal(3, (await AllRequestsAsync(app)).Count);
-    }
-
-    [Fact]
-    public async Task Seeder_WhenDisabled_AddsNothing()
+    public async Task Startup_InDevelopment_AddsNoLoginRequests()
     {
         using var app = new TestApp();
         using var client = await SignedInAsync(app);
 
-        Assert.Empty(await AllRequestsAsync(app));
-    }
-
-    [Fact]
-    public async Task Seeder_InProduction_AddsNothingEvenWhenEnabled()
-    {
-        using var app = new TestApp("Production", seedSampleLoginRequests: true);
-        _ = app.CreateBrowser();
-
-        Assert.Empty(await AllRequestsAsync(app));
+        Assert.Empty(await app.WithDbAsync(db => db.LoginRequests.AsNoTracking().ToListAsync()));
     }
 }
