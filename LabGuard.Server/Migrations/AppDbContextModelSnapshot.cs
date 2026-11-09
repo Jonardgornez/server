@@ -61,9 +61,16 @@ namespace LabGuard.Server.Migrations
                     b.Property<long?>("DecidedAtUtc")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int?>("PcId")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("PcName")
                         .IsRequired()
                         .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
                     b.Property<long>("RequestedAtUtc")
@@ -76,7 +83,14 @@ namespace LabGuard.Server.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("PcId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_LoginRequests_PcId_Pending")
+                        .HasFilter("\"Status\" = 'Pending'");
+
                     b.HasIndex("Status");
+
+                    b.HasIndex("PcId", "RequestedAtUtc");
 
                     b.ToTable("LoginRequests");
                 });
@@ -261,6 +275,9 @@ namespace LabGuard.Server.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<bool>("IsAdminUnlock")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("LoginRequestId")
                         .HasColumnType("INTEGER");
 
                     b.Property<long?>("PausedAtUtc")

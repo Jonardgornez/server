@@ -45,7 +45,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(r => r.RequestedAtUtc).HasConversion(unixMilliseconds);
             entity.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
             entity.Property(r => r.DecidedAtUtc).HasConversion(unixMilliseconds);
+            entity.Property(r => r.Reason).HasMaxLength(32);
             entity.HasIndex(r => r.Status);
+            // The latest request of a PC, for the request cooldown and the heartbeat.
+            entity.HasIndex(r => new { r.PcId, r.RequestedAtUtc });
+            // At most one pending request per PC, enforced by the database. Null PCs (the samples) never collide.
+            entity.HasIndex(r => r.PcId)
+                .IsUnique()
+                .HasFilter("\"Status\" = 'Pending'")
+                .HasDatabaseName("IX_LoginRequests_PcId_Pending");
         });
 
         modelBuilder.Entity<PcRegistrationRequest>(entity =>

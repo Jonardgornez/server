@@ -91,6 +91,10 @@ public static partial class ClientEndpoints
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/messages/{id:long}/ack", AckMessageAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapPost("/login-request", CreateLoginRequestAsync).RequireRateLimiting(TrafficRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapPost("/login-request/cancel", CancelLoginRequestAsync).RequireRateLimiting(TrafficRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
         return app;
     }
 

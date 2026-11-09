@@ -2,6 +2,7 @@ using LabGuard.Server.Accounts;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
+using LabGuard.Server.Requests;
 using LabGuard.Server.Sessions;
 using Microsoft.EntityFrameworkCore;
 
@@ -119,6 +120,7 @@ public static partial class PcEndpoints
         if (deleted > 0)
         {
             await SessionLifecycle.EndForPcAsync(db, id, SessionLifecycle.PcRemoved, now, cancellationToken);
+            await LoginRequestLifecycle.CancelPendingForPcAsync(db, id, LoginRequestLifecycle.PcRemoved, now, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return Results.NoContent();
         }

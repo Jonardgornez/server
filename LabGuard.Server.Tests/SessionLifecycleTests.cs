@@ -38,6 +38,51 @@ public class SessionLifecycleTests
     }
 
     [Fact]
+    public void NewLoginRequestSession_HasNoAccount_AndTheApprovedTime()
+    {
+        var pc = new Pc { Id = 7, Name = "PC-07" };
+        var now = new DateTimeOffset(2026, 11, 9, 10, 0, 0, TimeSpan.Zero);
+
+        var timed = SessionLifecycle.NewLoginRequestSession(pc, 42, 30, now);
+        var open = SessionLifecycle.NewLoginRequestSession(pc, 43, null, now);
+
+        Assert.Equal(7, timed.PcId);
+        Assert.Equal("PC-07", timed.PcName);
+        Assert.Equal(SessionLifecycle.AdminUnlockAccountId, timed.UserAccountId);
+        Assert.Equal("Login request", timed.Username);
+        Assert.Equal(42, timed.LoginRequestId);
+        Assert.Equal(30, timed.DefaultTimeMinutes);
+        Assert.Equal(now.AddMinutes(30), timed.ExpiresAtUtc);
+        Assert.False(timed.IsAdminUnlock);
+        Assert.Null(timed.EndedAtUtc);
+        Assert.Null(open.ExpiresAtUtc);
+        Assert.Null(open.DefaultTimeMinutes);
+        Assert.Equal(43, open.LoginRequestId);
+    }
+
+    [Fact]
+    public void IsServerOpened_IsTrueForAnAdminUnlockOrALoginRequestOnly()
+    {
+        var now = new DateTimeOffset(2026, 11, 9, 10, 0, 0, TimeSpan.Zero);
+        var pc = new Pc { Id = 1, Name = "PC-01" };
+
+        Assert.True(SessionLifecycle.IsServerOpened(SessionLifecycle.NewAdminUnlock(pc, now)));
+        Assert.True(SessionLifecycle.IsServerOpened(SessionLifecycle.NewLoginRequestSession(pc, 5, null, now)));
+        Assert.False(SessionLifecycle.IsServerOpened(new PcSession { Username = "student", StartedAtUtc = now }));
+    }
+
+    [Fact]
+    public void ToInfo_CarriesTheLoginRequestFlag()
+    {
+        var now = new DateTimeOffset(2026, 11, 9, 10, 0, 0, TimeSpan.Zero);
+        var pc = new Pc { Id = 1, Name = "PC-01" };
+
+        Assert.True(SessionLifecycle.ToInfo(SessionLifecycle.NewLoginRequestSession(pc, 5, 30, now), now).IsLoginRequest);
+        Assert.False(SessionLifecycle.ToInfo(SessionLifecycle.NewAdminUnlock(pc, now), now).IsLoginRequest);
+        Assert.False(SessionLifecycle.ToInfo(new PcSession { Id = 2, Username = "student", StartedAtUtc = now }, now).IsLoginRequest);
+    }
+
+    [Fact]
     public async Task EndExpiredAsync_ClosesOnlyExpiredSessions_AsTimeExpired()
     {
         using var app = new TestApp();

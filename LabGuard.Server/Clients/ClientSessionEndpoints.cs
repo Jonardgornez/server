@@ -5,6 +5,7 @@ using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using LabGuard.Server.Pcs;
+using LabGuard.Server.Requests;
 using LabGuard.Server.Screen;
 using LabGuard.Server.Sessions;
 using LabGuard.Server.Settings;
@@ -26,6 +27,7 @@ public record HeartbeatScreenView(string ViewId, string Mode);
 // that only reads ShutdownSeconds never shuts down for a restart.
 // PowerCancelled is true while an administrator's cancel of the shutdown or restart waits for this PC to acknowledge it.
 // Messages are the administrator's messages handed to the PC on this heartbeat. The field is left out when there are none.
+// LoginRequest is this PC's latest login request while it is pending or was decided a moment ago. The field is left out otherwise.
 public record HeartbeatResponse(
     PcSessionInfo? Session,
     string? EndedReason,
@@ -35,7 +37,8 @@ public record HeartbeatResponse(
     int? RestartSeconds,
     bool PowerCancelled,
     HeartbeatScreenView? ScreenView,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PcMessageDelivery[]? Messages = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PcMessageDelivery[]? Messages = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatLoginRequest? LoginRequest = null);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -144,7 +147,7 @@ public static partial class ClientEndpoints
         return await InGateAsync(() => StartSessionAsync(db, reservation, account, clock.GetUtcNow(), ct), ct);
     }
 
-    private static async Task<T> InGateAsync<T>(Func<Task<T>> action, CancellationToken ct)
+    internal static async Task<T> InGateAsync<T>(Func<Task<T>> action, CancellationToken ct)
     {
         if (!await PcLoginGate.WaitAsync(GateWaitTimeout, ct))
         {
@@ -319,6 +322,8 @@ public static partial class ClientEndpoints
 
                 await SessionLifecycle.EndExpiredForPcAsync(db, pc.Id, now, ct);
                 await SessionLifecycle.EndForPcAsync(db, pc.Id, SessionLifecycle.Replaced, now, ct);
+                // The student logged in normally, so a request still waiting for this PC is no longer needed.
+                await LoginRequestLifecycle.CancelPendingForPcAsync(db, pc.Id, LoginRequestLifecycle.LoggedIn, now, ct);
 
                 db.PcSessions.Add(session);
                 await db.SaveChangesAsync(ct);
@@ -470,9 +475,10 @@ public static partial class ClientEndpoints
             active = null;
         }
 
-        // An admin unlock is adopted by a PC that was online before this heartbeat, or that reports its id (a network blip).
-        // A PC that was offline and doesn't know the id, such as a rebooted one, must not open itself unattended.
-        if (active is { IsAdminUnlock: true } && request?.SessionId != active.Id && !wasOnline)
+        // A session the server opened (an admin unlock or an approved login request) is adopted by a PC that was online before
+        // this heartbeat, or that reports its id (a network blip). A PC that was offline and doesn't know the id, such as a
+        // rebooted one, must not open itself unattended.
+        if (active is not null && SessionLifecycle.IsServerOpened(active) && request?.SessionId != active.Id && !wasOnline)
         {
             await SessionLifecycle.EndSessionAsync(db, active.Id, SessionLifecycle.ConnectionLost, now, ct);
             active = null;
@@ -518,6 +524,7 @@ public static partial class ClientEndpoints
         }
 
         var messages = await HandOverMessagesAsync(db, pcId, now, ct);
+        var loginRequest = await HeartbeatLoginRequestAsync(db, pcId, now, ct);
 
         var settings = await ServerSettingsStore.GetAsync(db, ct);
         var screenView = screens.CurrentFor(pcId) is { } viewer ? new HeartbeatScreenView(viewer.ViewId, viewer.Mode) : null;
@@ -530,7 +537,8 @@ public static partial class ClientEndpoints
             handOff.Delivery?.Action == PcShutdownRules.RestartAction ? handOff.Delivery.CountdownSeconds : null,
             handOff.IsCancelled,
             screenView,
-            messages.Length == 0 ? null : messages));
+            messages.Length == 0 ? null : messages,
+            loginRequest));
     }
 
     private static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)

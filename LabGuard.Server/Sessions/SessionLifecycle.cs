@@ -4,7 +4,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Sessions;
 
-public record PcSessionInfo(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining, bool IsAdminUnlock);
+// IsLoginRequest is true for a session the administrator opened by approving a PC's login request.
+public record PcSessionInfo(int SessionId, string Username, DefaultTimeResponse Time, int? SecondsRemaining, bool IsAdminUnlock, bool IsLoginRequest = false);
 
 // Shared rules for ending sessions and describing them. Every method works on the active
 // session (EndedAtUtc is null) and uses single statements, so callers can combine them in a transaction.
@@ -21,7 +22,8 @@ public static class SessionLifecycle
     public const string AdminReboot = "reboot";
 
     public const string AdminUnlockUsername = "Admin unlock";
-    // Real account ids start at 1, so no account matches this and EndForAccountAsync never ends an admin unlock.
+    public const string LoginRequestUsername = "Login request";
+    // Real account ids start at 1, so no account matches this and EndForAccountAsync never ends an admin unlock or a login request session.
     public const int AdminUnlockAccountId = 0;
 
     public static PcSession NewAdminUnlock(Pc pc, DateTimeOffset now) => new()
@@ -35,6 +37,22 @@ public static class SessionLifecycle
         DefaultTimeMinutes = null,
         IsAdminUnlock = true,
     };
+
+    // The session an approved login request opens. Its time is the approved minutes, or open time when null.
+    public static PcSession NewLoginRequestSession(Pc pc, int loginRequestId, int? approvedMinutes, DateTimeOffset now) => new()
+    {
+        PcId = pc.Id,
+        PcName = pc.Name,
+        UserAccountId = AdminUnlockAccountId,
+        Username = LoginRequestUsername,
+        StartedAtUtc = now,
+        ExpiresAtUtc = approvedMinutes is { } minutes ? now.AddMinutes(minutes) : null,
+        DefaultTimeMinutes = approvedMinutes,
+        LoginRequestId = loginRequestId,
+    };
+
+    // A session the server opened for the PC (an admin unlock or an approved login request), not one a student logged in to.
+    public static bool IsServerOpened(PcSession session) => session.IsAdminUnlock || session.LoginRequestId is not null;
 
     public static Task<int> EndForPcAsync(AppDbContext db, int pcId, string reason, DateTimeOffset now, CancellationToken cancellationToken) =>
         db.PcSessions
@@ -163,6 +181,12 @@ public static class SessionLifecycle
     public static PcSessionInfo ToInfo(PcSession session, DateTimeOffset now)
     {
         var secondsRemaining = SecondsRemaining(session, now);
-        return new(session.Id, session.Username, ToTime(ReportedMinutes(session.DefaultTimeMinutes, secondsRemaining)), secondsRemaining, session.IsAdminUnlock);
+        return new(
+            session.Id,
+            session.Username,
+            ToTime(ReportedMinutes(session.DefaultTimeMinutes, secondsRemaining)),
+            secondsRemaining,
+            session.IsAdminUnlock,
+            session.LoginRequestId is not null);
     }
 }

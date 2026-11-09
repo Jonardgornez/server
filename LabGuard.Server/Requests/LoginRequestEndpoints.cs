@@ -18,7 +18,8 @@ public record LoginRequestResponse(
     DateTimeOffset RequestedAt,
     string Status,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DefaultTimeResponse? Time,
-    DateTimeOffset? DecidedAt);
+    DateTimeOffset? DecidedAt,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Reason = null);
 
 public record LoginRequestListResponse(List<LoginRequestResponse> Pending, List<LoginRequestResponse> History);
 public record DenyAllLoginRequestsResponse(List<LoginRequestResponse> Denied);
@@ -76,11 +77,7 @@ public static class LoginRequestEndpoints
             return AuthEndpoints.BadRequest(timeError);
         }
 
-        var now = clock.GetUtcNow();
-        return await DecideAsync(id, db, http.RequestAborted, setters => setters
-            .SetProperty(r => r.Status, LoginRequestStatus.Approved)
-            .SetProperty(r => r.ApprovedMinutes, minutes)
-            .SetProperty(r => r.DecidedAtUtc, now));
+        return await LoginRequestApproval.ApproveAsync(db, id, minutes, clock, http.RequestAborted);
     }
 
     private static async Task<IResult> DenyAsync(int id, HttpContext http, AppDbContext db, TimeProvider clock)
@@ -170,16 +167,17 @@ public static class LoginRequestEndpoints
             : Results.Ok(ToResponse(request));
     }
 
-    private static LoginRequestResponse ToResponse(LoginRequest request) =>
+    internal static LoginRequestResponse ToResponse(LoginRequest request) =>
         new(
             request.Id,
             request.PcName,
             request.RequestedAtUtc,
-            request.Status.ToString().ToLowerInvariant(),
+            LoginRequestLifecycle.WireStatus(request.Status),
             request.Status == LoginRequestStatus.Approved
                 ? request.ApprovedMinutes is { } minutes
                     ? new DefaultTimeResponse(AccountEndpoints.TimeLimitMode, minutes)
                     : new DefaultTimeResponse(AccountEndpoints.OpenTimeMode, null)
                 : null,
-            request.DecidedAtUtc);
+            request.DecidedAtUtc,
+            request.Reason);
 }

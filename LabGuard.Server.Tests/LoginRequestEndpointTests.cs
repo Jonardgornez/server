@@ -44,6 +44,25 @@ public class LoginRequestEndpointTests
     private static Task<HttpResponseMessage> DenyAllAsync(HttpClient client, params int[] ids) =>
         client.PostAsJsonAsync("/api/login-requests/deny-all", new { ids });
 
+    // Approval needs a PC that is registered and online, so each request gets its own.
+    private static async Task<int> AddOnlinePcAsync(TestApp app)
+    {
+        var now = app.Time.GetUtcNow();
+        return await app.WithDbAsync(async db =>
+        {
+            var pc = new Pc
+            {
+                Name = Guid.NewGuid().ToString("N")[..20],
+                TokenHash = Guid.NewGuid().ToString("N"),
+                RegisteredAtUtc = now,
+                LastSeenUtc = now,
+            };
+            db.Pcs.Add(pc);
+            await db.SaveChangesAsync();
+            return pc.Id;
+        });
+    }
+
     private static async Task<int> AddAsync(
         TestApp app,
         string pcName = "PC-01",
@@ -55,6 +74,7 @@ public class LoginRequestEndpointTests
         var request = new LoginRequest
         {
             PcName = pcName,
+            PcId = await AddOnlinePcAsync(app),
             RequestedAtUtc = app.Time.GetUtcNow() - (requestedAgo ?? TimeSpan.FromMinutes(1)),
             Status = status,
             ApprovedMinutes = approvedMinutes,
@@ -207,8 +227,8 @@ public class LoginRequestEndpointTests
     {
         using var app = new TestApp();
         using var client = await SignedInAsync(app);
-        var id = await AddAsync(app);
         app.Time.Advance(TimeSpan.FromMinutes(2));
+        var id = await AddAsync(app);
 
         var response = await ApproveAsync(client, id, TimeLimit60);
 

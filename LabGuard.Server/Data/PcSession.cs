@@ -24,4 +24,7 @@ public class PcSession
 
     // True for a session the admin opened to unlock the PC. It has no account and never expires.
     public bool IsAdminUnlock { get; set; }
+
+    // Set for a session the administrator opened by approving a login request. Null otherwise.
+    public int? LoginRequestId { get; set; }
 }
