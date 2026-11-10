@@ -13,9 +13,15 @@ public static partial class PcEndpoints
 {
     private static async Task<IResult> LockAsync(int id, HttpContext http, AppDbContext db, TimeProvider clock)
     {
-        if (await AuthEndpoints.ReadBodyAsync<PcAdminActionRequest>(http.Request) is null)
+        var request = await AuthEndpoints.ReadBodyAsync<PcLockRequest>(http.Request);
+        if (request is null)
         {
             return AuthEndpoints.InvalidRequest();
+        }
+
+        if (!PcLockMessageRules.TryCheck(request.Message, out var message, out var messageError))
+        {
+            return AuthEndpoints.BadRequest(messageError);
         }
 
         // Closing expired sessions comes first: that write takes the database lock, as in UnlockAsync.
@@ -34,7 +40,7 @@ public static partial class PcEndpoints
             return ConflictResponse("This PC is offline.");
         }
 
-        await LockPcsAsync(db, [id], now, ct);
+        await LockPcsAsync(db, [id], message, now, ct);
         await transaction.CommitAsync(ct);
         return Results.NoContent();
     }
@@ -72,11 +78,17 @@ public static partial class PcEndpoints
     }
 
     // Locks each listed PC and pauses its running session. Returns how many PCs were newly locked.
-    private static async Task<int> LockPcsAsync(AppDbContext db, int[] pcIds, DateTimeOffset now, CancellationToken ct)
+    // The message is stored on every listed PC, so locking a PC that is already locked replaces its message; null clears it.
+    private static async Task<int> LockPcsAsync(AppDbContext db, int[] pcIds, string? message, DateTimeOffset now, CancellationToken ct)
     {
         var newlyLocked = await db.Pcs
             .Where(p => pcIds.Contains(p.Id) && p.LockedAtUtc == null)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LockedAtUtc, now), ct);
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(p => p.LockedAtUtc, now)
+                .SetProperty(p => p.LockMessage, message), ct);
+        await db.Pcs
+            .Where(p => pcIds.Contains(p.Id))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LockMessage, message), ct);
         await SessionLifecycle.PauseForPcsAsync(db, pcIds, now, ct);
         return newlyLocked;
     }
@@ -101,7 +113,9 @@ public static partial class PcEndpoints
 
         await db.Pcs
             .Where(p => p.Id == pc.Id)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.LockedAtUtc, (DateTimeOffset?)null), ct);
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(p => p.LockedAtUtc, (DateTimeOffset?)null)
+                .SetProperty(p => p.LockMessage, (string?)null), ct);
         return true;
     }
 
@@ -131,10 +145,16 @@ public static partial class PcEndpoints
 
     private static async Task<IResult> LockManyAsync(HttpContext http, AppDbContext db, TimeProvider clock)
     {
-        var pcIds = await ReadPcIdsAsync(http.Request);
-        if (pcIds is null)
+        var request = await AuthEndpoints.ReadBodyAsync<PcLockManyRequest>(http.Request);
+        var pcIds = ValidPcIds(request?.Ids);
+        if (request is null || pcIds is null)
         {
             return AuthEndpoints.InvalidRequest();
+        }
+
+        if (!PcLockMessageRules.TryCheck(request.Message, out var message, out var messageError))
+        {
+            return AuthEndpoints.BadRequest(messageError);
         }
 
         // The same rules as the single lock, for every listed PC, in one transaction. Offline and unknown PCs are skipped.
@@ -150,7 +170,7 @@ public static partial class PcEndpoints
             .Where(p => IsOnline(p.LastSeenUtc, now))
             .Select(p => p.Id)
             .ToArray();
-        var locked = await LockPcsAsync(db, onlineIds, now, ct);
+        var locked = await LockPcsAsync(db, onlineIds, message, now, ct);
         await transaction.CommitAsync(ct);
         return Results.Ok(new AffectedPcsResponse(locked));
     }
@@ -190,11 +210,11 @@ public static partial class PcEndpoints
     }
 
     // Null for a missing or malformed body, an empty list or one over the limit. Duplicate ids count once.
-    private static async Task<int[]?> ReadPcIdsAsync(HttpRequest request)
-    {
-        var ids = (await AuthEndpoints.ReadBodyAsync<PcIdsRequest>(request))?.Ids;
-        return ids is { Length: > 0 and <= MaxIdsPerRequest } ? ids.Distinct().ToArray() : null;
-    }
+    private static async Task<int[]?> ReadPcIdsAsync(HttpRequest request) =>
+        ValidPcIds((await AuthEndpoints.ReadBodyAsync<PcIdsRequest>(request))?.Ids);
+
+    private static int[]? ValidPcIds(int[]? ids) =>
+        ids is { Length: > 0 and <= MaxIdsPerRequest } ? ids.Distinct().ToArray() : null;
 
     internal static IResult PcNotFound() =>
         Results.Json(new ErrorResponse("PC not found."), statusCode: StatusCodes.Status404NotFound);

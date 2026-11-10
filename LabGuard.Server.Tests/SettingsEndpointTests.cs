@@ -11,6 +11,7 @@ namespace LabGuard.Server.Tests;
 public class SettingsEndpointTests
 {
     private const string DefaultNotice = "This computer may be monitored by the administrator.";
+    private const string DefaultLockMessage = "This computer has been locked by the administrator.";
 
     private sealed record TestPc(int Id, string Token);
 
@@ -36,7 +37,8 @@ public class SettingsEndpointTests
         string? text = DefaultNotice,
         double? idleTimeoutMinutes = 30,
         string? defaultViewMode = "notified",
-        double? powerCountdownSeconds = 30) =>
+        double? powerCountdownSeconds = 30,
+        string? lockMessage = DefaultLockMessage) =>
         new
         {
             defaultApproval = new { mode, minutes },
@@ -44,6 +46,7 @@ public class SettingsEndpointTests
             idleTimeoutMinutes,
             defaultViewMode,
             powerCountdownSeconds,
+            lockMessage,
         };
 
     private static Task<HttpResponseMessage> GetSettingsAsync(HttpClient client) =>
@@ -96,6 +99,7 @@ public class SettingsEndpointTests
         Assert.Equal(30, body.GetProperty("idleTimeoutMinutes").GetInt32());
         Assert.Equal("notified", body.GetProperty("defaultViewMode").GetString());
         Assert.Equal(30, body.GetProperty("powerCountdownSeconds").GetInt32());
+        Assert.Equal(DefaultLockMessage, body.GetProperty("lockMessage").GetString());
         Assert.Equal(1, await RowCountAsync(app));
     }
 
@@ -324,6 +328,94 @@ public class SettingsEndpointTests
         var response = await admin.PutAsync("/api/settings", content);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // Lock screen message
+
+    [Fact]
+    public async Task Put_SavesTheLockMessage_TrimmedAndReturnedByGet()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+
+        var put = await PutSettingsAsync(admin, Payload(lockMessage: "  Exam in progress.  "));
+
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+        Assert.Equal("Exam in progress.", (await JsonOf(put)).GetProperty("lockMessage").GetString());
+        Assert.Equal("Exam in progress.", (await JsonOf(await GetSettingsAsync(admin))).GetProperty("lockMessage").GetString());
+    }
+
+    [Fact]
+    public async Task Put_LockMessageOf200Characters_IsAccepted()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+
+        var response = await PutSettingsAsync(admin, Payload(lockMessage: new string('m', 200)));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(200, (await JsonOf(response)).GetProperty("lockMessage").GetString()!.Length);
+    }
+
+    [Theory]
+    [InlineData(null, "Enter the lock screen message.")]
+    [InlineData("", "Enter the lock screen message.")]
+    [InlineData("   ", "Enter the lock screen message.")]
+    [InlineData("first\nsecond", "The lock screen message can't contain a character that can't be shown.")]
+    [InlineData("tab\there", "The lock screen message can't contain a character that can't be shown.")]
+    public async Task Put_WithAnInvalidLockMessage_Returns400WithTheError_AndChangesNothing(string? lockMessage, string expectedError)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+
+        var response = await PutSettingsAsync(admin, Payload(lockMessage: lockMessage));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(expectedError, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Equal(DefaultLockMessage, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("lockMessage").GetString());
+    }
+
+    [Fact]
+    public async Task Put_LockMessageLongerThan200Characters_Returns400WithTheLimit()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+
+        var response = await PutSettingsAsync(admin, Payload(lockMessage: new string('m', 201)));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(
+            "The lock screen message must be 200 characters or fewer.",
+            (await JsonOf(response)).GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task Put_WithoutTheLockMessageField_Returns400_AndChangesNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var body = "{\"defaultApproval\":{\"mode\":\"time-limit\",\"minutes\":60},\"notice\":{\"isEnabled\":true,\"text\":\"x\"},\"idleTimeoutMinutes\":30,\"defaultViewMode\":\"notified\",\"powerCountdownSeconds\":30}";
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var response = await admin.PutAsync("/api/settings", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(DefaultLockMessage, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("lockMessage").GetString());
+    }
+
+    // The JSON reader refuses a lone surrogate escape, so this is refused before the lock message check. The check is a second guard.
+    [Fact]
+    public async Task Put_LockMessageWithALoneSurrogateEscape_Returns400AndChangesNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var body = "{\"defaultApproval\":{\"mode\":\"time-limit\",\"minutes\":60},\"notice\":{\"isEnabled\":true,\"text\":\"x\"},\"idleTimeoutMinutes\":30,\"defaultViewMode\":\"notified\",\"powerCountdownSeconds\":30,\"lockMessage\":\"a\\ud800b\"}";
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var response = await admin.PutAsync("/api/settings", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(DefaultLockMessage, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("lockMessage").GetString());
     }
 
     // Access

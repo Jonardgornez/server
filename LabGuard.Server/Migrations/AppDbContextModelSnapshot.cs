@@ -174,6 +174,10 @@ namespace LabGuard.Server.Migrations
                     b.Property<long>("LastSeenUtc")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("LockMessage")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
                     b.Property<long?>("LockedAtUtc")
                         .HasColumnType("INTEGER");
 
@@ -487,6 +491,13 @@ namespace LabGuard.Server.Migrations
 
                     b.Property<int>("IdleTimeoutMinutes")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("LockMessage")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT")
+                        .HasDefaultValue("This computer has been locked by the administrator.");
 
                     b.Property<bool>("NoticeEnabled")
                         .HasColumnType("INTEGER");

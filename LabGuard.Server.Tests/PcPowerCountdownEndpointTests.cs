@@ -20,6 +20,7 @@ public class PcPowerCountdownEndpointTests
             idleTimeoutMinutes = 30,
             defaultViewMode = "notified",
             powerCountdownSeconds = seconds,
+            lockMessage = "This computer has been locked by the administrator.",
         });
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }

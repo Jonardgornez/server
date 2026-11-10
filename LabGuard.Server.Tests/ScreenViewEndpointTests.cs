@@ -52,6 +52,7 @@ public class ScreenViewEndpointTests
             idleTimeoutMinutes = minutes,
             defaultViewMode = "notified",
             powerCountdownSeconds = 30,
+            lockMessage = "This computer has been locked by the administrator.",
         });
         Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
     }

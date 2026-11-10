@@ -978,6 +978,278 @@ public class PcLockEndpointTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
+    // Lock message
+
+    private static Task<HttpResponseMessage> LockWithMessageAsync(HttpClient admin, int pcId, string? message) =>
+        admin.PostAsJsonAsync($"/api/pcs/{pcId}/lock", new { message });
+
+    private static Task<HttpResponseMessage> LockManyWithMessageAsync(HttpClient admin, string? message, params int[] ids) =>
+        admin.PostAsJsonAsync("/api/pcs/lock", new { ids, message });
+
+    private static Task<HttpResponseMessage> PutLockMessageSettingAsync(HttpClient admin, string lockMessage) =>
+        admin.PutAsJsonAsync("/api/settings", new
+        {
+            defaultApproval = new { mode = "time-limit", minutes = 60 },
+            notice = new { isEnabled = true, text = "This computer may be monitored by the administrator." },
+            idleTimeoutMinutes = 30,
+            defaultViewMode = "notified",
+            powerCountdownSeconds = 30,
+            lockMessage,
+        });
+
+    private static async Task<string?> HeartbeatLockMessageAsync(HttpClient client, TestPc pc) =>
+        (await JsonOf(await HeartbeatAsync(client, pc))).GetProperty("lockMessage").GetString();
+
+    [Fact]
+    public async Task Lock_WithAMessage_StoresItTrimmed_AndTheHeartbeatReturnsIt()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+
+        var response = await LockWithMessageAsync(admin, pc.Id, "  Exam in progress.  ");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal("Exam in progress.", (await StoredPcAsync(app, pc.Id)).LockMessage);
+        Assert.Equal("Exam in progress.", await HeartbeatLockMessageAsync(client, pc));
+    }
+
+    [Fact]
+    public async Task Lock_WithoutAMessage_StoresNone_AndTheHeartbeatReturnsTheSettingsMessage()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await PutLockMessageSettingAsync(admin, "Stay seated, please.");
+
+        Assert.Equal(HttpStatusCode.NoContent, (await LockAsync(admin, pc.Id)).StatusCode);
+
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockMessage);
+        Assert.Equal("Stay seated, please.", await HeartbeatLockMessageAsync(client, pc));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public async Task Lock_WithABlankMessage_StoresNone(string? message)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await LockWithMessageAsync(admin, pc.Id, message)).StatusCode);
+
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockMessage);
+    }
+
+    [Theory]
+    [InlineData("first\nsecond")]
+    [InlineData("tab\there")]
+    public async Task Lock_WithALineBreakOrControlCharacter_Returns400AndChangesNothing(string message)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+
+        var response = await LockWithMessageAsync(admin, pc.Id, message);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("The message can't contain line breaks or control characters.", (await JsonOf(response)).GetProperty("error").GetString());
+        var stored = await StoredPcAsync(app, pc.Id);
+        Assert.Null(stored.LockedAtUtc);
+        Assert.Null(stored.LockMessage);
+    }
+
+    [Fact]
+    public async Task Lock_WithAMessageLongerThan200Characters_Returns400AndChangesNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+
+        var response = await LockWithMessageAsync(admin, pc.Id, new string('m', 201));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("The message must be 200 characters or fewer.", (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Theory]
+    [InlineData("{\"message\":5}")]
+    [InlineData("{\"message\":\"a\\ud800b\"}")]
+    public async Task Lock_WithAMessageThatIsNotAValidString_Returns400InvalidRequest(string body)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        var response = await admin.PostAsync($"/api/pcs/{pc.Id}/lock", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(InvalidRequestMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task Lock_OnAnAlreadyLockedPc_ReplacesTheMessage_AndKeepsTheOriginalLockTime()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await LockWithMessageAsync(admin, pc.Id, "First message");
+        var firstLock = (await StoredPcAsync(app, pc.Id)).LockedAtUtc;
+        app.Time.Advance(TimeSpan.FromMinutes(1));
+        await BringOnlineAsync(app, pc.Id);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await LockWithMessageAsync(admin, pc.Id, "Second message")).StatusCode);
+
+        var stored = await StoredPcAsync(app, pc.Id);
+        Assert.Equal("Second message", stored.LockMessage);
+        Assert.Equal(firstLock, stored.LockedAtUtc);
+        Assert.Equal("Second message", await HeartbeatLockMessageAsync(client, pc));
+    }
+
+    [Fact]
+    public async Task Lock_OnAnAlreadyLockedPc_WithoutAMessage_ClearsTheEarlierMessage()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        await LockWithMessageAsync(admin, pc.Id, "First message");
+
+        Assert.Equal(HttpStatusCode.NoContent, (await LockAsync(admin, pc.Id)).StatusCode);
+
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockMessage);
+    }
+
+    [Fact]
+    public async Task Heartbeat_OfAnUnlockedPc_ReturnsNullEvenWithASettingsMessage()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await PutLockMessageSettingAsync(admin, "Stay seated, please.");
+
+        Assert.Null(await HeartbeatLockMessageAsync(client, pc));
+    }
+
+    [Fact]
+    public async Task LockMany_WithAMessage_StoresItOnEachLockedPc_AndSkipsOfflinePcs()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var clientOnline = app.CreatePcClient("192.168.1.50");
+        var online = await AddPcAsync(app, "PC-01");
+        var offline = await AddPcAsync(app, "PC-02", seenAgo: TimeSpan.FromMinutes(1));
+
+        var affected = await AffectedAsync(await LockManyWithMessageAsync(admin, "Exam in progress.", online.Id, offline.Id));
+
+        Assert.Equal(1, affected);
+        Assert.Equal("Exam in progress.", (await StoredPcAsync(app, online.Id)).LockMessage);
+        Assert.Equal("Exam in progress.", await HeartbeatLockMessageAsync(clientOnline, online));
+        var stored = await StoredPcAsync(app, offline.Id);
+        Assert.Null(stored.LockedAtUtc);
+        Assert.Null(stored.LockMessage);
+    }
+
+    [Fact]
+    public async Task LockMany_WithoutAMessage_StoresNone()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+
+        Assert.Equal(1, await AffectedAsync(await LockManyWithMessageAsync(admin, "   ", pc.Id)));
+
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockMessage);
+    }
+
+    [Theory]
+    [InlineData("first\nsecond")]
+    [InlineData("tab\there")]
+    public async Task LockMany_WithAnInvalidMessage_Returns400AndChangesNothing(string message)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+
+        var response = await LockManyWithMessageAsync(admin, message, pc.Id);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("The message can't contain line breaks or control characters.", (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task LockMany_WithAMessageLongerThan200Characters_Returns400AndChangesNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+
+        var response = await LockManyWithMessageAsync(admin, new string('m', 201), pc.Id);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockedAtUtc);
+    }
+
+    [Fact]
+    public async Task Unlock_ClearsTheMessage_AndTheHeartbeatReportsNoLock()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await LockWithMessageAsync(admin, pc.Id, "Exam in progress.");
+
+        Assert.Equal(HttpStatusCode.NoContent, (await UnlockAsync(admin, pc.Id)).StatusCode);
+
+        var stored = await StoredPcAsync(app, pc.Id);
+        Assert.Null(stored.LockedAtUtc);
+        Assert.Null(stored.LockMessage);
+        var body = await JsonOf(await HeartbeatAsync(client, pc));
+        Assert.False(body.GetProperty("isLocked").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("lockMessage").ValueKind);
+    }
+
+    [Fact]
+    public async Task Unlock_OfAPausedSession_ClearsTheMessage()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await AddAccountAsync(app);
+        await LoggedInSessionIdAsync(client, pc);
+        await LockWithMessageAsync(admin, pc.Id, "Exam in progress.");
+
+        Assert.Equal(HttpStatusCode.NoContent, (await UnlockAsync(admin, pc.Id)).StatusCode);
+
+        Assert.Null((await StoredPcAsync(app, pc.Id)).LockMessage);
+    }
+
+    [Fact]
+    public async Task UnlockMany_ClearsTheMessageOfEachUnlockedPc()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var first = await AddPcAsync(app, "PC-01");
+        var second = await AddPcAsync(app, "PC-02");
+        await LockManyWithMessageAsync(admin, "Exam in progress.", first.Id, second.Id);
+
+        Assert.Equal(2, await AffectedAsync(await UnlockManyAsync(admin, first.Id, second.Id)));
+
+        var pcs = (await app.WithDbAsync(db => db.Pcs.AsNoTracking().ToListAsync())).ToDictionary(p => p.Id);
+        Assert.Null(pcs[first.Id].LockMessage);
+        Assert.Null(pcs[second.Id].LockMessage);
+    }
+
     // Login while locked
 
     [Theory]

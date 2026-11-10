@@ -32,6 +32,10 @@ public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, Defau
 
 // Sent as {} by the single lock and unlock routes; the body is required so a cross-origin form can't send it.
 public record PcAdminActionRequest;
+// Sent by the single lock route. Message is optional: null or blank means the lock screen shows the setting's message.
+public record PcLockRequest(string? Message);
+// Sent by the bulk lock route. Ids is required as in PcIdsRequest; Message is optional, as in PcLockRequest.
+public record PcLockManyRequest(int[]? Ids, string? Message);
 // Action is add-time, open-time or time-out. Minutes is a double so a fraction reaches validation instead of failing JSON parsing.
 public record PcTimeRequest(string? Action, double? Minutes);
 // Sent by the bulk lock and unlock routes. A missing, empty or over-long list is refused.

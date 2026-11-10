@@ -85,6 +85,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(p => p.LoginLockedUntilUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.LastFailedLoginUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.LockedAtUtc).HasConversion(unixMilliseconds);
+            entity.Property(p => p.LockMessage).HasMaxLength(ServerSettings.MaxLockMessageLength);
             entity.Property(p => p.ShutdownRequestedAtUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.ShutdownDeliveredAtUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.PowerAction).HasMaxLength(16);
@@ -169,6 +170,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(s => s.DefaultViewMode).HasMaxLength(16).IsRequired();
             // The default is also the value an existing settings row gets when this column is added.
             entity.Property(s => s.PowerCountdownSeconds).HasDefaultValue(ServerSettings.DefaultPowerCountdownSeconds);
+            entity.Property(s => s.LockMessage).HasMaxLength(ServerSettings.MaxLockMessageLength).IsRequired().HasDefaultValue(ServerSettings.DefaultLockMessage);
         });
     }
 }
