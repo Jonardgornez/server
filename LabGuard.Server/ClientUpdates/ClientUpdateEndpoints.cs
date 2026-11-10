@@ -104,7 +104,7 @@ public static class ClientUpdateEndpoints
             {
                 ReceiveOutcome.TooLarge => TooLarge(),
                 ReceiveOutcome.NotInstaller => WrongInstaller(),
-                _ => await StoreAsync(http, db, files, inspector, clock, logger, tempPath, received, ct),
+                _ => await files.ExclusiveAsync(() => StoreAsync(http, db, files, inspector, clock, logger, tempPath, received, ct), ct),
             };
         }
         finally
@@ -164,7 +164,7 @@ public static class ClientUpdateEndpoints
             await transaction.CommitAsync(ct);
 
             // Everything in the folder but the new release goes: the replaced file, and any stray file.
-            files.SweepExcept(fileName);
+            files.SweepExcept(fileName, now);
 
             logger.LogInformation(
                 "Client installer {Version} (sha256 {Sha256}, {SizeBytes} bytes) uploaded by {Administrator} at {UploadedAtUtc}.",
@@ -191,17 +191,22 @@ public static class ClientUpdateEndpoints
         HttpContext http,
         AppDbContext db,
         ClientReleaseFiles files,
+        TimeProvider clock,
         ILogger<ClientUpdateLog> logger,
         CancellationToken cancellationToken)
     {
         // Idempotent: with nothing stored, the pending updates are still cleared and the answer is the same.
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        var previous = await db.ClientReleases.AsNoTracking().FirstOrDefaultAsync(cancellationToken);
-        await db.ClientReleases.ExecuteDeleteAsync(cancellationToken);
-        await ClientUpdateTargets.ClearWhereAsync(db, p => p.ClientUpdateTargetVersion != null, cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        var previous = await files.ExclusiveAsync(async () =>
+        {
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var removed = await db.ClientReleases.AsNoTracking().FirstOrDefaultAsync(cancellationToken);
+            await db.ClientReleases.ExecuteDeleteAsync(cancellationToken);
+            await ClientUpdateTargets.ClearWhereAsync(db, p => p.ClientUpdateTargetVersion != null, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            files.SweepExcept(null, clock.GetUtcNow());
+            return removed;
+        }, cancellationToken);
 
-        files.SweepExcept(null);
         if (previous is not null)
         {
             logger.LogInformation("Client installer {Version} deleted by {Administrator}.", previous.Version, AdministratorName(http.User));

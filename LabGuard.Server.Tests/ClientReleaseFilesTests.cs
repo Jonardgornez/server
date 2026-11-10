@@ -46,20 +46,25 @@ public class ClientReleaseFilesTests
         Assert.Equal(override_, folder);
     }
 
-    [Fact]
-    public void SweepExcept_RemovesEverythingButTheKeptFile()
+    private static readonly DateTimeOffset Now = new(2026, 11, 10, 12, 0, 0, TimeSpan.Zero);
+
+    // Runs a sweep over a folder holding the given files, each with its last write time, and returns what is left.
+    private static string[] SweptFiles(string keepFileName, IReadOnlyDictionary<string, DateTimeOffset> files)
     {
         var folder = Path.Combine(Path.GetTempPath(), $"lykantra-sweep-{Guid.NewGuid():N}");
         Directory.CreateDirectory(folder);
         try
         {
-            File.WriteAllText(Path.Combine(folder, "keep.exe"), "keep");
-            File.WriteAllText(Path.Combine(folder, "old.exe"), "old");
-            File.WriteAllText(Path.Combine(folder, "upload-x.tmp"), "tmp");
+            foreach (var (name, written) in files)
+            {
+                var path = Path.Combine(folder, name);
+                File.WriteAllText(path, name);
+                File.SetLastWriteTimeUtc(path, written.UtcDateTime);
+            }
 
-            new ClientReleaseFiles(folder, NullLogger<ClientReleaseFiles>.Instance).SweepExcept("keep.exe");
+            new ClientReleaseFiles(folder, NullLogger<ClientReleaseFiles>.Instance).SweepExcept(keepFileName, Now);
 
-            Assert.Equal(["keep.exe"], Directory.GetFiles(folder).Select(Path.GetFileName));
+            return Directory.GetFiles(folder).Select(Path.GetFileName).Select(name => name!).Order().ToArray();
         }
         finally
         {
@@ -68,7 +73,19 @@ public class ClientReleaseFilesTests
     }
 
     [Fact]
-    public void SweepExcept_WithNothingToKeep_RemovesAllFiles()
+    public void SweepExcept_RemovesOtherInstallers_AndKeepsTheStoredOne()
+    {
+        var left = SweptFiles("keep.exe", new Dictionary<string, DateTimeOffset>
+        {
+            ["keep.exe"] = Now,
+            ["old.exe"] = Now,
+        });
+
+        Assert.Equal(["keep.exe"], left);
+    }
+
+    [Fact]
+    public void SweepExcept_WithNothingToKeep_RemovesEveryInstaller()
     {
         var folder = Path.Combine(Path.GetTempPath(), $"lykantra-sweep-{Guid.NewGuid():N}");
         Directory.CreateDirectory(folder);
@@ -76,7 +93,7 @@ public class ClientReleaseFilesTests
         {
             File.WriteAllText(Path.Combine(folder, "old.exe"), "old");
 
-            new ClientReleaseFiles(folder, NullLogger<ClientReleaseFiles>.Instance).SweepExcept(null);
+            new ClientReleaseFiles(folder, NullLogger<ClientReleaseFiles>.Instance).SweepExcept(null, Now);
 
             Assert.Empty(Directory.GetFiles(folder));
         }
@@ -84,6 +101,42 @@ public class ClientReleaseFilesTests
         {
             Directory.Delete(folder, recursive: true);
         }
+    }
+
+    [Fact]
+    public void SweepExcept_KeepsAFreshUploadTemp_WhichMayStillBeStreamingIn()
+    {
+        var left = SweptFiles("keep.exe", new Dictionary<string, DateTimeOffset>
+        {
+            ["keep.exe"] = Now,
+            ["upload-inflight.tmp"] = Now.AddMinutes(-5),
+        });
+
+        Assert.Equal(["keep.exe", "upload-inflight.tmp"], left);
+    }
+
+    [Fact]
+    public void SweepExcept_RemovesAnUploadTempOlderThanAnHour()
+    {
+        var left = SweptFiles("keep.exe", new Dictionary<string, DateTimeOffset>
+        {
+            ["keep.exe"] = Now,
+            ["upload-crashed.tmp"] = Now.Subtract(ClientReleaseFiles.StaleTempAge).AddMinutes(-1),
+        });
+
+        Assert.Equal(["keep.exe"], left);
+    }
+
+    [Fact]
+    public void SweepExcept_LeavesFilesItDoesNotOwn()
+    {
+        var left = SweptFiles("keep.exe", new Dictionary<string, DateTimeOffset>
+        {
+            ["keep.exe"] = Now,
+            ["notes.txt"] = Now.AddDays(-2),
+        });
+
+        Assert.Equal(["keep.exe", "notes.txt"], left);
     }
 
     [Fact]

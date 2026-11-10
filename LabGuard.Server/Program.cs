@@ -66,7 +66,8 @@ using (var scope = app.Services.CreateScope())
     db.Database.Migrate();
     // Files left by a crash or a failed delete are removed; the stored installer, if any, is kept.
     services.GetRequiredService<ClientReleaseFiles>().SweepExcept(
-        await db.ClientReleases.Select(r => r.FileName).FirstOrDefaultAsync());
+        await db.ClientReleases.Select(r => r.FileName).FirstOrDefaultAsync(),
+        services.GetRequiredService<TimeProvider>().GetUtcNow());
     await AdminSeeder.SeedAsync(
         db,
         app.Configuration,

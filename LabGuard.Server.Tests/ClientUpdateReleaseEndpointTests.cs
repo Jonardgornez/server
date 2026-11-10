@@ -129,6 +129,8 @@ public class ClientUpdateReleaseEndpointTests
     [InlineData("0.20")]
     [InlineData("0.20.x")]
     [InlineData("")]
+    [InlineData("0.020.0")]
+    [InlineData("0.20.0000000000")]
     public async Task Upload_WhoseVersionIsNotMajorMinorPatch_IsRefused(string fileVersion)
     {
         var inspector = new FakeInstallerInspector { Next = new InstallerInfo(ClientUpdateEndpoints.ProductName, fileVersion) };
@@ -322,7 +324,9 @@ public class ClientUpdateReleaseEndpointTests
         using var admin = await SignedInAsync(app);
         Directory.CreateDirectory(app.ClientUpdatesFolder);
         await File.WriteAllBytesAsync(Path.Combine(app.ClientUpdatesFolder, "stray.exe"), Installer("0.0.1"));
-        await File.WriteAllBytesAsync(Path.Combine(app.ClientUpdatesFolder, "upload-left-behind.tmp"), Installer("0.0.2"));
+        var crashed = Path.Combine(app.ClientUpdatesFolder, "upload-left-behind.tmp");
+        await File.WriteAllBytesAsync(crashed, Installer("0.0.2"));
+        File.SetLastWriteTimeUtc(crashed, app.Time.GetUtcNow().AddHours(-2).UtcDateTime);
 
         var sha256 = await StoredHashAsync(admin, inspector, "0.20.0");
 
@@ -375,7 +379,7 @@ public class ClientUpdateReleaseEndpointTests
     }
 
     [Fact]
-    public async Task Upload_TheRealInstaller_IsAcceptedAsVersion0_19_0()
+    public async Task Upload_TheRealInstaller_IsAcceptedWithTheVersionItCarries()
     {
         var path = Environment.GetEnvironmentVariable("LYKANTRA_TEST_INSTALLER") ?? RealInstallerPath;
         if (!File.Exists(path))
@@ -392,7 +396,9 @@ public class ClientUpdateReleaseEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await JsonOf(response);
-        Assert.Equal("0.19.0", body.GetProperty("version").GetString());
+        // Whatever version the installer carries now, the server reads that same version.
+        var expected = System.Diagnostics.FileVersionInfo.GetVersionInfo(path).FileVersion!.Trim();
+        Assert.Equal(string.Join('.', expected.Split('.').Take(3)), body.GetProperty("version").GetString());
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(bytes)), body.GetProperty("sha256").GetString());
         Assert.Equal(bytes.Length, body.GetProperty("sizeBytes").GetInt64());
     }

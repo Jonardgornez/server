@@ -8,7 +8,8 @@ public class ReleaseVersionTests
     [InlineData("0.20.0", 0, 20, 0)]
     [InlineData("1.2.3", 1, 2, 3)]
     [InlineData("0.0.0", 0, 0, 0)]
-    [InlineData("10.020.3", 10, 20, 3)]
+    [InlineData("10.20.3", 10, 20, 3)]
+    [InlineData("0.999999999.0", 0, 999999999, 0)]
     public void TryParse_ReadsThreeNumbers(string text, int major, int minor, int patch)
     {
         Assert.True(ReleaseVersion.TryParse(text, out var version));
@@ -29,6 +30,13 @@ public class ReleaseVersionTests
     [InlineData("0..0")]
     [InlineData("0.2147483648.0")]
     [InlineData("99999999999999999999.0.0")]
+    [InlineData("0.1000000000.0")]
+    [InlineData("0.2147483647.0")]
+    [InlineData("0.00.0")]
+    [InlineData("0.020.0")]
+    [InlineData("00.1.0")]
+    [InlineData("0.09.0")]
+    [InlineData("0.-0.0")]
     [InlineData("0.20.0\n")]
     public void TryParse_RefusesAnythingElse(string text)
     {
@@ -36,11 +44,11 @@ public class ReleaseVersionTests
     }
 
     [Fact]
-    public void TryParse_AcceptsTheLargestInt()
+    public void TryParse_AcceptsNineDigits_TheLargestPartTheClientAccepts()
     {
-        Assert.True(ReleaseVersion.TryParse("0.2147483647.0", out var version));
+        Assert.True(ReleaseVersion.TryParse("0.999999999.0", out var version));
 
-        Assert.Equal(int.MaxValue, version.Minor);
+        Assert.Equal(999999999, version.Minor);
     }
 
     [Fact]
@@ -59,6 +67,7 @@ public class ReleaseVersionTests
 
     [Theory]
     [InlineData("0.19")]
+    [InlineData("0.019.0.0")]
     [InlineData("a.b.c")]
     [InlineData(null)]
     public void TryParseFileVersion_RefusesAResourceWithoutThreeNumbers(string? text)

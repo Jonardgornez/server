@@ -46,11 +46,15 @@ public readonly record struct ReleaseVersion(int Major, int Minor, int Patch) : 
     public override string ToString() =>
         string.Create(CultureInfo.InvariantCulture, $"{Major}.{Minor}.{Patch}");
 
-    // Digits only, and each part must fit an int. int.TryParse reports the overflow, so a huge part is refused, not wrapped.
+    // The same rule as the client and service: "0", or a first digit from 1 to 9 followed by at most eight more digits.
+    // No signs, no leading zeros, nothing above nine digits, so every part fits an int.
+    private static bool IsWholeNumber(string part) =>
+        part == "0" || (part.Length is >= 1 and <= 9 && part[0] is >= '1' and <= '9' && part.All(char.IsAsciiDigit));
+
     private static bool TryParseParts(string[] parts, out ReleaseVersion version)
     {
         version = default;
-        if (parts.Any(part => part.Length == 0 || !part.All(char.IsAsciiDigit))
+        if (!parts.All(IsWholeNumber)
             || !int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var major)
             || !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var minor)
             || !int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var patch))
