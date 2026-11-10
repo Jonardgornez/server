@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
+using LabGuard.Server.ClientUpdates;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using Microsoft.AspNetCore.Hosting;
@@ -30,6 +31,8 @@ public sealed class TestApp : WebApplicationFactory<Program>
 
     private readonly string _databasePath = Path.Combine(Path.GetTempPath(), $"lykantra-test-{Guid.NewGuid():N}.db");
     private readonly string _channelPath = Path.Combine(Path.GetTempPath(), $"lykantra-test-{Guid.NewGuid():N}.pc-channel.dat");
+    // Each test server keeps its installer files in its own folder, so parallel tests never share one.
+    private readonly string _clientUpdatesPath = Path.Combine(Path.GetTempPath(), $"lykantra-test-{Guid.NewGuid():N}-client-updates");
     private readonly string _environment;
 
 
@@ -44,6 +47,9 @@ public sealed class TestApp : WebApplicationFactory<Program>
     }
 
     public FailableTimeProvider Time { get; }
+
+    /// <summary>The folder this server keeps its client installer in.</summary>
+    public string ClientUpdatesFolder => _clientUpdatesPath;
 
     /// <summary>A LAN address of the machine running the test server. Other PCs in tests use 203.0.113.x.</summary>
     public const string MachineLanAddress = "198.51.100.10";
@@ -126,6 +132,7 @@ public sealed class TestApp : WebApplicationFactory<Program>
             {
                 ["ConnectionStrings:AppDb"] = $"Data Source={_databasePath}",
                 [PcChannelStore.FileConfigurationKey] = _channelPath,
+                [ClientReleaseFiles.FolderConfigurationKey] = _clientUpdatesPath,
                 ["Seed:AdminUsername"] = Username,
                 ["Seed:AdminPassword"] = Password,
                 ["Screen:AllowedOrigins:0"] = "http://localhost:5173",
@@ -177,6 +184,27 @@ public sealed class TestApp : WebApplicationFactory<Program>
 
         DeleteWhenReleased(_channelPath);
         DeleteWhenReleased(_channelPath + ".tmp");
+        DeleteFolderWhenReleased(_clientUpdatesPath);
+    }
+
+    private static void DeleteFolderWhenReleased(string path)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                {
+                    Directory.Delete(path, recursive: true);
+                }
+
+                return;
+            }
+            catch (IOException) when (attempt < 30)
+            {
+                Thread.Sleep(100);
+            }
+        }
     }
 
     // A request that is still finishing its last write can hold the database file for a moment after the host stops.

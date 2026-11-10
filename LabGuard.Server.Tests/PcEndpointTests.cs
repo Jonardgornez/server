@@ -109,7 +109,7 @@ public class PcEndpointTests
 
         var entry = (await JsonOf(response))[0];
         Assert.Equal(
-            new[] { "id", "internetBlockApplied", "internetBlocked", "ipAddress", "isLocked", "isOnline", "isServerPc", "lastSeenAt", "name", "registeredAt", "session", "shutdownState" },
+            new[] { "clientUpdate", "clientVersion", "id", "internetBlockApplied", "internetBlocked", "ipAddress", "isLocked", "isOnline", "isServerPc", "lastSeenAt", "name", "registeredAt", "session", "shutdownState" },
             entry.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal).ToArray());
         Assert.Equal(id, entry.GetProperty("id").GetInt32());
         Assert.Equal("PC-07", entry.GetProperty("name").GetString());
