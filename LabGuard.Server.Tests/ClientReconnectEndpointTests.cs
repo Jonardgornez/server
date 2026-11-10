@@ -79,9 +79,9 @@ public class ClientReconnectEndpointTests
     }
 
     // Registers a PC from the client's address, then lets the fake clock pass the online window so the PC is offline.
-    private static async Task<string> RegisterOfflinePcAsync(TestApp app, HttpClient pc, string name = "PC-01")
+    private static async Task<string> RegisterOfflinePcAsync(TestApp app, HttpClient pc)
     {
-        var token = await app.RegisterPcAsync(pc, name);
+        var token = await app.RegisterPcAsync(pc);
         app.Time.Advance(OfflineFor);
         return token;
     }
@@ -107,7 +107,7 @@ public class ClientReconnectEndpointTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await JsonOf(response);
         Assert.Equal(new[] { "pcName", "token" }, body.EnumerateObject().Select(p => p.Name).Order().ToArray());
-        Assert.Equal("PC-01", body.GetProperty("pcName").GetString());
+        Assert.Equal("PC-1", body.GetProperty("pcName").GetString());
         var token = body.GetProperty("token").GetString()!;
         Assert.Equal(43, token.Length);
         Assert.Matches("^[A-Za-z0-9_-]+$", token);
@@ -133,11 +133,11 @@ public class ClientReconnectEndpointTests
         using var app = new TestApp();
         using var pc = app.CreatePcClient(PcAddress);
         await RegisterOfflinePcAsync(app, pc);
-        var before = await StoredAsync(app, "PC-01");
+        var before = await StoredAsync(app, "PC-1");
 
         var token = await ReconnectTokenAsync(pc);
 
-        var after = await StoredAsync(app, "PC-01");
+        var after = await StoredAsync(app, "PC-1");
         Assert.NotEqual(before.TokenHash, after.TokenHash);
         Assert.NotEqual(token, after.TokenHash);
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(token))), after.TokenHash);
@@ -151,16 +151,16 @@ public class ClientReconnectEndpointTests
         using var pc = app.CreatePcClient(PcAddress);
         await RegisterOfflinePcAsync(app, pc);
         var lockedAt = app.Time.GetUtcNow();
-        await ChangePcAsync(app, "PC-01", stored =>
+        await ChangePcAsync(app, "PC-1", stored =>
         {
             stored.LockedAtUtc = lockedAt;
             stored.InternetBlocked = true;
         });
-        var before = await StoredAsync(app, "PC-01");
+        var before = await StoredAsync(app, "PC-1");
 
         await ReconnectAsync(pc);
 
-        var after = await StoredAsync(app, "PC-01");
+        var after = await StoredAsync(app, "PC-1");
         Assert.Equal(before.Id, after.Id);
         Assert.Equal(before.Name, after.Name);
         Assert.Equal(before.RegisteredAtUtc, after.RegisteredAtUtc);
@@ -177,7 +177,7 @@ public class ClientReconnectEndpointTests
         await RegisterOfflinePcAsync(app, pc);
         var now = app.Time.GetUtcNow();
         var lockedUntil = now + ClientEndpoints.LoginLockDuration;
-        await ChangePcAsync(app, "PC-01", stored =>
+        await ChangePcAsync(app, "PC-1", stored =>
         {
             stored.FailedLoginCount = ClientEndpoints.MaxFailedLogins;
             stored.LastFailedLoginUtc = now;
@@ -186,7 +186,7 @@ public class ClientReconnectEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, (await ReconnectAsync(pc)).StatusCode);
 
-        var after = await StoredAsync(app, "PC-01");
+        var after = await StoredAsync(app, "PC-1");
         Assert.Equal(ClientEndpoints.MaxFailedLogins, after.FailedLoginCount);
         Assert.Equal(now.ToUnixTimeMilliseconds(), after.LastFailedLoginUtc!.Value.ToUnixTimeMilliseconds());
         Assert.Equal(lockedUntil.ToUnixTimeMilliseconds(), after.LoginLockedUntilUtc!.Value.ToUnixTimeMilliseconds());
@@ -198,11 +198,11 @@ public class ClientReconnectEndpointTests
         using var app = new TestApp();
         using var pc = app.CreatePcClient(PcAddress);
         await RegisterOfflinePcAsync(app, pc);
-        var pcId = (await StoredAsync(app, "PC-01")).Id;
+        var pcId = (await StoredAsync(app, "PC-1")).Id;
 
         var token = await ReconnectTokenAsync(pc);
 
-        Assert.Contains(app.Logs.Entries, entry => entry.Contains($"PC {pcId} (PC-01) reconnected from {PcAddress}"));
+        Assert.Contains(app.Logs.Entries, entry => entry.Contains($"PC {pcId} (PC-1) reconnected from {PcAddress}"));
         Assert.DoesNotContain(app.Logs.Entries, entry => entry.Contains(token));
     }
 
@@ -240,7 +240,7 @@ public class ClientReconnectEndpointTests
         await RegisterOfflinePcAsync(app, pc);
         var sessionId = await app.WithDbAsync(async db =>
         {
-            var stored = await db.Pcs.SingleAsync(p => p.Name == "PC-01");
+            var stored = await db.Pcs.SingleAsync(p => p.Name == "PC-1");
             db.PcSessions.Add(SessionLifecycle.NewAdminUnlock(stored, app.Time.GetUtcNow()));
             await db.SaveChangesAsync();
             return await db.PcSessions.Select(s => s.Id).SingleAsync();
@@ -258,11 +258,11 @@ public class ClientReconnectEndpointTests
     {
         using var app = new TestApp();
         using var pc = app.CreatePcClient(PcAddress);
-        await app.RegisterPcAsync(pc, "PC-01");
+        await app.RegisterPcAsync(pc);
         var expiresAt = app.Time.GetUtcNow() + TimeSpan.FromSeconds(10);
         var sessionId = await app.WithDbAsync(async db =>
         {
-            var stored = await db.Pcs.SingleAsync(p => p.Name == "PC-01");
+            var stored = await db.Pcs.SingleAsync(p => p.Name == "PC-1");
             db.PcSessions.Add(new PcSession
             {
                 PcId = stored.Id,
@@ -291,7 +291,7 @@ public class ClientReconnectEndpointTests
         using var app = new TestApp();
         using var pc = app.CreatePcClient(PcAddress);
         await RegisterOfflinePcAsync(app, pc);
-        var stored = await StoredAsync(app, "PC-01");
+        var stored = await StoredAsync(app, "PC-1");
         await app.WithDbAsync(async db =>
         {
             db.LoginRequests.Add(new LoginRequest
@@ -318,13 +318,13 @@ public class ClientReconnectEndpointTests
         using var pc = app.CreatePcClient(PcAddress);
         using var other = app.CreatePcClient("192.168.1.51");
         await RegisterOfflinePcAsync(app, pc);
-        Assert.Equal(HttpStatusCode.Accepted, (await pc.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody("PC-02"))).StatusCode);
-        Assert.Equal(HttpStatusCode.Accepted, (await other.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody("PC-03"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await pc.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody())).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await other.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody())).StatusCode);
 
         await ReconnectAsync(pc);
 
-        Assert.Equal(RegistrationRequestStatus.Cancelled, (await RegistrationOfAsync(app, "PC-02")).Status);
-        Assert.Equal(RegistrationRequestStatus.Pending, (await RegistrationOfAsync(app, "PC-03")).Status);
+        Assert.Equal(RegistrationRequestStatus.Cancelled, (await RegistrationOfAsync(app, "PC-2")).Status);
+        Assert.Equal(RegistrationRequestStatus.Pending, (await RegistrationOfAsync(app, "PC-3")).Status);
     }
 
     // Refusals
@@ -334,12 +334,12 @@ public class ClientReconnectEndpointTests
     {
         using var app = new TestApp();
         using var pc = app.CreatePcClient(PcAddress);
-        var token = await app.RegisterPcAsync(pc, "PC-01");
-        var before = await StoredAsync(app, "PC-01");
+        var token = await app.RegisterPcAsync(pc);
+        var before = await StoredAsync(app, "PC-1");
 
         await AssertErrorAsync(await ReconnectAsync(pc), HttpStatusCode.Conflict, OnlineMessage);
 
-        var after = await StoredAsync(app, "PC-01");
+        var after = await StoredAsync(app, "PC-1");
         Assert.Equal(before.TokenHash, after.TokenHash);
         Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(pc, token)).StatusCode);
     }
@@ -371,11 +371,11 @@ public class ClientReconnectEndpointTests
         using var pc = app.CreatePcClient(PcAddress);
         await RegisterOfflinePcAsync(app, pc);
         using var admin = await app.SignedInAdminAsync();
-        var id = (await StoredAsync(app, "PC-01")).Id;
+        var id = (await StoredAsync(app, "PC-1")).Id;
         Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync($"/api/pcs/{id}")).StatusCode);
 
         await AssertErrorAsync(await ReconnectAsync(pc), HttpStatusCode.NotFound, NotRegisteredYetMessage);
-        Assert.Equal(HttpStatusCode.Accepted, (await pc.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody("PC-01"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await pc.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody())).StatusCode);
     }
 
     [Fact]
@@ -405,7 +405,7 @@ public class ClientReconnectEndpointTests
         var response = await ReconnectAsync(mapped);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("PC-01", (await JsonOf(response)).GetProperty("pcName").GetString());
+        Assert.Equal("PC-1", (await JsonOf(response)).GetProperty("pcName").GetString());
     }
 
     [Fact]

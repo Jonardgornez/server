@@ -69,8 +69,9 @@ public sealed class TestApp : WebApplicationFactory<Program>
 
     public static string NewCommitment() => CommitmentOf(NewNonce());
 
-    public static JsonContent RegistrationRequestBody(string? name, string? commitment = null) =>
-        JsonContent.Create(new { name, commitment = commitment ?? NewCommitment() });
+    /// <summary>The body a PC sends to ask for registration. It carries no name: the server assigns the PC's name.</summary>
+    public static JsonContent RegistrationRequestBody(string? commitment = null) =>
+        JsonContent.Create(new { commitment = commitment ?? NewCommitment() });
 
     public static JsonContent RevealBody(string? nonce) => JsonContent.Create(new { nonce });
 
@@ -94,31 +95,30 @@ public sealed class TestApp : WebApplicationFactory<Program>
     /// <summary>
     /// Creates a registration request as a PC does, then reveals its nonce, so the administrator can see it. Returns the token the PC holds.
     /// </summary>
-    public async Task<string> RequestAndRevealAsync(HttpClient pc, string name)
+    public async Task<string> RequestAndRevealAsync(HttpClient pc) => (await RequestAndRevealWithNonceAsync(pc)).Token;
+
+    private async Task<(string Token, string Nonce)> RequestAndRevealWithNonceAsync(HttpClient pc)
     {
         var nonce = NewNonce();
-        var created = await pc.PostAsync("/api/client/register-requests", RegistrationRequestBody(name, CommitmentOf(nonce)));
+        var created = await pc.PostAsync("/api/client/register-requests", RegistrationRequestBody(CommitmentOf(nonce)));
         Assert.Equal(HttpStatusCode.Accepted, created.StatusCode);
         var token = JsonDocument.Parse(await created.Content.ReadAsStringAsync()).RootElement.GetProperty("token").GetString()!;
 
         var revealed = await RevealAsync(pc, token, nonce);
         Assert.Equal(HttpStatusCode.NoContent, revealed.StatusCode);
-        return token;
+        return (token, nonce);
     }
 
     /// <summary>
     /// Sends a registration request from the PC, reveals it, has the administrator accept it, and returns the token the PC holds.
+    /// The PC's name is whatever the server assigned: PC-1 for the first one, and so on.
     /// </summary>
-    public async Task<string> RegisterPcAsync(HttpClient pc, string name)
+    public async Task<string> RegisterPcAsync(HttpClient pc)
     {
-        var token = await RequestAndRevealAsync(pc, name);
+        var (token, nonce) = await RequestAndRevealWithNonceAsync(pc);
+        var id = await WithDbAsync(db => db.PcRegistrationRequests.Where(r => r.Nonce == nonce).Select(r => r.Id).SingleAsync());
 
         using var admin = await SignedInAdminAsync();
-        using var listed = JsonDocument.Parse(await (await admin.GetAsync("/api/registration-requests")).Content.ReadAsStringAsync());
-        var id = listed.RootElement.GetProperty("requests").EnumerateArray()
-            .Single(request => request.GetProperty("name").GetString() == name)
-            .GetProperty("id").GetInt32();
-
         var accepted = await admin.PostAsJsonAsync($"/api/registration-requests/{id}/accept", new { });
         Assert.Equal(HttpStatusCode.NoContent, accepted.StatusCode);
         return token;

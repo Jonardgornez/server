@@ -20,8 +20,8 @@ public class ClientEndpointTests
         return json.RootElement.Clone();
     }
 
-    private static Task<HttpResponseMessage> RequestRegistrationAsync(TestApp app, HttpClient client, string? name) =>
-        client.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody(name));
+    private static Task<HttpResponseMessage> RequestRegistrationAsync(HttpClient client) =>
+        client.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody());
 
     private static Task<HttpResponseMessage> HeartbeatAsync(HttpClient client, string? authorization)
     {
@@ -72,8 +72,8 @@ public class ClientEndpointTests
         using var app = new TestApp();
         using var client = app.CreatePcClient();
 
-        var first = await app.RegisterPcAsync(client, "PC-01");
-        var second = await app.RegisterPcAsync(client, "PC-02");
+        var first = await app.RegisterPcAsync(client);
+        var second = await app.RegisterPcAsync(client);
 
         Assert.NotEqual(first, second);
         Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(client, $"Bearer {first}")).StatusCode);
@@ -86,9 +86,9 @@ public class ClientEndpointTests
         using var app = new TestApp();
         using var client = app.CreatePcClient("::ffff:10.0.0.7");
 
-        await app.RegisterPcAsync(client, "PC-01");
+        await app.RegisterPcAsync(client);
 
-        Assert.Equal("10.0.0.7", (await StoredAsync(app, "PC-01")).IpAddress);
+        Assert.Equal("10.0.0.7", (await StoredAsync(app, "PC-1")).IpAddress);
     }
 
     [Fact]
@@ -98,7 +98,7 @@ public class ClientEndpointTests
         using var client = app.CreatePcClient("192.168.1.9");
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/client/register-requests")
         {
-            Content = TestApp.RegistrationRequestBody("PC-01"),
+            Content = TestApp.RegistrationRequestBody(),
         };
         request.Headers.Add("X-Forwarded-For", "6.6.6.6");
 
@@ -109,22 +109,37 @@ public class ClientEndpointTests
     }
 
     [Theory]
-    [InlineData("PC-05")]
-    [InlineData("pc-05")]
-    [InlineData(" Pc-05 ")]
-    public async Task Request_ForANameThatIsRegistered_Returns409AndKeepsTheOriginalPc(string secondName)
+    [InlineData("""{"name":"Lab-9","commitment":"{0}"}""")]
+    [InlineData("""{"name":"","commitment":"{0}"}""")]
+    [InlineData("""{"name":"not a valid name!","commitment":"{0}"}""")]
+    [InlineData("""{"name":null,"commitment":"{0}"}""")]
+    [InlineData("""{"commitment":"{0}"}""")]
+    public async Task Request_IgnoresTheNameTheClientSends_AndAssignsTheNextNumberedName(string bodyTemplate)
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var originalToken = await app.RegisterPcAsync(client, "PC-05");
-        var originalHash = (await StoredAsync(app, "PC-05")).TokenHash;
+        var body = bodyTemplate.Replace("{0}", TestApp.NewCommitment());
 
-        var response = await RequestRegistrationAsync(app, client, secondName);
+        var response = await client.PostAsync("/api/client/register-requests", new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
 
-        await AssertErrorAsync(response, HttpStatusCode.Conflict, "That PC name is already registered.");
-        Assert.DoesNotContain("token", await response.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Equal("PC-1", (await app.WithDbAsync(db => db.PcRegistrationRequests.AsNoTracking().SingleAsync())).Name);
+    }
+
+    [Fact]
+    public async Task Request_WhenPc1IsRegistered_GetsPc2_AndKeepsTheOriginalPc()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var originalToken = await app.RegisterPcAsync(client);
+        var originalHash = (await StoredAsync(app, "PC-1")).TokenHash;
+
+        var response = await RequestRegistrationAsync(client);
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Equal("PC-2", (await app.WithDbAsync(db => db.PcRegistrationRequests.AsNoTracking().SingleAsync(r => r.Status == RegistrationRequestStatus.Pending))).Name);
         Assert.Equal(1, await app.WithDbAsync(db => db.Pcs.CountAsync()));
-        Assert.Equal(originalHash, (await StoredAsync(app, "PC-05")).TokenHash);
+        Assert.Equal(originalHash, (await StoredAsync(app, "PC-1")).TokenHash);
         Assert.Equal(HttpStatusCode.OK, (await HeartbeatAsync(client, $"Bearer {originalToken}")).StatusCode);
     }
 
@@ -135,7 +150,7 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var registering = app.CreatePcClient("192.168.1.50");
-        var token = await app.RegisterPcAsync(registering, "PC-01");
+        var token = await app.RegisterPcAsync(registering);
         var registeredAt = app.Time.GetUtcNow();
         app.Time.Advance(TimeSpan.FromSeconds(10));
         using var moved = app.CreatePcClient("192.168.1.60");
@@ -143,7 +158,7 @@ public class ClientEndpointTests
         var response = await HeartbeatAsync(moved, $"Bearer {token}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var stored = await StoredAsync(app, "PC-01");
+        var stored = await StoredAsync(app, "PC-1");
         Assert.Equal(app.Time.GetUtcNow().ToUnixTimeMilliseconds(), stored.LastSeenUtc.ToUnixTimeMilliseconds());
         Assert.Equal(registeredAt.ToUnixTimeMilliseconds(), stored.RegisteredAtUtc.ToUnixTimeMilliseconds());
         Assert.Equal("192.168.1.60", stored.IpAddress);
@@ -161,7 +176,7 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        await app.RegisterPcAsync(client, "PC-01");
+        await app.RegisterPcAsync(client);
 
         var response = await HeartbeatAsync(client, authorization);
 
@@ -173,8 +188,8 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var token = await app.RegisterPcAsync(client, "PC-01");
-        var hash = (await StoredAsync(app, "PC-01")).TokenHash;
+        var token = await app.RegisterPcAsync(client);
+        var hash = (await StoredAsync(app, "PC-1")).TokenHash;
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await HeartbeatAsync(client, token)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await HeartbeatAsync(client, $"Bearer {hash}")).StatusCode);
@@ -185,7 +200,7 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var token = await app.RegisterPcAsync(client, "PC-01");
+        var token = await app.RegisterPcAsync(client);
         await app.WithDbAsync(async db =>
         {
             db.Pcs.RemoveRange(db.Pcs);
@@ -204,7 +219,7 @@ public class ClientEndpointTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var token = await app.RegisterPcAsync(client, "PC-01");
+        var token = await app.RegisterPcAsync(client);
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/client/heartbeat");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
@@ -256,16 +271,16 @@ public class ClientEndpointTests
         }
 
         // Traffic budget is spent, registration still has its own.
-        Assert.Equal(HttpStatusCode.Accepted, (await RequestRegistrationAsync(app, client, "PC-01")).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await RequestRegistrationAsync(client)).StatusCode);
 
         using var second = app.CreatePcClient("192.168.1.99");
         for (var i = 0; i < ClientEndpoints.MaxRegistrationsPerMinute; i++)
         {
-            await RequestRegistrationAsync(app, second, $"PC-{i + 10}");
+            await RequestRegistrationAsync(second);
         }
 
         await AssertErrorAsync(
-            await RequestRegistrationAsync(app, second, "PC-99"),
+            await RequestRegistrationAsync(second),
             HttpStatusCode.TooManyRequests,
             "Too many registration attempts. Try again in a minute.");
         Assert.Equal(HttpStatusCode.OK, (await second.GetAsync("/api/client/ping")).StatusCode);
