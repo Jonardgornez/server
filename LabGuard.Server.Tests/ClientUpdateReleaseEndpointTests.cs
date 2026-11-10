@@ -209,6 +209,21 @@ public class ClientUpdateReleaseEndpointTests
     }
 
     [Fact]
+    public async Task Upload_ReplacingARelease_ClearsTheInstallNowChoice()
+    {
+        var inspector = new FakeInstallerInspector();
+        using var app = new TestApp(configureServices: services => ReplaceInspector(services, inspector));
+        using var admin = await SignedInAsync(app);
+        await StoreReleaseAsync(admin, inspector, "0.20.0");
+        var pc = await AddPcAsync(app, "PC-01");
+        await OfferStoredInstallNowAsync(admin, true, pc.Id);
+
+        await StoreReleaseAsync(admin, inspector, "0.21.0");
+
+        Assert.False((await StoredPcAsync(app, pc.Id)).ClientUpdateInstallNow);
+    }
+
+    [Fact]
     public async Task Upload_WithAnInstallerTooLargeByDeclaredLength_IsRefusedBeforeTheBodyIsRead()
     {
         using var app = new TestApp(configureServices: services => ReplaceInspector(services, new FakeInstallerInspector()));
@@ -369,6 +384,21 @@ public class ClientUpdateReleaseEndpointTests
     }
 
     [Fact]
+    public async Task Delete_ClearsTheInstallNowChoice()
+    {
+        var inspector = new FakeInstallerInspector();
+        using var app = new TestApp(configureServices: services => ReplaceInspector(services, inspector));
+        using var admin = await SignedInAsync(app);
+        await StoreReleaseAsync(admin, inspector, "0.20.0");
+        var pc = await AddPcAsync(app, "PC-01");
+        await OfferStoredInstallNowAsync(admin, true, pc.Id);
+
+        await admin.DeleteAsync(ReleaseRoute);
+
+        Assert.False((await StoredPcAsync(app, pc.Id)).ClientUpdateInstallNow);
+    }
+
+    [Fact]
     public async Task Upload_TheRealInstaller_IsAcceptedWithTheVersionItCarries()
     {
         var path = Environment.GetEnvironmentVariable("LYKANTRA_TEST_INSTALLER") ?? RealInstallerPath;
@@ -415,6 +445,21 @@ public class ClientUpdateReleaseEndpointTests
         Assert.Contains("ClientUpdateState", pcColumns);
         Assert.Contains("ClientUpdateError", pcColumns);
         Assert.Contains("ClientUpdateStateAtUtc", pcColumns);
+    }
+
+    [Fact]
+    public async Task Migration_AddClientUpdateInstallNow_IsAppliedAndAddsThePcColumn()
+    {
+        using var app = new TestApp();
+
+        var (applied, pending, pcColumns) = await app.WithDbAsync(async db => (
+            await db.Database.GetAppliedMigrationsAsync(),
+            await db.Database.GetPendingMigrationsAsync(),
+            await db.Database.SqlQueryRaw<string>("SELECT name AS \"Value\" FROM pragma_table_info('Pcs')").ToListAsync()));
+
+        Assert.Contains(applied, id => id.EndsWith("_AddClientUpdateInstallNow", StringComparison.Ordinal));
+        Assert.Empty(pending);
+        Assert.Contains("ClientUpdateInstallNow", pcColumns);
     }
 
     private static void ReplaceInspector(IServiceCollection services, IInstallerInspector inspector)
