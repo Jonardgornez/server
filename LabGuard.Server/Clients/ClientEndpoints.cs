@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.RateLimiting;
 using LabGuard.Server.Auth;
+using LabGuard.Server.Backgrounds;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -19,6 +20,9 @@ public static partial class ClientEndpoints
     // A PC sends 30 heartbeats a minute (one every 2 seconds), so 120 a minute still leaves room.
     public const int MaxTrafficPerMinute = 120;
     public const string TrafficRateLimitPolicy = "pc-traffic";
+    // A PC downloads a background only when its hash changes, so a few a minute is plenty and bounds the bytes a PC can pull.
+    public const int MaxBackgroundDownloadsPerMinute = 10;
+    public const string BackgroundRateLimitPolicy = "pc-background";
 
     private const int MaxTokenLength = 64;
     private const string BearerPrefix = "Bearer ";
@@ -52,6 +56,8 @@ public static partial class ClientEndpoints
                 PerAddressLimit(context, RegistrationRateLimitPolicy, MaxRegistrationsPerMinute));
             options.AddPolicy(TrafficRateLimitPolicy, context =>
                 PerAddressLimit(context, TrafficRateLimitPolicy, MaxTrafficPerMinute));
+            options.AddPolicy(BackgroundRateLimitPolicy, context =>
+                PerAddressLimit(context, BackgroundRateLimitPolicy, MaxBackgroundDownloadsPerMinute));
             // Per address, so registering fake PCs can't get around the per-PC login lockout.
             options.AddPolicy(LoginRateLimitPolicy, context =>
                 PerAddressLimit(context, LoginRateLimitPolicy, MaxLoginsPerMinute));
@@ -95,10 +101,12 @@ public static partial class ClientEndpoints
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/login-request/cancel", CancelLoginRequestAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapGet("/backgrounds/{kind}", BackgroundEndpoints.DownloadForPcAsync).RequireRateLimiting(BackgroundRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
         return app;
     }
 
-    private static string? ReadBearerToken(HttpRequest request)
+    internal static string? ReadBearerToken(HttpRequest request)
     {
         var header = request.Headers.Authorization.ToString();
         if (!header.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))

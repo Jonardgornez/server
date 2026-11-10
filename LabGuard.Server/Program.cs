@@ -1,4 +1,5 @@
 using LabGuard.Server.Accounts;
+using LabGuard.Server.Backgrounds;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
@@ -105,6 +106,7 @@ app.MapRegistrationRequestEndpoints();
 app.MapPcEndpoints();
 app.MapScreenViewEndpoints();
 app.MapSettingsEndpoints();
+app.MapBackgroundEndpoints();
 app.MapServerInfoEndpoints();
 app.MapClientEndpoints();
 
