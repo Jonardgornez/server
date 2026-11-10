@@ -15,6 +15,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ScreenViewEvent> ScreenViewEvents => Set<ScreenViewEvent>();
     public DbSet<ScreenControlEvent> ScreenControlEvents => Set<ScreenControlEvent>();
     public DbSet<PcMessage> PcMessages => Set<PcMessage>();
+    public DbSet<ScreenBackground> ScreenBackgrounds => Set<ScreenBackground>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -132,6 +133,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(m => m.HandedOverUtc).HasConversion(unixMilliseconds);
             entity.Property(m => m.DeliveredUtc).HasConversion(unixMilliseconds);
             entity.HasIndex(m => new { m.PcId, m.CreatedUtc });
+        });
+
+        modelBuilder.Entity<ScreenBackground>(entity =>
+        {
+            entity.HasKey(b => b.Kind);
+            entity.Property(b => b.Kind).HasMaxLength(16);
+            entity.Property(b => b.ContentType).HasMaxLength(16).IsRequired();
+            entity.Property(b => b.Data).IsRequired();
+            entity.Property(b => b.Sha256).HasMaxLength(64).IsRequired();
         });
 
         modelBuilder.Entity<ServerSettings>(entity =>

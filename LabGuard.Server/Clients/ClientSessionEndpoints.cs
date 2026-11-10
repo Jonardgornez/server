@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json.Serialization;
 using LabGuard.Server.Accounts;
+using LabGuard.Server.Backgrounds;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
@@ -22,6 +23,8 @@ public record PcLoginResponse(int SessionId, string Username, DefaultTimeRespons
 public record HeartbeatRequest(int? SessionId, bool? PowerCancelHandled, bool? PowerCountdownRunning, bool? InternetBlockApplied);
 // ScreenView is set while an administrator has a live view of this PC open. The PC streams only then, and an older client ignores it.
 public record HeartbeatScreenView(string ViewId, string Mode);
+// Login and Lock are the SHA-256 of each background image set, null when that image is not set.
+public record HeartbeatBackgrounds(string? Login, string? Lock);
 // Notice is the administrator's on-screen notice text, or null when the notice is turned off.
 // ShutdownSeconds and RestartSeconds are set only on the one heartbeat that hands the PC a requested shutdown or restart,
 // and say how long it has to go down: the countdown stored with that delivery. Exactly one of them is set, so an older client
@@ -30,6 +33,7 @@ public record HeartbeatScreenView(string ViewId, string Mode);
 // InternetBlocked is true while the administrator wants this PC's internet blocked. The PC applies it and reports it back.
 // Messages are the administrator's messages handed to the PC on this heartbeat. The field is left out when there are none.
 // LoginRequest is this PC's latest login request while it is pending or was decided a moment ago. The field is left out otherwise.
+// Backgrounds holds the hashes of the login and lock background images, so the PC downloads only a changed one. Left out when neither is set.
 public record HeartbeatResponse(
     PcSessionInfo? Session,
     string? EndedReason,
@@ -41,7 +45,8 @@ public record HeartbeatResponse(
     bool InternetBlocked,
     HeartbeatScreenView? ScreenView,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PcMessageDelivery[]? Messages = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatLoginRequest? LoginRequest = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatLoginRequest? LoginRequest = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatBackgrounds? Backgrounds = null);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -534,6 +539,7 @@ public static partial class ClientEndpoints
         var loginRequest = await HeartbeatLoginRequestAsync(db, pcId, now, ct);
 
         var settings = await ServerSettingsStore.GetAsync(db, ct);
+        var backgrounds = await BackgroundEndpoints.HeartbeatHashesAsync(db, ct);
         var screenView = screens.CurrentFor(pcId) is { } viewer ? new HeartbeatScreenView(viewer.ViewId, viewer.Mode) : null;
         return Results.Ok(new HeartbeatResponse(
             active is null ? null : SessionLifecycle.ToInfo(active, now),
@@ -546,10 +552,11 @@ public static partial class ClientEndpoints
             known.InternetBlocked,
             screenView,
             messages.Length == 0 ? null : messages,
-            loginRequest));
+            loginRequest,
+            backgrounds));
     }
 
-    private static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)
+    internal static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)
     {
         var tokenHash = HashToken(token);
         return db.Pcs
