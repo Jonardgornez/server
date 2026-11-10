@@ -134,13 +134,9 @@ public static class ClientUpdateEndpoints
         var fileName = ClientReleaseFiles.FileNameFor(received.Sha256);
         var now = clock.GetUtcNow();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        // Any version may replace the stored one: a rebuilt same version, a newer one, or an older one. Each PC still installs
+        // only a version newer than its own (the watchdog service and the installer both refuse a downgrade or reinstall).
         var previous = await db.ClientReleases.FirstOrDefaultAsync(ct);
-        if (previous is not null && !(version > ReleaseVersion.Parse(previous.Version)))
-        {
-            return Results.Json(
-                new ErrorResponse($"This installer is version {version}. Upload a version newer than {previous.Version}."),
-                statusCode: StatusCodes.Status400BadRequest);
-        }
 
         // Read before the row changes: the row is the one being replaced, so its file is the one to remove afterwards.
         var previousFileName = previous?.FileName;

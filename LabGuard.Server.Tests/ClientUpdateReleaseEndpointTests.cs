@@ -145,22 +145,25 @@ public class ClientUpdateReleaseEndpointTests
     }
 
     [Fact]
-    public async Task Upload_OfTheSameVersion_IsNotNewer_AndRefused()
+    public async Task Upload_OfTheSameVersion_ReplacesTheStoredInstaller()
     {
         var inspector = new FakeInstallerInspector();
         using var app = new TestApp(configureServices: services => ReplaceInspector(services, inspector));
         using var admin = await SignedInAsync(app);
         await StoreReleaseAsync(admin, inspector, "0.20.0");
+        var rebuilt = Installer("0.20.0").Concat(new byte[] { 1, 2, 3 }).ToArray();
 
-        var response = await UploadAsync(admin, Installer("0.20.0"));
+        inspector.Next = new InstallerInfo(ClientUpdateEndpoints.ProductName, "0.20.0.0");
+        var response = await UploadAsync(admin, rebuilt);
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Equal("This installer is version 0.20.0. Upload a version newer than 0.20.0.", (await JsonOf(response)).GetProperty("error").GetString());
-        Assert.Equal("0.20.0", (await StoredReleaseAsync(app))!.Version);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var stored = (await StoredReleaseAsync(app))!;
+        Assert.Equal("0.20.0", stored.Version);
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(rebuilt)), stored.Sha256);
     }
 
     [Fact]
-    public async Task Upload_OfAnOlderVersion_IsRefused()
+    public async Task Upload_OfAnOlderVersion_ReplacesTheStoredInstaller()
     {
         var inspector = new FakeInstallerInspector();
         using var app = new TestApp(configureServices: services => ReplaceInspector(services, inspector));
@@ -170,21 +173,8 @@ public class ClientUpdateReleaseEndpointTests
         inspector.Next = new InstallerInfo(ClientUpdateEndpoints.ProductName, "0.19.0.0");
         var response = await UploadAsync(admin, Installer("0.19.0"));
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Equal("This installer is version 0.19.0. Upload a version newer than 0.20.0.", (await JsonOf(response)).GetProperty("error").GetString());
-    }
-
-    [Fact]
-    public async Task Upload_ComparesVersionsAsNumbers_NotAsText()
-    {
-        var inspector = new FakeInstallerInspector();
-        using var app = new TestApp(configureServices: services => ReplaceInspector(services, inspector));
-        using var admin = await SignedInAsync(app);
-        await StoreReleaseAsync(admin, inspector, "0.9.0");
-
-        await StoreReleaseAsync(admin, inspector, "0.10.0");
-
-        Assert.Equal("0.10.0", (await StoredReleaseAsync(app))!.Version);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("0.19.0", (await StoredReleaseAsync(app))!.Version);
     }
 
     [Fact]

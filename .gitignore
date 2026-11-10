@@ -8,3 +8,4 @@ pc-channel.dat.tmp
 *.pfx
 .vs/
 *.user
+LabGuard.Server/client-updates/
