@@ -114,6 +114,13 @@ internal static class ClientUpdateTestSupport
         return await OfferAsync(admin, version, pcIds);
     }
 
+    // Offers the stored release with the administrator's "install now" choice, as the update dialog sends it.
+    public static async Task<HttpResponseMessage> OfferStoredInstallNowAsync(HttpClient admin, bool installNow, params int[] pcIds)
+    {
+        var version = (await ReleaseOfAsync(admin)).GetProperty("version").GetString()!;
+        return await admin.PostAsJsonAsync(OfferRoute, new { pcIds, version, installNow });
+    }
+
     public static Task<HttpResponseMessage> CancelAsync(HttpClient admin, params int[] pcIds) =>
         admin.PostAsJsonAsync(CancelRoute, new { pcIds });
 

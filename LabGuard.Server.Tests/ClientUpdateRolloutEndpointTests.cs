@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using LabGuard.Server.ClientUpdates;
 using LabGuard.Server.Data;
@@ -199,6 +200,72 @@ public class ClientUpdateRolloutEndpointTests
     }
 
     [Fact]
+    public async Task Offer_WithoutInstallNow_StoresItAsFalse()
+    {
+        var (app, admin, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var pc = await AddPcAsync(app, "PC-01");
+
+        await OfferStoredAsync(admin, pc.Id);
+
+        var entry = await ClientUpdateOfListEntryAsync(admin, "PC-01");
+        Assert.False(entry!.Value.GetProperty("installNow").GetBoolean());
+        Assert.False((await StoredPcAsync(app, pc.Id)).ClientUpdateInstallNow);
+    }
+
+    [Fact]
+    public async Task Offer_WithInstallNow_StoresItAndTheListShowsIt()
+    {
+        var (app, admin, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var pc = await AddPcAsync(app, "PC-01");
+
+        var response = await OfferStoredInstallNowAsync(admin, true, pc.Id);
+
+        Assert.Equal(1, await AffectedAsync(response));
+        Assert.True((await StoredPcAsync(app, pc.Id)).ClientUpdateInstallNow);
+        var entry = await ListEntryAsync(admin, "PC-01");
+        Assert.True(entry.GetProperty("clientUpdate").GetProperty("installNow").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Offer_Requeued_ReplacesTheInstallNowChoice()
+    {
+        var (app, admin, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var pc = await AddPcAsync(app, "PC-01");
+        await OfferStoredInstallNowAsync(admin, true, pc.Id);
+
+        await OfferStoredAsync(admin, pc.Id);
+        Assert.False((await StoredPcAsync(app, pc.Id)).ClientUpdateInstallNow);
+
+        await OfferStoredInstallNowAsync(admin, true, pc.Id);
+        Assert.True((await StoredPcAsync(app, pc.Id)).ClientUpdateInstallNow);
+    }
+
+    [Theory]
+    [InlineData("\"yes\"")]
+    [InlineData("1")]
+    [InlineData("\"true\"")]
+    public async Task Offer_WithAnInstallNowThatIsNotABoolean_IsBadRequest(string installNow)
+    {
+        var (app, admin, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var pc = await AddPcAsync(app, "PC-01");
+        var body = $"{{\"pcIds\":[{pc.Id}],\"version\":\"0.20.0\",\"installNow\":{installNow}}}";
+
+        var response = await admin.PostAsync(OfferRoute, new StringContent(body, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(InvalidRequestMessage, await ErrorOf(response));
+        Assert.Null(await ClientUpdateOfListEntryAsync(admin, "PC-01"));
+    }
+
+    [Fact]
     public async Task Offer_Logs_WhatWasOfferedAndToHowMany()
     {
         var (app, admin, _) = await AppWithReleaseAsync("0.20.0");
@@ -287,6 +354,20 @@ public class ClientUpdateRolloutEndpointTests
 
         Assert.Null(await ClientUpdateOfListEntryAsync(admin, "PC-01"));
         Assert.NotNull(await ClientUpdateOfListEntryAsync(admin, "PC-02"));
+    }
+
+    [Fact]
+    public async Task Cancel_ClearsTheInstallNowChoice()
+    {
+        var (app, admin, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var pc = await AddPcAsync(app, "PC-01");
+        await OfferStoredInstallNowAsync(admin, true, pc.Id);
+
+        await CancelAsync(admin, pc.Id);
+
+        Assert.False((await StoredPcAsync(app, pc.Id)).ClientUpdateInstallNow);
     }
 
     [Fact]

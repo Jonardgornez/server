@@ -8,11 +8,12 @@ using Microsoft.EntityFrameworkCore;
 namespace LabGuard.Server.Pcs;
 
 // Sent by the administrator. PcIds names the PCs, and Version is the stored release the administrator saw. Both are required for an offer.
-public record PcClientUpdateOfferRequest(int[]? PcIds, string? Version);
+// InstallNow is optional and defaults to false: install even while the PC is in use, after a warning to the student.
+public record PcClientUpdateOfferRequest(int[]? PcIds, string? Version, bool? InstallNow);
 // Sent by the administrator to cancel. PcIds names the PCs.
 public record PcClientUpdateCancelRequest(int[]? PcIds);
 // A pending update as the administrator sees it. State is "pending" until the PC reports progress.
-public record PcClientUpdate(string TargetVersion, string State, string? Error);
+public record PcClientUpdate(string TargetVersion, string State, string? Error, bool InstallNow);
 
 public static partial class PcEndpoints
 {
@@ -38,6 +39,7 @@ public static partial class PcEndpoints
         }
 
         var pcIds = request.PcIds;
+        var installNow = request.InstallNow ?? false;
         var ct = http.RequestAborted;
         var now = clock.GetUtcNow();
         // The release is read inside the transaction, and the targets are written only while that same release is stored.
@@ -70,7 +72,8 @@ public static partial class PcEndpoints
                 .SetProperty(p => p.ClientUpdateTargetVersion, release)
                 .SetProperty(p => p.ClientUpdateState, (string?)null)
                 .SetProperty(p => p.ClientUpdateError, (string?)null)
-                .SetProperty(p => p.ClientUpdateStateAtUtc, (DateTimeOffset?)now), ct);
+                .SetProperty(p => p.ClientUpdateStateAtUtc, (DateTimeOffset?)now)
+                .SetProperty(p => p.ClientUpdateInstallNow, installNow), ct);
         await transaction.CommitAsync(ct);
 
         logger.LogInformation(
@@ -100,7 +103,7 @@ public static partial class PcEndpoints
         var affected = await ClientUpdateTargets.ClearWhereAsync(
             db,
             p => pcIds.Contains(p.Id)
-                && (p.ClientUpdateTargetVersion != null || p.ClientUpdateState != null || p.ClientUpdateError != null || p.ClientUpdateStateAtUtc != null),
+                && (p.ClientUpdateTargetVersion != null || p.ClientUpdateState != null || p.ClientUpdateError != null || p.ClientUpdateStateAtUtc != null || p.ClientUpdateInstallNow),
             ct);
         await transaction.CommitAsync(ct);
 

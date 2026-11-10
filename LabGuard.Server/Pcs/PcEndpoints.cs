@@ -122,7 +122,7 @@ public static partial class PcEndpoints
     // The state is "pending" until the PC reports progress on its update.
     private static PcClientUpdate? ToClientUpdate(Pc pc) =>
         pc.ClientUpdateTargetVersion is { } target
-            ? new PcClientUpdate(target, pc.ClientUpdateState ?? "pending", pc.ClientUpdateError)
+            ? new PcClientUpdate(target, pc.ClientUpdateState ?? "pending", pc.ClientUpdateError, pc.ClientUpdateInstallNow)
             : null;
 
     private static PcSessionSummary ToSummary(PcSession session, DateTimeOffset now) =>

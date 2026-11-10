@@ -50,4 +50,7 @@ public class Pc
     public string? ClientUpdateState { get; set; }
     public string? ClientUpdateError { get; set; }
     public DateTimeOffset? ClientUpdateStateAtUtc { get; set; }
+    // Set when the administrator chose "install now": the PC warns the student and signs them out before installing.
+    // Cleared with the target, so it only ever describes a pending update.
+    public bool ClientUpdateInstallNow { get; set; }
 }

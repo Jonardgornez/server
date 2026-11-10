@@ -15,5 +15,6 @@ public static class ClientUpdateTargets
                 .SetProperty(p => p.ClientUpdateTargetVersion, (string?)null)
                 .SetProperty(p => p.ClientUpdateState, (string?)null)
                 .SetProperty(p => p.ClientUpdateError, (string?)null)
-                .SetProperty(p => p.ClientUpdateStateAtUtc, (DateTimeOffset?)null), cancellationToken);
+                .SetProperty(p => p.ClientUpdateStateAtUtc, (DateTimeOffset?)null)
+                .SetProperty(p => p.ClientUpdateInstallNow, false), cancellationToken);
 }

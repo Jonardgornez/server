@@ -6,7 +6,8 @@ using Microsoft.EntityFrameworkCore;
 namespace LabGuard.Server.ClientUpdates;
 
 // The update a heartbeat offers a PC. The PC downloads the installer with this hash and checks it before running it.
-public record ClientUpdateOffer(string Version, string Sha256, long SizeBytes);
+// InstallNow is true when the administrator chose to install even while the PC is in use, after a warning to the student.
+public record ClientUpdateOffer(string Version, string Sha256, long SizeBytes, bool InstallNow);
 
 // What the PC reports on its heartbeat about its update. Invalid parts are ignored, so an odd client keeps heartbeating.
 public static class ClientUpdateHeartbeat
@@ -37,7 +38,7 @@ public static class ClientUpdateHeartbeat
         var pc = await db.Pcs
             .AsNoTracking()
             .Where(p => p.Id == pcId)
-            .Select(p => new { p.ClientVersion, p.ClientUpdateTargetVersion, p.ClientUpdateState, p.ClientUpdateError })
+            .Select(p => new { p.ClientVersion, p.ClientUpdateTargetVersion, p.ClientUpdateState, p.ClientUpdateError, p.ClientUpdateInstallNow })
             .FirstOrDefaultAsync(cancellationToken);
         if (pc?.ClientUpdateTargetVersion is not { } target)
         {
@@ -73,7 +74,7 @@ public static class ClientUpdateHeartbeat
                     .SetProperty(p => p.ClientUpdateStateAtUtc, (DateTimeOffset?)now), cancellationToken);
         }
 
-        return new ClientUpdateOffer(release.Version, release.Sha256, release.SizeBytes);
+        return new ClientUpdateOffer(release.Version, release.Sha256, release.SizeBytes, pc.ClientUpdateInstallNow);
     }
 
     // A version that isn't major.minor.patch is treated as not reported.

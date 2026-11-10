@@ -70,6 +70,39 @@ public class ClientUpdateHeartbeatTests
         Assert.NotNull(await ClientUpdateOfHeartbeatAsync(response));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Heartbeat_OffersTheInstallNowChoice_OfTheUpdate(bool installNow)
+    {
+        var (app, admin, pc, _, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var registered = await AddPcAsync(app, "PC-01");
+        await OfferStoredInstallNowAsync(admin, installNow, registered.Id);
+
+        var response = await HeartbeatWithAsync(pc, registered, new { clientVersion = "0.19.0" });
+
+        var offer = await ClientUpdateOfHeartbeatAsync(response);
+        Assert.Equal(installNow, offer!.Value.GetProperty("installNow").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Heartbeat_ReportingTheTargetVersion_ClearsTheInstallNowChoice()
+    {
+        var (app, admin, pc, _, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var registered = await AddPcAsync(app, "PC-01");
+        await OfferStoredInstallNowAsync(admin, true, registered.Id);
+
+        await HeartbeatWithAsync(pc, registered, new { clientVersion = "0.20.0" });
+
+        var stored = await StoredPcAsync(app, registered.Id);
+        Assert.Null(stored.ClientUpdateTargetVersion);
+        Assert.False(stored.ClientUpdateInstallNow);
+    }
+
     [Fact]
     public async Task Heartbeat_WithoutATarget_LeavesTheOfferOut()
     {
