@@ -36,6 +36,8 @@ public record HeartbeatScreenView(string ViewId, string Mode);
 // Login and Lock are the SHA-256 of each background image set, null when that image is not set.
 public record HeartbeatBackgrounds(string? Login, string? Lock);
 // Notice is the administrator's on-screen notice text, or null when the notice is turned off.
+// LockMessage is the message the lock screen shows while the PC is locked: the message given with the lock, else the setting.
+// Null while the PC is not locked. An older client ignores it.
 // ShutdownSeconds and RestartSeconds are set only on the one heartbeat that hands the PC a requested shutdown or restart,
 // and say how long it has to go down: the countdown stored with that delivery. Exactly one of them is set, so an older client
 // that only reads ShutdownSeconds never shuts down for a restart.
@@ -50,6 +52,7 @@ public record HeartbeatResponse(
     string? EndedReason,
     bool IsLocked,
     string? Notice,
+    string? LockMessage,
     int? ShutdownSeconds,
     int? RestartSeconds,
     bool PowerCancelled,
@@ -464,6 +467,7 @@ public static partial class ClientEndpoints
                 p.Id,
                 p.LastSeenUtc,
                 IsLocked = p.LockedAtUtc != null,
+                p.LockMessage,
                 p.ShutdownRequestedAtUtc,
                 p.ShutdownDeliveredAtUtc,
                 p.PowerAction,
@@ -559,6 +563,7 @@ public static partial class ClientEndpoints
             endedReason,
             known.IsLocked,
             settings.NoticeEnabled ? settings.NoticeText : null,
+            known.IsLocked ? known.LockMessage ?? settings.LockMessage : null,
             handOff.Delivery?.Action == PcShutdownRules.ShutdownAction ? handOff.Delivery.CountdownSeconds : null,
             handOff.Delivery?.Action == PcShutdownRules.RestartAction ? handOff.Delivery.CountdownSeconds : null,
             handOff.IsCancelled,

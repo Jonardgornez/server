@@ -13,6 +13,9 @@ public class Pc
 
     // Set while the administrator has locked the PC. Survives restarts and the PC being offline.
     public DateTimeOffset? LockedAtUtc { get; set; }
+    // The message the administrator gave when locking this PC. Null means the lock screen shows the setting's message.
+    // Cleared with the lock.
+    public string? LockMessage { get; set; }
 
     // Set when the administrator asks for a shutdown or restart. Cleared when a heartbeat delivers it, or when it goes stale.
     public DateTimeOffset? ShutdownRequestedAtUtc { get; set; }

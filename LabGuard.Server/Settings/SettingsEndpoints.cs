@@ -13,7 +13,8 @@ public record SettingsResponse(
     NoticeSettings Notice,
     int IdleTimeoutMinutes,
     string DefaultViewMode,
-    int PowerCountdownSeconds);
+    int PowerCountdownSeconds,
+    string LockMessage);
 
 // Every member is nullable, so a missing field gets a clear 400 instead of a binding failure.
 // Minutes is a double so a fractional value reaches validation instead of failing JSON parsing.
@@ -24,7 +25,8 @@ public record SettingsRequest(
     NoticeRequest? Notice,
     double? IdleTimeoutMinutes,
     string? DefaultViewMode,
-    double? PowerCountdownSeconds);
+    double? PowerCountdownSeconds,
+    string? LockMessage);
 
 public static class SettingsEndpoints
 {
@@ -103,6 +105,22 @@ public static class SettingsEndpoints
             return "Enter the notice text, or turn the notice off.";
         }
 
+        var lockMessage = request.LockMessage?.Trim() ?? "";
+        if (lockMessage.Length == 0)
+        {
+            return "Enter the lock screen message.";
+        }
+
+        if (UnpairedSurrogates.IsPresentIn(lockMessage) || lockMessage.Any(char.IsControl))
+        {
+            return "The lock screen message can't contain a character that can't be shown.";
+        }
+
+        if (lockMessage.Length > ServerSettings.MaxLockMessageLength)
+        {
+            return $"The lock screen message must be {ServerSettings.MaxLockMessageLength} characters or fewer.";
+        }
+
         if (WholeNumberOrNull(request.IdleTimeoutMinutes, ServerSettings.MinIdleTimeoutMinutes, ServerSettings.MaxIdleTimeoutMinutes) is not { } idleMinutes)
         {
             return $"Idle timeout must be a whole number of minutes from {ServerSettings.MinIdleTimeoutMinutes} to {ServerSettings.MaxIdleTimeoutMinutes}.";
@@ -125,6 +143,7 @@ public static class SettingsEndpoints
         settings.IdleTimeoutMinutes = idleMinutes;
         settings.PowerCountdownSeconds = powerCountdown;
         settings.DefaultViewMode = request.DefaultViewMode;
+        settings.LockMessage = lockMessage;
         return null;
     }
 
@@ -139,5 +158,6 @@ public static class SettingsEndpoints
             new NoticeSettings(settings.NoticeEnabled, settings.NoticeText),
             settings.IdleTimeoutMinutes,
             settings.DefaultViewMode,
-            settings.PowerCountdownSeconds);
+            settings.PowerCountdownSeconds,
+            settings.LockMessage);
 }
