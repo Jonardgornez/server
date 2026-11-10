@@ -1,6 +1,7 @@
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Backgrounds;
 using LabGuard.Server.Auth;
+using LabGuard.Server.ClientUpdates;
 using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
 using LabGuard.Server.Logs;
@@ -40,6 +41,7 @@ builder.Services.AddOpenApi();
 builder.Services.AddAdminAuth();
 builder.Services.AddClientRateLimiting();
 builder.Services.AddScreenViewing();
+builder.Services.AddClientUpdates();
 builder.Services.AddSingleton<DummyLoginCredential>();
 builder.Services.AddSingleton<PcMessageSends>();
 builder.Services.AddSingleton<ILocalAddressSource, NetworkInterfaceAddressSource>();
@@ -62,6 +64,9 @@ using (var scope = app.Services.CreateScope())
     var services = scope.ServiceProvider;
     var db = services.GetRequiredService<AppDbContext>();
     db.Database.Migrate();
+    // Files left by a crash or a failed delete are removed; the stored installer, if any, is kept.
+    services.GetRequiredService<ClientReleaseFiles>().SweepExcept(
+        await db.ClientReleases.Select(r => r.FileName).FirstOrDefaultAsync());
     await AdminSeeder.SeedAsync(
         db,
         app.Configuration,
@@ -109,6 +114,7 @@ app.MapSessionLogEndpoints();
 app.MapScreenViewEndpoints();
 app.MapSettingsEndpoints();
 app.MapBackgroundEndpoints();
+app.MapClientUpdateEndpoints();
 app.MapServerInfoEndpoints();
 app.MapClientEndpoints();
 

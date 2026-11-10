@@ -38,4 +38,13 @@ public class Pc
     // Failures older than this are forgotten, so the count doesn't build up across days.
     public DateTimeOffset? LastFailedLoginUtc { get; set; }
     public DateTimeOffset? LoginLockedUntilUtc { get; set; }
+
+    // The client version the PC last reported. Null until a client that reports it has sent a heartbeat.
+    public string? ClientVersion { get; set; }
+    // The version the administrator has offered this PC. Null when no update is pending.
+    public string? ClientUpdateTargetVersion { get; set; }
+    // What the PC reported about its pending update: "downloading", "installing" or "failed". Null until it reports one.
+    public string? ClientUpdateState { get; set; }
+    public string? ClientUpdateError { get; set; }
+    public DateTimeOffset? ClientUpdateStateAtUtc { get; set; }
 }

@@ -16,6 +16,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ScreenControlEvent> ScreenControlEvents => Set<ScreenControlEvent>();
     public DbSet<PcMessage> PcMessages => Set<PcMessage>();
     public DbSet<ScreenBackground> ScreenBackgrounds => Set<ScreenBackground>();
+    public DbSet<ClientRelease> ClientReleases => Set<ClientRelease>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -88,6 +89,21 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(p => p.ShutdownDeliveredAtUtc).HasConversion(unixMilliseconds);
             entity.Property(p => p.PowerAction).HasMaxLength(16);
             entity.Property(p => p.PowerCancelRequestedAtUtc).HasConversion(unixMilliseconds);
+            entity.Property(p => p.ClientVersion).HasMaxLength(32);
+            entity.Property(p => p.ClientUpdateTargetVersion).HasMaxLength(32);
+            entity.Property(p => p.ClientUpdateState).HasMaxLength(16);
+            entity.Property(p => p.ClientUpdateError).HasMaxLength(200);
+            entity.Property(p => p.ClientUpdateStateAtUtc).HasConversion(unixMilliseconds);
+        });
+
+        modelBuilder.Entity<ClientRelease>(entity =>
+        {
+            entity.ToTable("ClientRelease", table => table.HasCheckConstraint("CK_ClientRelease_SingleRow", $"\"Id\" = {ClientRelease.SingletonId}"));
+            entity.Property(r => r.Id).ValueGeneratedNever();
+            entity.Property(r => r.Version).HasMaxLength(32).IsRequired();
+            entity.Property(r => r.Sha256).HasMaxLength(64).IsRequired();
+            entity.Property(r => r.FileName).HasMaxLength(80).IsRequired();
+            entity.Property(r => r.UploadedAtUtc).HasConversion(unixMilliseconds);
         });
 
         modelBuilder.Entity<PcSession>(entity =>

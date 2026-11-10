@@ -50,6 +50,40 @@ namespace LabGuard.Server.Migrations
                     b.ToTable("AdminAccounts");
                 });
 
+            modelBuilder.Entity("LabGuard.Server.Data.ClientRelease", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Sha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("UploadedAtUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Version")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ClientRelease", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_ClientRelease_SingleRow", "\"Id\" = 1");
+                        });
+                });
+
             modelBuilder.Entity("LabGuard.Server.Data.LoginRequest", b =>
                 {
                     b.Property<int>("Id")
@@ -101,6 +135,25 @@ namespace LabGuard.Server.Migrations
                     b.Property<int>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("ClientUpdateError")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ClientUpdateState")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ClientUpdateStateAtUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ClientUpdateTargetVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ClientVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
 
                     b.Property<int>("FailedLoginCount")
                         .HasColumnType("INTEGER");

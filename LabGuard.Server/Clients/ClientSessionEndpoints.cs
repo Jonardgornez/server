@@ -1,8 +1,10 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Backgrounds;
 using LabGuard.Server.Auth;
+using LabGuard.Server.ClientUpdates;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using LabGuard.Server.Pcs;
@@ -20,7 +22,15 @@ public record PcLoginResponse(int SessionId, string Username, DefaultTimeRespons
 // PowerCancelHandled is sent by a PC that has acted on a cancel of its shutdown or restart. It only matters while a cancel is recorded.
 // PowerCountdownRunning is sent by a PC that is counting down a shutdown or restart it was handed. Null from an older client.
 // InternetBlockApplied is the internet block the PC has in effect. Null from an older client, which leaves the stored value as it is.
-public record HeartbeatRequest(int? SessionId, bool? PowerCancelHandled, bool? PowerCountdownRunning, bool? InternetBlockApplied);
+// ClientVersion and ClientUpdate are read leniently by ClientUpdateHeartbeat, so a wrongly typed value is ignored instead of
+// costing the whole body, the session id included. Null from an older client.
+public record HeartbeatRequest(
+    int? SessionId,
+    bool? PowerCancelHandled,
+    bool? PowerCountdownRunning,
+    bool? InternetBlockApplied,
+    JsonElement? ClientVersion,
+    JsonElement? ClientUpdate);
 // ScreenView is set while an administrator has a live view of this PC open. The PC streams only then, and an older client ignores it.
 public record HeartbeatScreenView(string ViewId, string Mode);
 // Login and Lock are the SHA-256 of each background image set, null when that image is not set.
@@ -34,6 +44,7 @@ public record HeartbeatBackgrounds(string? Login, string? Lock);
 // Messages are the administrator's messages handed to the PC on this heartbeat. The field is left out when there are none.
 // LoginRequest is this PC's latest login request while it is pending or was decided a moment ago. The field is left out otherwise.
 // Backgrounds holds the hashes of the login and lock background images, so the PC downloads only a changed one. Left out when neither is set.
+// ClientUpdate offers the stored installer while this PC's pending update targets it and it is still behind. Left out otherwise.
 public record HeartbeatResponse(
     PcSessionInfo? Session,
     string? EndedReason,
@@ -46,7 +57,8 @@ public record HeartbeatResponse(
     HeartbeatScreenView? ScreenView,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PcMessageDelivery[]? Messages = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatLoginRequest? LoginRequest = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatBackgrounds? Backgrounds = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatBackgrounds? Backgrounds = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ClientUpdateOffer? ClientUpdate = null);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -541,6 +553,7 @@ public static partial class ClientEndpoints
         var settings = await ServerSettingsStore.GetAsync(db, ct);
         var backgrounds = await BackgroundEndpoints.HeartbeatHashesAsync(db, ct);
         var screenView = screens.CurrentFor(pcId) is { } viewer ? new HeartbeatScreenView(viewer.ViewId, viewer.Mode) : null;
+        var clientUpdate = await ClientUpdateHeartbeat.HandleAsync(db, pcId, request, now, ct);
         return Results.Ok(new HeartbeatResponse(
             active is null ? null : SessionLifecycle.ToInfo(active, now),
             endedReason,
@@ -553,7 +566,8 @@ public static partial class ClientEndpoints
             screenView,
             messages.Length == 0 ? null : messages,
             loginRequest,
-            backgrounds));
+            backgrounds,
+            clientUpdate));
     }
 
     internal static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)

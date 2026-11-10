@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading.RateLimiting;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Backgrounds;
+using LabGuard.Server.ClientUpdates;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -23,6 +24,9 @@ public static partial class ClientEndpoints
     // A PC downloads a background only when its hash changes, so a few a minute is plenty and bounds the bytes a PC can pull.
     public const int MaxBackgroundDownloadsPerMinute = 10;
     public const string BackgroundRateLimitPolicy = "pc-background";
+    // The installer is about 75 MB, so a PC needs only a few downloads a minute, and this bounds the bytes a PC can pull.
+    public const int MaxClientUpdateDownloadsPerMinute = 6;
+    public const string ClientUpdateRateLimitPolicy = "pc-client-update";
 
     private const int MaxTokenLength = 64;
     private const string BearerPrefix = "Bearer ";
@@ -58,6 +62,8 @@ public static partial class ClientEndpoints
                 PerAddressLimit(context, TrafficRateLimitPolicy, MaxTrafficPerMinute));
             options.AddPolicy(BackgroundRateLimitPolicy, context =>
                 PerAddressLimit(context, BackgroundRateLimitPolicy, MaxBackgroundDownloadsPerMinute));
+            options.AddPolicy(ClientUpdateRateLimitPolicy, context =>
+                PerAddressLimit(context, ClientUpdateRateLimitPolicy, MaxClientUpdateDownloadsPerMinute));
             // Per address, so registering fake PCs can't get around the per-PC login lockout.
             options.AddPolicy(LoginRateLimitPolicy, context =>
                 PerAddressLimit(context, LoginRateLimitPolicy, MaxLoginsPerMinute));
@@ -104,6 +110,8 @@ public static partial class ClientEndpoints
         group.MapPost("/login-request/cancel", CancelLoginRequestAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapGet("/backgrounds/{kind}", BackgroundEndpoints.DownloadForPcAsync).RequireRateLimiting(BackgroundRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapGet("/client-update/{sha256}", ClientUpdateDownloadEndpoints.DownloadForPcAsync).RequireRateLimiting(ClientUpdateRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         return app;
     }

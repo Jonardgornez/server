@@ -10,6 +10,7 @@ namespace LabGuard.Server.Pcs;
 
 // ShutdownState is null, "shutting-down", "shutdown", "restarting", "rebooting" or "cancelling". IsServerPc is true for the PC this server runs on.
 // InternetBlocked is what the administrator wants. InternetBlockApplied is what the PC last reported, null until it has reported.
+// ClientVersion is the client version the PC last reported, null until it has reported one. ClientUpdate is null when no update is pending.
 public record PcResponse(
     int Id,
     string Name,
@@ -22,7 +23,9 @@ public record PcResponse(
     string? ShutdownState,
     bool IsServerPc,
     bool InternetBlocked,
-    bool? InternetBlockApplied);
+    bool? InternetBlockApplied,
+    string? ClientVersion,
+    PcClientUpdate? ClientUpdate);
 
 // Username is null for an admin unlock, which has no account.
 public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
@@ -58,6 +61,8 @@ public static partial class PcEndpoints
         group.MapPost("/cancel-power", CancelPowerManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/messages", SendMessageAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/internet", SetInternetBlockAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/client-update", OfferClientUpdateAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/client-update/cancel", CancelClientUpdateAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 
@@ -104,9 +109,17 @@ public static partial class PcEndpoints
                 PcShutdownRules.StateOf(p, isOnline, now),
                 machineAddresses is not null && ServerPcRule.IsServerPc(p.IpAddress, machineAddresses),
                 p.InternetBlocked,
-                p.InternetBlockApplied);
+                p.InternetBlockApplied,
+                p.ClientVersion,
+                ToClientUpdate(p));
         }));
     }
+
+    // The state is "pending" until the PC reports progress on its update.
+    private static PcClientUpdate? ToClientUpdate(Pc pc) =>
+        pc.ClientUpdateTargetVersion is { } target
+            ? new PcClientUpdate(target, pc.ClientUpdateState ?? "pending", pc.ClientUpdateError)
+            : null;
 
     private static PcSessionSummary ToSummary(PcSession session, DateTimeOffset now) =>
         new(session.IsAdminUnlock ? null : session.Username, session.StartedAtUtc, SessionLifecycle.ToTime(session.DefaultTimeMinutes), SessionLifecycle.SecondsRemaining(session, now));
