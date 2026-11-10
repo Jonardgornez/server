@@ -123,6 +123,21 @@ public class PcEndpointTests
     }
 
     [Fact]
+    public async Task List_SortsPcsByNameNumber_NotRegistrationOrder()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        await AddAsync(app, "PC-10", ip: "192.168.1.30");
+        await AddAsync(app, "PC-2", ip: "192.168.1.31");
+        await AddAsync(app, "PC-11", ip: "192.168.1.32");
+        await AddAsync(app, "PC-1", ip: "192.168.1.33");
+
+        var entries = await JsonOf(await client.GetAsync("/api/pcs"));
+
+        Assert.Equal(["PC-1", "PC-2", "PC-10", "PC-11"], entries.EnumerateArray().Select(e => e.GetProperty("name").GetString()));
+    }
+
+    [Fact]
     public async Task List_ShowsIsLocked_ForAnOfflineLockedPcToo()
     {
         using var app = new TestApp();
@@ -163,7 +178,7 @@ public class PcEndpointTests
     }
 
     [Fact]
-    public async Task List_IsOrderedByRegistration_NewestLast()
+    public async Task List_MixedNames_AreGroupedByTextThenNumber()
     {
         using var app = new TestApp();
         using var client = await SignedInAsync(app);
@@ -173,7 +188,7 @@ public class PcEndpointTests
 
         var names = (await JsonOf(await client.GetAsync("/api/pcs"))).EnumerateArray().Select(e => e.GetProperty("name").GetString()!).ToArray();
 
-        Assert.Equal(["pc-10", "PC-02", "Lab-1"], names);
+        Assert.Equal(["Lab-1", "PC-02", "pc-10"], names);
     }
 
     [Fact]
