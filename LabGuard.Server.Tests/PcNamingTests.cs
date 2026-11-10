@@ -51,4 +51,59 @@ public class PcNamingTests
     {
         Assert.Equal("PC-2", PcNaming.NextFreeName([name]));
     }
+
+    [Fact]
+    public void DisplayOrder_SortsByNumberValue()
+    {
+        string[] names = ["PC-10", "PC-2", "PC-11", "PC-1", "PC-3", "PC-9"];
+
+        Assert.Equal(["PC-1", "PC-2", "PC-3", "PC-9", "PC-10", "PC-11"], names.Order(PcNaming.DisplayOrder));
+    }
+
+    [Fact]
+    public void DisplayOrder_IgnoresCaseOfTheText()
+    {
+        string[] names = ["PC-3", "pc-2", "Pc-1"];
+
+        Assert.Equal(["Pc-1", "pc-2", "PC-3"], names.Order(PcNaming.DisplayOrder));
+    }
+
+    [Fact]
+    public void DisplayOrder_GroupsByTextBeforeNumber()
+    {
+        string[] names = ["PC-2", "Lab-10", "PC-1", "Lab-2"];
+
+        Assert.Equal(["Lab-2", "Lab-10", "PC-1", "PC-2"], names.Order(PcNaming.DisplayOrder));
+    }
+
+    [Fact]
+    public void DisplayOrder_PutsANameWithoutANumberBeforeNumberedOnes()
+    {
+        string[] names = ["PC-1", "PC-"];
+
+        Assert.Equal(["PC-", "PC-1"], names.Order(PcNaming.DisplayOrder));
+    }
+
+    [Fact]
+    public void DisplayOrder_ComparesLeadingZerosByValue()
+    {
+        string[] names = ["PC-10", "PC-02", "PC-1"];
+
+        Assert.Equal(["PC-1", "PC-02", "PC-10"], names.Order(PcNaming.DisplayOrder));
+    }
+
+    [Fact]
+    public void DisplayOrder_HandlesNumbersTooLongForAnInteger()
+    {
+        string[] names = ["PC-123456789012345678901234567890", "PC-99999999999999999999"];
+
+        Assert.Equal(["PC-99999999999999999999", "PC-123456789012345678901234567890"], names.Order(PcNaming.DisplayOrder));
+    }
+
+    [Fact]
+    public void DisplayOrder_SameValueDifferentSpelling_IsStillOrdered()
+    {
+        Assert.NotEqual(0, PcNaming.DisplayOrder.Compare("PC-1", "PC-01"));
+        Assert.Equal(0, PcNaming.DisplayOrder.Compare("PC-1", "PC-1"));
+    }
 }

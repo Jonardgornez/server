@@ -1,5 +1,6 @@
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Auth;
+using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using LabGuard.Server.Requests;
@@ -80,11 +81,14 @@ public static partial class PcEndpoints
         ILocalAddressSource localAddresses,
         CancellationToken cancellationToken)
     {
-        var pcs = await db.Pcs
+        // Name order, the way a person reads it: PC-1, PC-2, ..., PC-10. The sort runs here because the database
+        // compares names as plain text, which would put PC-10 before PC-2. The Id breaks any tie so the order is stable.
+        var pcs = (await db.Pcs
             .AsNoTracking()
-            // Registration order: the Id grows with each new PC, so a newly added PC appears last.
-            .OrderBy(p => p.Id)
-            .ToListAsync(cancellationToken);
+            .ToListAsync(cancellationToken))
+            .OrderBy(p => p.Name, PcNaming.DisplayOrder)
+            .ThenBy(p => p.Id)
+            .ToList();
 
         // At most one active session per PC (unique index).
         var activeSessions = (await db.PcSessions
