@@ -89,8 +89,7 @@ public class SessionLogEndpointTests
 
     private static TestApp NewApp()
     {
-        var app = new TestApp();
-        app.Time.SetUtcNow(Now);
+        var app = new TestApp(startUtc: Now);
         app.Time.SetLocalTimeZone(PlusTen);
         return app;
     }

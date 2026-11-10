@@ -35,13 +35,15 @@ public sealed class TestApp : WebApplicationFactory<Program>
 
     private readonly Action<IServiceCollection>? _configureServices;
 
-    public TestApp(string environment = "Development", Action<IServiceCollection>? configureServices = null)
+    // startUtc fixes the fake clock's start for tests that need a known date; the clock can't be wound back once it runs.
+    public TestApp(string environment = "Development", Action<IServiceCollection>? configureServices = null, DateTimeOffset? startUtc = null)
     {
         _environment = environment;
         _configureServices = configureServices;
+        Time = new FailableTimeProvider(startUtc ?? DateTimeOffset.UtcNow);
     }
 
-    public FailableTimeProvider Time { get; } = new(DateTimeOffset.UtcNow);
+    public FailableTimeProvider Time { get; }
 
     /// <summary>A LAN address of the machine running the test server. Other PCs in tests use 203.0.113.x.</summary>
     public const string MachineLanAddress = "198.51.100.10";
