@@ -752,6 +752,18 @@ public class ClientRegistrationEndpointTests
     }
 
     [Fact]
+    public async Task Status_ReadsExpired_WhenTheApprovedPcWasRemovedMeanwhile()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var token = await app.RegisterPcAsync(client);
+        var tokenHash = HashOf(token);
+        await app.WithDbAsync(db => db.Pcs.Where(p => p.TokenHash == tokenHash).ExecuteDeleteAsync());
+
+        Assert.Equal("expired", await StatusOfAsync(client, token));
+    }
+
+    [Fact]
     public async Task Status_ReadsApproved_WhenTheRequestRowIsGone_AndThePcIsRegistered()
     {
         using var app = new TestApp();

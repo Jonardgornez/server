@@ -237,6 +237,13 @@ public static partial class ClientEndpoints
         }
 
         var status = PublicStatus(request.Status, request.RequestedAtUtc, clock.GetUtcNow());
+
+        // An approved request whose PC the administrator has since removed is over: the PC must register again.
+        if (status == "approved" && pcName is null)
+        {
+            status = "expired";
+        }
+
         return Results.Ok(new RegistrationStatusResponse(status, status == "approved" ? pcName : null));
     }
 
