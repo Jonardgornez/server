@@ -16,6 +16,9 @@ public static class RegistrationRequestEndpoints
 {
     private const string NotPendingMessage = "Registration request not found, or it has already been answered or has expired.";
 
+    // A taken name is replaced by the next free one; this bounds the retries if names keep being taken at the same moment.
+    private const int MaxNameAttempts = 3;
+
     public static IEndpointRouteBuilder MapRegistrationRequestEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/registration-requests");
@@ -43,8 +46,8 @@ public static class RegistrationRequestEndpoints
     }
 
     // Claims the request before anything else. That is the transaction's first write, so a concurrent decision waits
-    // instead of deadlocking, and only one caller can ever claim it. A rejection that is the request's own fault
-    // (the name is taken) denies it and commits, so the PC is told and it leaves the list. Other rejections roll back.
+    // instead of deadlocking, and only one caller can ever claim it. If the request's assigned name was taken meanwhile,
+    // the PC gets the next free PC-<number> instead. Only when that keeps failing is it denied, so the PC is told.
     private static async Task<IResult> AcceptAsync(int id, HttpContext http, AppDbContext db, TimeProvider clock)
     {
         if (await AuthEndpoints.ReadBodyAsync<RegistrationDecisionRequest>(http.Request) is null)
@@ -66,28 +69,45 @@ public static class RegistrationRequestEndpoints
         }
 
         var request = await db.PcRegistrationRequests.AsNoTracking().SingleAsync(r => r.Id == id, ct);
-        var nameTaken = await db.Pcs.AnyAsync(p => p.Name == request.Name, ct);
-        if (!nameTaken)
+        var name = request.Name;
+        var nameTaken = true;
+        for (var attempt = 0; attempt < MaxNameAttempts && nameTaken; attempt++)
         {
-            // The PC already holds the token whose hash the request carries, so it can heartbeat from now on.
-            db.Pcs.Add(new Pc
+            if (await db.Pcs.AnyAsync(p => p.Name == name, ct))
             {
-                Name = request.Name,
+                name = await ClientEndpoints.NextFreeNameAsync(db, pendingSince, excludeRequestId: id, ct);
+            }
+
+            // The PC already holds the token whose hash the request carries, so it can heartbeat from now on.
+            var pc = new Pc
+            {
+                Name = name,
                 TokenHash = request.TokenHash,
                 IpAddress = request.IpAddress,
                 RegisteredAtUtc = now,
                 LastSeenUtc = now,
-            });
+            };
+            db.Pcs.Add(pc);
 
             try
             {
                 await db.SaveChangesAsync(ct);
+                nameTaken = false;
             }
             catch (DbUpdateException exception) when (ClientEndpoints.IsUniqueViolation(exception))
             {
-                // The name was taken between the check above and this insert.
-                nameTaken = true;
+                // The name was taken between the check above and this insert. The next attempt picks a fresh one.
+                db.Entry(pc).State = EntityState.Detached;
+                name = await ClientEndpoints.NextFreeNameAsync(db, pendingSince, excludeRequestId: id, ct);
             }
+        }
+
+        if (!nameTaken && name != request.Name)
+        {
+            // The request shows the name the PC really got.
+            await db.PcRegistrationRequests
+                .Where(r => r.Id == id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.Name, name), ct);
         }
 
         if (nameTaken)

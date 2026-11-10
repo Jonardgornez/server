@@ -11,7 +11,8 @@ namespace LabGuard.Server.Clients;
 public record CreateRegistrationRequestBody(string? Name, string? Commitment);
 public record CreateRegistrationRequestResponse(string Token, string ServerNonce);
 public record RevealRegistrationRequestBody(string? Nonce);
-public record RegistrationStatusResponse(string Status);
+// Name is the PC's assigned name, sent once the request is approved; it is null before that.
+public record RegistrationStatusResponse(string Status, string? Name = null);
 
 // A new PC asks to join and waits for the administrator. Until it is accepted, its token only works for status, reveal and cancel.
 // The PC commits to its nonce first and gets the server's nonce back. Then it reveals its nonce, which must match the commitment.
@@ -34,9 +35,6 @@ public static partial class ClientEndpoints
     // Serializes creating requests, so concurrent requests can't count past the pending limit together.
     private static readonly SemaphoreSlim RegistrationGate = new(1, 1);
 
-    [GeneratedRegex(@"^[A-Za-z0-9._-]+\z")]
-    private static partial Regex NamePattern();
-
     // 32 bytes as 64 lowercase hex characters: a commitment, a nonce or a server nonce.
     [GeneratedRegex(@"^[0-9a-f]{64}\z")]
     private static partial Regex Bytes32HexPattern();
@@ -52,13 +50,7 @@ public static partial class ClientEndpoints
             return AuthEndpoints.InvalidRequest();
         }
 
-        var name = body.Name?.Trim() ?? "";
-        if (name.Length == 0 || name.Length > MaxNameLength || !NamePattern().IsMatch(name))
-        {
-            return AuthEndpoints.BadRequest(
-                $"PC name must be 1 to {MaxNameLength} characters: letters, numbers, dots, underscores and hyphens only.");
-        }
-
+        // The server names the PC (see PcNaming), so a name an older client still sends is ignored.
         if (body.Commitment is not { } commitment || !Bytes32HexPattern().IsMatch(commitment))
         {
             return AuthEndpoints.BadRequest(BadHexMessage);
@@ -71,7 +63,7 @@ public static partial class ClientEndpoints
 
         try
         {
-            return await StoreRegistrationRequestAsync(http, db, clock, name, commitment);
+            return await StoreRegistrationRequestAsync(http, db, clock, commitment);
         }
         finally
         {
@@ -84,7 +76,6 @@ public static partial class ClientEndpoints
         HttpContext http,
         AppDbContext db,
         TimeProvider clock,
-        string name,
         string commitment)
     {
         var ct = http.RequestAborted;
@@ -107,11 +98,6 @@ public static partial class ClientEndpoints
                 .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.Status, RegistrationRequestStatus.Cancelled), ct);
         }
 
-        if (await db.Pcs.AnyAsync(p => p.Name == name, ct))
-        {
-            return NameTaken();
-        }
-
         var pendingSince = PcRegistrationRequest.PendingSince(now);
         var pendingCount = await db.PcRegistrationRequests
             .CountAsync(r => r.Status == RegistrationRequestStatus.Pending && r.RequestedAtUtc >= pendingSince, ct);
@@ -119,6 +105,9 @@ public static partial class ClientEndpoints
         {
             return Results.Json(new ErrorResponse(PendingFullMessage), statusCode: StatusCodes.Status429TooManyRequests);
         }
+
+        // Runs under the registration gate, after this PC's own earlier request was cancelled, so it can get its number back.
+        var name = await NextFreeNameAsync(db, pendingSince, excludeRequestId: null, ct);
 
         // The token is what the PC keeps. Only its hash is stored; accepting the request moves the hash to the new Pc.
         var token = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(TokenBytes));
@@ -137,6 +126,17 @@ public static partial class ClientEndpoints
         await transaction.CommitAsync(ct);
 
         return Results.Json(new CreateRegistrationRequestResponse(token, serverNonce), statusCode: StatusCodes.Status202Accepted);
+    }
+
+    // The lowest PC-<number> that no registered PC and no other waiting request uses.
+    internal static async Task<string> NextFreeNameAsync(AppDbContext db, DateTimeOffset pendingSince, int? excludeRequestId, CancellationToken ct)
+    {
+        var used = await db.Pcs.Select(p => p.Name).ToListAsync(ct);
+        used.AddRange(await db.PcRegistrationRequests
+            .Where(r => r.Status == RegistrationRequestStatus.Pending && r.RequestedAtUtc >= pendingSince && r.Id != excludeRequestId)
+            .Select(r => r.Name)
+            .ToListAsync(ct));
+        return PcNaming.NextFreeName(used);
     }
 
     // Only while the request is pending. The nonce must match the commitment; a wrong nonce cancels the request, and a revealed nonce is never replaced.
@@ -226,15 +226,18 @@ public static partial class ClientEndpoints
             .Where(r => r.TokenHash == tokenHash)
             .Select(r => new { r.Status, r.RequestedAtUtc })
             .FirstOrDefaultAsync(ct);
+        // The registered PC's own name, from the Pc row, so it is the name the administrator sees even after a rename.
+        var pcName = await db.Pcs.Where(p => p.TokenHash == tokenHash).Select(p => p.Name).FirstOrDefaultAsync(ct);
         if (request is null)
         {
             // The request row may have been cleaned up after the PC was accepted. The registered PC is proof enough.
-            return await db.Pcs.AnyAsync(p => p.TokenHash == tokenHash, ct)
-                ? Results.Ok(new RegistrationStatusResponse("approved"))
+            return pcName is not null
+                ? Results.Ok(new RegistrationStatusResponse("approved", pcName))
                 : NotRegistered();
         }
 
-        return Results.Ok(new RegistrationStatusResponse(PublicStatus(request.Status, request.RequestedAtUtc, clock.GetUtcNow())));
+        var status = PublicStatus(request.Status, request.RequestedAtUtc, clock.GetUtcNow());
+        return Results.Ok(new RegistrationStatusResponse(status, status == "approved" ? pcName : null));
     }
 
     // Cancelled reads as expired, so the PC only ever sees pending, approved, denied or expired.

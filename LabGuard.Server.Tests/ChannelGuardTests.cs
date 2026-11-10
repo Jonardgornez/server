@@ -119,7 +119,7 @@ public class ChannelGuardTests
     {
         using var app = new TestApp();
         using var client = app.CreatePcClient();
-        var json = $$"""{"name":"PC-01","commitment":"{{TestApp.NewCommitment()}}"}""";
+        var json = $$"""{"commitment":"{{TestApp.NewCommitment()}}"}""";
         var padding = new string(' ', ChannelGuard.MaxClientBodyBytes - json.Length);
 
         var response = await client.PostAsync("/api/client/register-requests", new StringContent(json + padding, Encoding.UTF8, "application/json"));
@@ -330,7 +330,7 @@ public class ChannelGuardTests
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/client/ping")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await ipv6.GetAsync("/api/client/ping")).StatusCode);
-        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody("PC-01"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync("/api/client/register-requests", TestApp.RegistrationRequestBody())).StatusCode);
     }
 
     [Fact]

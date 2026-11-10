@@ -312,8 +312,8 @@ public class PcEndpointTests
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
         using var pc = app.CreatePcClient();
-        var token = await app.RegisterPcAsync(pc, "PC-01");
-        var id = await app.WithDbAsync(db => db.Pcs.Where(p => p.Name == "PC-01").Select(p => p.Id).SingleAsync());
+        var token = await app.RegisterPcAsync(pc);
+        var id = await app.WithDbAsync(db => db.Pcs.Where(p => p.Name == "PC-1").Select(p => p.Id).SingleAsync());
         app.Time.Advance(TimeSpan.FromSeconds(20));
 
         Assert.Equal(HttpStatusCode.NoContent, (await admin.DeleteAsync($"/api/pcs/{id}")).StatusCode);
@@ -327,8 +327,8 @@ public class PcEndpointTests
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
         using var pc = app.CreatePcClient();
-        var token = await app.RegisterPcAsync(pc, "PC-01");
-        var id = await app.WithDbAsync(db => db.Pcs.Where(p => p.Name == "PC-01").Select(p => p.Id).SingleAsync());
+        var token = await app.RegisterPcAsync(pc);
+        var id = await app.WithDbAsync(db => db.Pcs.Where(p => p.Name == "PC-1").Select(p => p.Id).SingleAsync());
         app.Time.Advance(TimeSpan.FromSeconds(60));
         await HeartbeatAsync(pc, token);
 
