@@ -31,6 +31,9 @@ public static partial class ClientEndpoints
     // The installer is about 75 MB, so a PC needs only a few downloads a minute, and this bounds the bytes a PC can pull.
     public const int MaxClientUpdateDownloadsPerMinute = 6;
     public const string ClientUpdateRateLimitPolicy = "pc-client-update";
+    // The service sends its report once a minute, so 6 a minute leaves room for a retry without letting a PC flood the table.
+    public const int MaxServiceReportsPerMinute = 6;
+    public const string ServiceReportRateLimitPolicy = "pc-service-report";
 
     private const int MaxTokenLength = 64;
     private const string BearerPrefix = "Bearer ";
@@ -70,6 +73,8 @@ public static partial class ClientEndpoints
                 PerAddressLimit(context, WallpaperRateLimitPolicy, MaxWallpaperDownloadsPerMinute));
             options.AddPolicy(ClientUpdateRateLimitPolicy, context =>
                 PerAddressLimit(context, ClientUpdateRateLimitPolicy, MaxClientUpdateDownloadsPerMinute));
+            options.AddPolicy(ServiceReportRateLimitPolicy, context =>
+                PerAddressLimit(context, ServiceReportRateLimitPolicy, MaxServiceReportsPerMinute));
             // Per address, so registering fake PCs can't get around the per-PC login lockout.
             options.AddPolicy(LoginRateLimitPolicy, context =>
                 PerAddressLimit(context, LoginRateLimitPolicy, MaxLoginsPerMinute));
@@ -100,6 +105,8 @@ public static partial class ClientEndpoints
         group.MapPost("/reconnect", ReconnectAsync).RequireRateLimiting(RegistrationRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/heartbeat", HeartbeatAsync).RequireRateLimiting(TrafficRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapPost("/service-report", ServiceReportAsync).RequireRateLimiting(ServiceReportRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/login", LoginAsync).RequireRateLimiting(LoginRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();

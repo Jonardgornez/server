@@ -327,6 +327,49 @@ namespace LabGuard.Server.Migrations
                     b.ToTable("PcRegistrationRequests");
                 });
 
+            modelBuilder.Entity("LabGuard.Server.Data.PcServiceReport", b =>
+                {
+                    b.Property<int>("PcId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("ClientRunning")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ClientVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EventsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ReceivedAtUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ServiceVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UpdateError")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UpdateState")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UpdateVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("UserSignedIn")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("PcId");
+
+                    b.ToTable("PcServiceReports");
+                });
+
             modelBuilder.Entity("LabGuard.Server.Data.PcSession", b =>
                 {
                     b.Property<int>("Id")
@@ -598,6 +641,15 @@ namespace LabGuard.Server.Migrations
                         .WithMany()
                         .HasForeignKey("WallpaperId")
                         .OnDelete(DeleteBehavior.SetNull);
+                });
+
+            modelBuilder.Entity("LabGuard.Server.Data.PcServiceReport", b =>
+                {
+                    b.HasOne("LabGuard.Server.Data.Pc", null)
+                        .WithOne()
+                        .HasForeignKey("LabGuard.Server.Data.PcServiceReport", "PcId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 #pragma warning restore 612, 618
         }

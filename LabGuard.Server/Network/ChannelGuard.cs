@@ -9,7 +9,10 @@ namespace LabGuard.Server.Network;
 public sealed class ChannelGuard(RequestDelegate next, ServerPorts ports, ILogger<ChannelGuard> logger)
 {
     public const int MaxClientBodyBytes = 4 * 1024;
+    // The service report carries up to 20 events, so it is the one PC route with a larger body.
+    public const int MaxServiceReportBodyBytes = 32 * 1024;
     private const string ClientPathPrefix = "/api/client/";
+    private const string ServiceReportPath = "/api/client/service-report";
 
     private static readonly HashSet<string> AdminHosts = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -48,6 +51,9 @@ public sealed class ChannelGuard(RequestDelegate next, ServerPorts ports, ILogge
         return isClientPath ? Reject(context, StatusCodes.Status404NotFound) : next(context);
     }
 
+    private static int BodyLimitFor(PathString path) =>
+        path.Equals(ServiceReportPath, StringComparison.OrdinalIgnoreCase) ? MaxServiceReportBodyBytes : MaxClientBodyBytes;
+
     private static bool IsLoopback(IPAddress? address)
     {
         if (address is null)
@@ -60,7 +66,8 @@ public sealed class ChannelGuard(RequestDelegate next, ServerPorts ports, ILogge
 
     private async Task InvokeClientAsync(HttpContext context)
     {
-        if (context.Request.ContentLength > MaxClientBodyBytes)
+        var maxBodyBytes = BodyLimitFor(context.Request.Path);
+        if (context.Request.ContentLength > maxBodyBytes)
         {
             await Reject(context, StatusCodes.Status413PayloadTooLarge);
             return;
@@ -69,7 +76,7 @@ public sealed class ChannelGuard(RequestDelegate next, ServerPorts ports, ILogge
         var bodyLimit = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
         if (bodyLimit is { IsReadOnly: false })
         {
-            bodyLimit.MaxRequestBodySize = MaxClientBodyBytes;
+            bodyLimit.MaxRequestBodySize = maxBodyBytes;
         }
 
         // Handled here so the developer exception page never echoes a PC's request headers (its token) on the LAN port.

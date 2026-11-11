@@ -9,12 +9,18 @@ namespace LabGuard.Server.ClientUpdates;
 // InstallNow is true when the administrator chose to install even while the PC is in use, after a warning to the student.
 public record ClientUpdateOffer(string Version, string Sha256, long SizeBytes, bool InstallNow);
 
+// What a PC reports about its update: the version it is updating to, its state and its error. Only a report for the stored target is recorded.
+internal sealed record ClientUpdateReport(string Version, string State, string? Error);
+
 // What the PC reports on its heartbeat about its update. Invalid parts are ignored, so an odd client keeps heartbeating.
 public static class ClientUpdateHeartbeat
 {
     public const int MaxErrorLength = 200;
 
     private static readonly string[] ReportedStates = ["downloading", "installing", "failed"];
+
+    // The update states a client reports on its heartbeat. Progress in any other state is never recorded on the PC.
+    internal static bool IsReportedState(string state) => ReportedStates.Contains(state);
 
     // Records the version and update progress the PC reports, clears a target that is done or no longer the stored release,
     // and returns the offer when the PC still needs the stored release.
@@ -27,12 +33,43 @@ public static class ClientUpdateHeartbeat
     {
         // The stored version always describes the client sending this heartbeat. A client older than 0.20.0 sends none, so a heartbeat
         // without a readable version makes it unknown: otherwise a PC moved to an older client would keep showing the newer version.
-        // Written only when it changed, so an ordinary heartbeat doesn't write the row.
-        var reportedText = ReadVersion(request?.ClientVersion)?.ToString();
-        await db.Pcs
-            .Where(p => p.Id == pcId && p.ClientVersion != reportedText)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ClientVersion, reportedText), cancellationToken);
+        await StoreVersionAsync(db, pcId, ReadVersion(request?.ClientVersion)?.ToString(), cancellationToken);
+        return await OfferAsync(db, pcId, ReadReport(request?.ClientUpdate), now, cancellationToken);
+    }
 
+    // The service report is a second source of the same client's version and update. A readable version is stored. An unreadable one
+    // leaves the stored version alone: the heartbeat is the source that sets it, and a report without one doesn't say the client changed.
+    internal static async Task<ClientUpdateOffer?> HandleServiceReportAsync(
+        AppDbContext db,
+        int pcId,
+        ReleaseVersion? clientVersion,
+        ClientUpdateReport? report,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (clientVersion is { } version)
+        {
+            await StoreVersionAsync(db, pcId, version.ToString(), cancellationToken);
+        }
+
+        return await OfferAsync(db, pcId, report, now, cancellationToken);
+    }
+
+    // Written only when it changed, so an ordinary heartbeat doesn't write the row.
+    private static async Task StoreVersionAsync(AppDbContext db, int pcId, string? version, CancellationToken cancellationToken)
+    {
+        await db.Pcs
+            .Where(p => p.Id == pcId && p.ClientVersion != version)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ClientVersion, version), cancellationToken);
+    }
+
+    private static async Task<ClientUpdateOffer?> OfferAsync(
+        AppDbContext db,
+        int pcId,
+        ClientUpdateReport? report,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
         var pc = await db.Pcs
             .AsNoTracking()
             .Where(p => p.Id == pcId)
@@ -61,7 +98,6 @@ public static class ClientUpdateHeartbeat
             return null;
         }
 
-        var report = ReadReport(request?.ClientUpdate);
         if (report is { } progress && progress.Version == target && (progress.State != pc.ClientUpdateState || progress.Error != pc.ClientUpdateError))
         {
             await db.Pcs
@@ -76,12 +112,10 @@ public static class ClientUpdateHeartbeat
     }
 
     // A version that isn't major.minor.patch is treated as not reported.
-    private static ReleaseVersion? ReadVersion(JsonElement? element) =>
+    internal static ReleaseVersion? ReadVersion(JsonElement? element) =>
         element is { ValueKind: JsonValueKind.String } text && ReleaseVersion.TryParse(text.GetString(), out var version)
             ? version
             : null;
-
-    private sealed record ClientUpdateReport(string Version, string State, string? Error);
 
     // The report is ignored when its state or version is invalid. The error text is cleaned up, never refused, and the state still counts.
     private static ClientUpdateReport? ReadReport(JsonElement? element)
@@ -91,7 +125,7 @@ public static class ClientUpdateHeartbeat
             return null;
         }
 
-        if (ReadString(report, "state") is not { } state || !ReportedStates.Contains(state))
+        if (ReadString(report, "state") is not { } state || !IsReportedState(state))
         {
             return null;
         }
@@ -104,9 +138,12 @@ public static class ClientUpdateHeartbeat
         return new ClientUpdateReport(version.ToString(), state, CleanError(ReadString(report, "error")));
     }
 
-    // Plain text only: control, invisible formatting and bidi characters are stripped, the text is trimmed and capped at the limit.
+    // Plain text only, capped at the error length.
+    internal static string? CleanError(string? text) => CleanText(text, MaxErrorLength);
+
+    // Plain text only: control, invisible formatting and bidi characters are stripped, the text is trimmed and capped at the length.
     // The cap never splits a surrogate pair. Null when nothing is left.
-    internal static string? CleanError(string? text)
+    internal static string? CleanText(string? text, int maxLength)
     {
         if (text is null)
         {
@@ -114,9 +151,9 @@ public static class ClientUpdateHeartbeat
         }
 
         var plain = new string(text.Where(character => !IsStrippedCharacter(character)).ToArray()).Trim();
-        if (plain.Length > MaxErrorLength)
+        if (plain.Length > maxLength)
         {
-            var cut = MaxErrorLength;
+            var cut = maxLength;
             if (char.IsHighSurrogate(plain[cut - 1]))
             {
                 cut--;
@@ -139,6 +176,6 @@ public static class ClientUpdateHeartbeat
         || character is >= '\u2066' and <= '\u2069'
         || character == '\uFEFF';
 
-    private static string? ReadString(JsonElement element, string name) =>
+    internal static string? ReadString(JsonElement element, string name) =>
         element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 }

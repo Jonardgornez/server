@@ -18,6 +18,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ScreenBackground> ScreenBackgrounds => Set<ScreenBackground>();
     public DbSet<Wallpaper> Wallpapers => Set<Wallpaper>();
     public DbSet<ClientRelease> ClientReleases => Set<ClientRelease>();
+    public DbSet<PcServiceReport> PcServiceReports => Set<PcServiceReport>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -120,6 +121,23 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(r => r.Sha256).HasMaxLength(64).IsRequired();
             entity.Property(r => r.FileName).HasMaxLength(80).IsRequired();
             entity.Property(r => r.UploadedAtUtc).HasConversion(unixMilliseconds);
+        });
+
+        modelBuilder.Entity<PcServiceReport>(entity =>
+        {
+            // One report per PC, removed with the PC.
+            entity.HasKey(r => r.PcId);
+            entity.HasOne<Pc>()
+                .WithOne()
+                .HasForeignKey<PcServiceReport>(r => r.PcId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.Property(r => r.ReceivedAtUtc).HasConversion(unixMilliseconds);
+            entity.Property(r => r.ServiceVersion).HasMaxLength(32);
+            entity.Property(r => r.ClientVersion).HasMaxLength(32);
+            entity.Property(r => r.UpdateVersion).HasMaxLength(32);
+            entity.Property(r => r.UpdateState).HasMaxLength(16);
+            entity.Property(r => r.UpdateError).HasMaxLength(200);
+            entity.Property(r => r.EventsJson).IsRequired();
         });
 
         modelBuilder.Entity<PcSession>(entity =>

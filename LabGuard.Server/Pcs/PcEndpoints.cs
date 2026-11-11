@@ -14,6 +14,7 @@ namespace LabGuard.Server.Pcs;
 // InternetBlocked is what the administrator wants. InternetBlockApplied is what the PC last reported, null until it has reported.
 // ClientVersion is the client version the PC last reported, null until it has reported one. ClientUpdate is null when no update is pending.
 // Wallpaper is the wallpaper the administrator gave this PC, null when it has none.
+// Service is the latest status report of the PC's background service, null when it has sent none.
 public record PcResponse(
     int Id,
     string Name,
@@ -29,10 +30,14 @@ public record PcResponse(
     bool? InternetBlockApplied,
     string? ClientVersion,
     PcClientUpdate? ClientUpdate,
-    WallpaperRef? Wallpaper);
+    WallpaperRef? Wallpaper,
+    PcServiceSummary? Service);
 
 // Username is null for an admin unlock, which has no account.
 public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
+
+// LastSeenAt is when the service last reported, and ClientRunning is whether the PC's client was running then.
+public record PcServiceSummary(DateTimeOffset LastSeenAt, bool ClientRunning);
 
 // Sent as {} by the single lock and unlock routes; the body is required so a cross-origin form can't send it.
 public record PcAdminActionRequest;
@@ -58,6 +63,7 @@ public static partial class PcEndpoints
         var group = app.MapGroup("/api/pcs");
         group.MapGet("/", ListAsync);
         group.MapDelete("/{id:int}", DeleteAsync);
+        group.MapGet("/{id:int}/diagnostics", DiagnosticsAsync);
         group.MapPost("/{id:int}/lock", LockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/unlock", UnlockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/time", AdjustTimeAsync).AddEndpointFilter<PcStorageErrorFilter>();
@@ -111,6 +117,13 @@ public static partial class PcEndpoints
             .ToListAsync(cancellationToken))
             .ToDictionary(w => w.Id);
 
+        // Only the id, receive time and running flag of each PC's latest service report are read.
+        var services = (await db.PcServiceReports
+            .AsNoTracking()
+            .Select(r => new { r.PcId, r.ReceivedAtUtc, r.ClientRunning })
+            .ToListAsync(cancellationToken))
+            .ToDictionary(r => r.PcId);
+
         var now = clock.GetUtcNow();
         // When the addresses can't be read, no PC is shown as the server. The list still answers.
         var machineAddresses = localAddresses.ReadOrNull();
@@ -134,7 +147,8 @@ public static partial class PcEndpoints
                 p.InternetBlockApplied,
                 p.ClientVersion,
                 ToClientUpdate(p),
-                p.WallpaperId is { } wallpaperId && wallpapers.TryGetValue(wallpaperId, out var wallpaper) ? wallpaper : null);
+                p.WallpaperId is { } wallpaperId && wallpapers.TryGetValue(wallpaperId, out var wallpaper) ? wallpaper : null,
+                services.TryGetValue(p.Id, out var service) ? new PcServiceSummary(service.ReceivedAtUtc, service.ClientRunning) : null);
         }));
     }
 
