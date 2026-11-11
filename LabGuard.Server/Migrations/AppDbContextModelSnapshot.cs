@@ -171,6 +171,9 @@ namespace LabGuard.Server.Migrations
                         .HasMaxLength(45)
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("KeepAwake")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long?>("LastFailedLoginUtc")
                         .HasColumnType("INTEGER");
 

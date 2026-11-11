@@ -14,6 +14,7 @@ namespace LabGuard.Server.Pcs;
 // InternetBlocked is what the administrator wants. InternetBlockApplied is what the PC last reported, null until it has reported.
 // ClientVersion is the client version the PC last reported, null until it has reported one. ClientUpdate is null when no update is pending.
 // Wallpaper is the wallpaper the administrator gave this PC, null when it has none.
+// KeepAwake is whether the PC's background service keeps it awake with the screen on.
 // Service is the latest status report of the PC's background service, null when it has sent none.
 public record PcResponse(
     int Id,
@@ -31,6 +32,7 @@ public record PcResponse(
     string? ClientVersion,
     PcClientUpdate? ClientUpdate,
     WallpaperRef? Wallpaper,
+    bool KeepAwake,
     PcServiceSummary? Service);
 
 // Username is null for an admin unlock, which has no account.
@@ -81,6 +83,7 @@ public static partial class PcEndpoints
         group.MapPost("/client-update", OfferClientUpdateAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/client-update/cancel", CancelClientUpdateAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/wallpaper", SetWallpaperAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/keep-awake", SetKeepAwakeAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 
@@ -148,6 +151,7 @@ public static partial class PcEndpoints
                 p.ClientVersion,
                 ToClientUpdate(p),
                 p.WallpaperId is { } wallpaperId && wallpapers.TryGetValue(wallpaperId, out var wallpaper) ? wallpaper : null,
+                p.KeepAwake,
                 services.TryGetValue(p.Id, out var service) ? new PcServiceSummary(service.ReceivedAtUtc, service.ClientRunning) : null);
         }));
     }

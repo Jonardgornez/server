@@ -17,8 +17,10 @@ public record ServiceReportRequest(
     JsonElement? Events);
 
 // ClientUpdate is the offer the heartbeat would make: the stored installer, while the PC's pending update targets it and it is still behind.
-// Left out otherwise, so the answer is {} when there is nothing to offer.
-public record ServiceReportResponse([property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ClientUpdateOffer? ClientUpdate);
+// Left out otherwise. KeepAwake is always written: while true, the service keeps the PC awake with the screen on.
+public record ServiceReportResponse(
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ClientUpdateOffer? ClientUpdate,
+    bool KeepAwake);
 
 // The service report is a second source of the PC's version and update, next to the heartbeat. Only the latest report of a PC is kept.
 // It never changes LastSeenUtc, which stays with the client heartbeat.
@@ -52,7 +54,8 @@ public static partial class ClientEndpoints
         }
 
         var clientUpdate = await ClientUpdateHeartbeat.HandleServiceReportAsync(db, pcId, values.ClientVersion, HeartbeatProgress(values.Update), now, ct);
-        return Results.Ok(new ServiceReportResponse(clientUpdate));
+        var keepAwake = await db.Pcs.AsNoTracking().Where(p => p.Id == pcId).Select(p => p.KeepAwake).FirstOrDefaultAsync(ct);
+        return Results.Ok(new ServiceReportResponse(clientUpdate, keepAwake));
     }
 
     // Only the update states the heartbeat also reports are recorded on the PC. The service's own pending and waiting stay in the
