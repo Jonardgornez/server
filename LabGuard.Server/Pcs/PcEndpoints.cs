@@ -39,6 +39,8 @@ public record PcLockRequest(string? Message);
 public record PcLockManyRequest(int[]? Ids, string? Message);
 // Action is add-time, open-time or time-out. Minutes is a double so a fraction reaches validation instead of failing JSON parsing.
 public record PcTimeRequest(string? Action, double? Minutes);
+// Sent by the bulk time route. Action and Minutes are checked as in PcTimeRequest, and Ids as in PcIdsRequest.
+public record PcTimeManyRequest(int[]? Ids, string? Action, double? Minutes);
 // Sent by the bulk lock and unlock routes. A missing, empty or over-long list is refused.
 public record PcIdsRequest(int[]? Ids);
 public record AffectedPcsResponse(int Affected);
@@ -56,6 +58,7 @@ public static partial class PcEndpoints
         group.MapPost("/{id:int}/lock", LockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/unlock", UnlockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/time", AdjustTimeAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/time", AdjustTimeManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/lock", LockManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/unlock", UnlockManyAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/shutdown", ShutdownAsync).AddEndpointFilter<PcStorageErrorFilter>();
