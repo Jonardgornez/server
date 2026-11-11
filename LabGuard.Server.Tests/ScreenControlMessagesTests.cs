@@ -75,6 +75,7 @@ public class ScreenControlMessagesTests
     [InlineData("{\"t\":\"up\",\"b\":0,\"x\":1,\"y\":1}", InputRate.Exempt)]
     [InlineData("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}", InputRate.Exempt)]
     [InlineData("{\"t\":\"release\"}", InputRate.Exempt)]
+    [InlineData("{\"t\":\"sas\"}", InputRate.Sas)]
     public void Parse_SetsTheRateClass_OnlyMovesAndPressesAreCapped(string json, InputRate expected)
     {
         Assert.Equal(expected, Parse(json).Rate);
@@ -87,6 +88,18 @@ public class ScreenControlMessagesTests
 
         Assert.Equal(BrowserControlKind.Input, message.Kind);
         Assert.Equal("{\"t\":\"release\"}", message.Canonical);
+    }
+
+    [Theory]
+    [InlineData("{\"t\":\"sas\"}")]
+    [InlineData("{ \"t\" : \"sas\" }")]
+    public void Parse_Sas_IsRelayedAsItsCanonicalText(string json)
+    {
+        var message = Parse(json);
+
+        Assert.Equal(BrowserControlKind.Input, message.Kind);
+        Assert.Equal("{\"t\":\"sas\"}", message.Canonical);
+        Assert.Equal(HeldEffect.None, message.Held);
     }
 
     [Theory]
@@ -132,6 +145,11 @@ public class ScreenControlMessagesTests
     [InlineData("{\"t\":\"control\",\"on\":\"yes\"}")]
     [InlineData("{\"t\":\"control\"}")]
     [InlineData("{\"t\":\"control\",\"on\":true,\"x\":1}")]
+    [InlineData("{\"t\":\"sas\",\"x\":1}")]
+    [InlineData("{\"t\":\"sas\",\"on\":true}")]
+    [InlineData("{\"t\":\"sas\",\"t\":\"sas\"}")]
+    [InlineData("{\"t\":\"SAS\"}")]
+    [InlineData("{\"t\":5,\"sas\":true}")]
     public void Parse_MalformedOrOutOfRange_IsDropped(string json)
     {
         Assert.Equal(BrowserControlKind.Invalid, Parse(json).Kind);
@@ -170,6 +188,7 @@ public class ScreenControlMessagesTests
     [InlineData("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":true}", HeldEffect.Press, "kKeyA")]
     [InlineData("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":false}", HeldEffect.Release, "kKeyA")]
     [InlineData("{\"t\":\"release\"}", HeldEffect.ReleaseAll, "")]
+    [InlineData("{\"t\":\"sas\"}", HeldEffect.None, "")]
     [InlineData("{\"t\":\"move\",\"x\":1,\"y\":1}", HeldEffect.None, "")]
     [InlineData("{\"t\":\"wheel\",\"dx\":0,\"dy\":120}", HeldEffect.None, "")]
     public void Parse_SetsWhatTheInputDoesToHeldKeys(string json, HeldEffect expected, string heldKey)

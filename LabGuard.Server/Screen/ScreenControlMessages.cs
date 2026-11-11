@@ -74,6 +74,9 @@ public static class ScreenControlMessages
             "release" => HasExactly(fields, "t")
                 ? new BrowserControlMessage(BrowserControlKind.Input, "{\"t\":\"release\"}", InputRate.Exempt, HeldEffect.ReleaseAll)
                 : Dropped,
+            "sas" => HasExactly(fields, "t")
+                ? new BrowserControlMessage(BrowserControlKind.Input, "{\"t\":\"sas\"}", InputRate.Sas)
+                : Dropped,
             _ => Dropped,
         };
     }
@@ -221,12 +224,13 @@ public enum BrowserControlKind
     Input,
 }
 
-// How often the input may be relayed. Only moves and the press or scroll inputs have their own caps. Exempt inputs have a backstop.
+// How often the input may be relayed. Moves, presses and scrolls, and the secure attention sequence have their own caps. Exempt inputs have a backstop.
 public enum InputRate
 {
     Exempt,
     Move,
     Other,
+    Sas,
 }
 
 // What an input does to the keys and buttons held on the PC. The server relays an up or release only for something it relayed as down.

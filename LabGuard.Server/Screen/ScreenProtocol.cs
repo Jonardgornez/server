@@ -53,6 +53,8 @@ public static class ScreenProtocol
     public static readonly TimeSpan ControlConfirmTimeout = TimeSpan.FromSeconds(5);
     // Up, key-up and release are never capped by the limits above. This backstop bounds them anyway.
     public const int MaxExemptInputPerSecond = 1000;
+    // Ctrl+Alt+Del is a secure attention sequence. It is capped on its own, so it can't be repeated faster than once a second.
+    public const int MaxSasPerSecond = 1;
     // The keys and buttons the server has relayed as held at once. A press beyond this is dropped.
     public const int MaxHeldInputs = 256;
     // A viewer may ask for control this often. Requests beyond it are ignored.
