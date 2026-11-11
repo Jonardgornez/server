@@ -16,12 +16,8 @@ public static class BackgroundEndpoints
 {
     private const string UnknownKindMessage = "Unknown screen background.";
     private const string NotSetMessage = "No background is set for this screen.";
-    private const string InvalidImageMessage = "Choose a PNG or JPEG image.";
-    private const string TooLargeMessage = "The image must be 5 MB or smaller.";
-    private const string TooManyPixelsMessage = "The image must be 7680 × 4320 pixels (8K) or smaller.";
     // SQLite reports a duplicate text primary key with this code, not the unique-index code that ClientEndpoints.IsUniqueViolation checks.
     private const int SqlitePrimaryKeyViolationCode = 1555;
-    private const int ReadChunkBytes = 80 * 1024;
 
     private sealed record StoredBackground(string Kind, string ContentType, long SizeBytes, string Sha256, DateTime UpdatedAtUtc);
     private sealed record BackgroundFile(string ContentType, byte[] Data, string Sha256);
@@ -68,7 +64,7 @@ public static class BackgroundEndpoints
             return Error(NotSetMessage, StatusCodes.Status404NotFound);
         }
 
-        return ImageResult(http, file);
+        return ImageResult(http, file.ContentType, file.Data);
     }
 
     // The body is the raw image, so the declared content type and the file signature are both checked before anything is stored.
@@ -79,39 +75,12 @@ public static class BackgroundEndpoints
             return Error(UnknownKindMessage, StatusCodes.Status404NotFound);
         }
 
-        var mediaType = BackgroundImageRules.MediaTypeOf(http.Request.ContentType);
-        if (!BackgroundImageRules.IsSupportedMediaType(mediaType))
+        return await ImageUploadReader.ReadAsync(http.Request, async image =>
         {
-            return AuthEndpoints.BadRequest(InvalidImageMessage);
-        }
-
-        if (http.Request.ContentLength is { } declaredBytes && !BackgroundImageRules.IsWithinSizeLimit(declaredBytes))
-        {
-            return Error(TooLargeMessage, StatusCodes.Status413PayloadTooLarge);
-        }
-
-        var ct = http.RequestAborted;
-        if (await ReadWithinLimitAsync(http.Request.Body, ct) is not { } data)
-        {
-            return Error(TooLargeMessage, StatusCodes.Status413PayloadTooLarge);
-        }
-
-        if (!BackgroundImageRules.IsValidImage(mediaType, data)
-            || !BackgroundImageRules.TryReadPixelSize(mediaType, data, out var width, out var height))
-        {
-            return AuthEndpoints.BadRequest(InvalidImageMessage);
-        }
-
-        if (!BackgroundImageRules.IsWithinPixelLimit(width, height))
-        {
-            return AuthEndpoints.BadRequest(TooManyPixelsMessage);
-        }
-
-        var now = clock.GetUtcNow();
-        var sha256 = BackgroundImageRules.Sha256Of(data);
-        await StoreAsync(db, new ImageUpload(kind, mediaType, data, sha256, now.UtcDateTime), ct);
-
-        return Results.Ok(new BackgroundInfo(mediaType, data.Length, sha256, now));
+            var now = clock.GetUtcNow();
+            await StoreAsync(db, new ImageUpload(kind, image.ContentType, image.Data, image.Sha256, now.UtcDateTime), http.RequestAborted);
+            return Results.Ok(new BackgroundInfo(image.ContentType, image.Data.Length, image.Sha256, now));
+        });
     }
 
     private static async Task<IResult> DeleteAsync(string kind, AppDbContext db, CancellationToken cancellationToken)
@@ -165,7 +134,7 @@ public static class BackgroundEndpoints
             return Error(NotSetMessage, StatusCodes.Status404NotFound);
         }
 
-        return ImageResult(http, file);
+        return ImageResult(http, file.ContentType, file.Data);
     }
 
     // If-None-Match can hold several quoted tags, separated by commas.
@@ -235,29 +204,6 @@ public static class BackgroundEndpoints
             .Select(b => new BackgroundFile(b.ContentType, b.Data, b.Sha256))
             .FirstOrDefaultAsync(cancellationToken);
 
-    // Reads the whole body, but stops as soon as it would pass the limit, so an oversized upload never fills memory.
-    // Null when the body is over the limit.
-    private static async Task<byte[]?> ReadWithinLimitAsync(Stream body, CancellationToken cancellationToken)
-    {
-        using var buffer = new MemoryStream();
-        var chunk = new byte[ReadChunkBytes];
-        while (true)
-        {
-            var read = await body.ReadAsync(chunk, cancellationToken);
-            if (read == 0)
-            {
-                return buffer.ToArray();
-            }
-
-            if (buffer.Length + read > BackgroundImageRules.MaxBytes)
-            {
-                return null;
-            }
-
-            buffer.Write(chunk, 0, read);
-        }
-    }
-
     private static BackgroundInfo? InfoOf(List<StoredBackground> stored, string kind) =>
         stored.FirstOrDefault(b => b.Kind == kind) is { } background
             ? new BackgroundInfo(
@@ -268,12 +214,12 @@ public static class BackgroundEndpoints
             : null;
 
     // The image is shown inline and never executed: no sniffing, and a CSP that blocks any script, style or embedded content.
-    private static IResult ImageResult(HttpContext http, BackgroundFile file)
+    internal static IResult ImageResult(HttpContext http, string contentType, byte[] data)
     {
         http.Response.Headers["X-Content-Type-Options"] = "nosniff";
         http.Response.Headers["Content-Disposition"] = "inline";
         http.Response.Headers["Content-Security-Policy"] = "default-src 'none'; sandbox";
-        return Results.Bytes(file.Data, file.ContentType);
+        return Results.Bytes(data, contentType);
     }
 
     private static IResult Error(string message, int statusCode) =>

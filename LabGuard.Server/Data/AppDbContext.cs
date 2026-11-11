@@ -16,6 +16,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ScreenControlEvent> ScreenControlEvents => Set<ScreenControlEvent>();
     public DbSet<PcMessage> PcMessages => Set<PcMessage>();
     public DbSet<ScreenBackground> ScreenBackgrounds => Set<ScreenBackground>();
+    public DbSet<Wallpaper> Wallpapers => Set<Wallpaper>();
     public DbSet<ClientRelease> ClientReleases => Set<ClientRelease>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -95,6 +96,20 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(p => p.ClientUpdateState).HasMaxLength(16);
             entity.Property(p => p.ClientUpdateError).HasMaxLength(200);
             entity.Property(p => p.ClientUpdateStateAtUtc).HasConversion(unixMilliseconds);
+            entity.HasOne<Wallpaper>()
+                .WithMany()
+                .HasForeignKey(p => p.WallpaperId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<Wallpaper>(entity =>
+        {
+            entity.Property(w => w.ContentType).HasMaxLength(16).IsRequired();
+            entity.Property(w => w.Data).IsRequired();
+            entity.Property(w => w.Sha256).HasMaxLength(64).IsRequired();
+            // One row per distinct image, enforced by the database.
+            entity.HasIndex(w => w.Sha256).IsUnique();
+            entity.Property(w => w.CreatedAtUtc).HasConversion(unixMilliseconds);
         });
 
         modelBuilder.Entity<ClientRelease>(entity =>

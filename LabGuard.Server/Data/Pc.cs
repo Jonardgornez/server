@@ -36,6 +36,9 @@ public class Pc
     // What the PC last reported it applied. Null until a client that reports it has sent a heartbeat, so older clients show as unknown.
     public bool? InternetBlockApplied { get; set; }
 
+    // The desktop wallpaper the administrator gave this PC. Null for none. Set null if the wallpaper is ever removed.
+    public int? WallpaperId { get; set; }
+
     // Lockout for user logins attempted from this PC.
     public int FailedLoginCount { get; set; }
     // Failures older than this are forgotten, so the count doesn't build up across days.

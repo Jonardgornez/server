@@ -45,6 +45,7 @@ public record HeartbeatBackgrounds(string? Login, string? Lock);
 // InternetBlocked is true while the administrator wants this PC's internet blocked. The PC applies it and reports it back.
 // Messages are the administrator's messages handed to the PC on this heartbeat. The field is left out when there are none.
 // LoginRequest is this PC's latest login request while it is pending or was decided a moment ago. The field is left out otherwise.
+// Wallpaper is the SHA-256 of this PC's own wallpaper, null when the administrator has given it none. The PC downloads it only when it changes.
 // Backgrounds holds the hashes of the login and lock background images, so the PC downloads only a changed one. Left out when neither is set.
 // ClientUpdate offers the stored installer while this PC's pending update targets it and it is still behind. Left out otherwise.
 public record HeartbeatResponse(
@@ -58,6 +59,7 @@ public record HeartbeatResponse(
     bool PowerCancelled,
     bool InternetBlocked,
     HeartbeatScreenView? ScreenView,
+    string? Wallpaper,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PcMessageDelivery[]? Messages = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatLoginRequest? LoginRequest = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatBackgrounds? Backgrounds = null,
@@ -475,6 +477,8 @@ public static partial class ClientEndpoints
                 p.PowerCancelRequestedAtUtc,
                 p.InternetBlockApplied,
                 p.InternetBlocked,
+                // The hash of this PC's own wallpaper, read in the same statement. Null when the PC has none.
+                WallpaperSha256 = db.Wallpapers.Where(w => w.Id == p.WallpaperId).Select(w => w.Sha256).FirstOrDefault(),
             })
             .FirstOrDefaultAsync(ct);
         if (known is null)
@@ -569,6 +573,7 @@ public static partial class ClientEndpoints
             handOff.IsCancelled,
             known.InternetBlocked,
             screenView,
+            known.WallpaperSha256,
             messages.Length == 0 ? null : messages,
             loginRequest,
             backgrounds,
