@@ -359,6 +359,35 @@ public class ClientUpdateHeartbeatTests
     }
 
     [Fact]
+    public async Task Heartbeat_ReportingALowerVersion_ReplacesTheStoredVersion()
+    {
+        var (app, admin, pc, _, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var registered = await AddPcAsync(app, "PC-01");
+
+        await HeartbeatWithAsync(pc, registered, new { clientVersion = "0.22.3" });
+        await HeartbeatWithAsync(pc, registered, new { clientVersion = "0.20.5" });
+
+        Assert.Equal("0.20.5", (await StoredPcAsync(app, registered.Id)).ClientVersion);
+    }
+
+    [Fact]
+    public async Task Heartbeat_WithoutAVersion_MakesTheStoredVersionUnknown()
+    {
+        // A client older than 0.20.0 reports no version. It must not keep showing the newer client that ran before it.
+        var (app, admin, pc, _, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var registered = await AddPcAsync(app, "PC-01");
+
+        await HeartbeatWithAsync(pc, registered, new { clientVersion = "0.22.3" });
+        await HeartbeatWithAsync(pc, registered, new { });
+
+        Assert.Null((await StoredPcAsync(app, registered.Id)).ClientVersion);
+    }
+
+    [Fact]
     public async Task Heartbeat_WithWronglyTypedUpdateFields_StillAnswers200_AndStoresNothing()
     {
         var (app, admin, pc, _, _) = await AppWithReleaseAsync("0.20.0");

@@ -25,15 +25,13 @@ public static class ClientUpdateHeartbeat
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var reportedVersion = ReadVersion(request?.ClientVersion);
-        if (reportedVersion is { } version)
-        {
-            // Written only when it changed, so an ordinary heartbeat doesn't write the row.
-            var text = version.ToString();
-            await db.Pcs
-                .Where(p => p.Id == pcId && (p.ClientVersion == null || p.ClientVersion != text))
-                .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ClientVersion, text), cancellationToken);
-        }
+        // The stored version always describes the client sending this heartbeat. A client older than 0.20.0 sends none, so a heartbeat
+        // without a readable version makes it unknown: otherwise a PC moved to an older client would keep showing the newer version.
+        // Written only when it changed, so an ordinary heartbeat doesn't write the row.
+        var reportedText = ReadVersion(request?.ClientVersion)?.ToString();
+        await db.Pcs
+            .Where(p => p.Id == pcId && p.ClientVersion != reportedText)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ClientVersion, reportedText), cancellationToken);
 
         var pc = await db.Pcs
             .AsNoTracking()
