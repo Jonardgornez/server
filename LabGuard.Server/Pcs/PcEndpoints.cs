@@ -5,6 +5,7 @@ using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using LabGuard.Server.Requests;
 using LabGuard.Server.Sessions;
+using LabGuard.Server.Wallpapers;
 using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Pcs;
@@ -12,6 +13,7 @@ namespace LabGuard.Server.Pcs;
 // ShutdownState is null, "shutting-down", "shutdown", "restarting", "rebooting" or "cancelling". IsServerPc is true for the PC this server runs on.
 // InternetBlocked is what the administrator wants. InternetBlockApplied is what the PC last reported, null until it has reported.
 // ClientVersion is the client version the PC last reported, null until it has reported one. ClientUpdate is null when no update is pending.
+// Wallpaper is the wallpaper the administrator gave this PC, null when it has none.
 public record PcResponse(
     int Id,
     string Name,
@@ -26,7 +28,8 @@ public record PcResponse(
     bool InternetBlocked,
     bool? InternetBlockApplied,
     string? ClientVersion,
-    PcClientUpdate? ClientUpdate);
+    PcClientUpdate? ClientUpdate,
+    WallpaperRef? Wallpaper);
 
 // Username is null for an admin unlock, which has no account.
 public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
@@ -71,6 +74,7 @@ public static partial class PcEndpoints
         group.MapPost("/internet", SetInternetBlockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/client-update", OfferClientUpdateAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/client-update/cancel", CancelClientUpdateAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/wallpaper", SetWallpaperAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return app;
     }
 
@@ -100,6 +104,13 @@ public static partial class PcEndpoints
             .ToListAsync(cancellationToken))
             .ToDictionary(s => s.PcId);
 
+        // Only the id and hash of each wallpaper are read, never its image bytes.
+        var wallpapers = (await db.Wallpapers
+            .AsNoTracking()
+            .Select(w => new WallpaperRef(w.Id, w.Sha256))
+            .ToListAsync(cancellationToken))
+            .ToDictionary(w => w.Id);
+
         var now = clock.GetUtcNow();
         // When the addresses can't be read, no PC is shown as the server. The list still answers.
         var machineAddresses = localAddresses.ReadOrNull();
@@ -122,7 +133,8 @@ public static partial class PcEndpoints
                 p.InternetBlocked,
                 p.InternetBlockApplied,
                 p.ClientVersion,
-                ToClientUpdate(p));
+                ToClientUpdate(p),
+                p.WallpaperId is { } wallpaperId && wallpapers.TryGetValue(wallpaperId, out var wallpaper) ? wallpaper : null);
         }));
     }
 
@@ -144,6 +156,12 @@ public static partial class PcEndpoints
         var offlineSince = now - OnlineWindow;
         // The session ends in the same transaction, so a removed PC never keeps an active session.
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        // Read before the delete: the wallpaper the PC had is removed with it if no other PC uses it.
+        var wallpaperId = await db.Pcs
+            .AsNoTracking()
+            .Where(p => p.Id == id)
+            .Select(p => p.WallpaperId)
+            .FirstOrDefaultAsync(cancellationToken);
         var deleted = await db.Pcs
             .Where(p => p.Id == id && (p.LastSeenUtc <= offlineSince || p.LastSeenUtc > now))
             .ExecuteDeleteAsync(cancellationToken);
@@ -151,6 +169,7 @@ public static partial class PcEndpoints
         {
             await SessionLifecycle.EndForPcAsync(db, id, SessionLifecycle.PcRemoved, now, cancellationToken);
             await LoginRequestLifecycle.CancelPendingForPcAsync(db, id, LoginRequestLifecycle.PcRemoved, now, cancellationToken);
+            await WallpaperCleanup.RemoveUnusedAsync(db, wallpaperId is { } removedWallpaperId ? [removedWallpaperId] : [], cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return Results.NoContent();
         }

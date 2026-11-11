@@ -216,6 +216,9 @@ namespace LabGuard.Server.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("WallpaperId")
+                        .HasColumnType("INTEGER");
+
                     b.HasKey("Id");
 
                     b.HasIndex("Name")
@@ -223,6 +226,8 @@ namespace LabGuard.Server.Migrations
 
                     b.HasIndex("TokenHash")
                         .IsUnique();
+
+                    b.HasIndex("WallpaperId");
 
                     b.ToTable("Pcs");
                 });
@@ -554,6 +559,45 @@ namespace LabGuard.Server.Migrations
                         .IsUnique();
 
                     b.ToTable("UserAccounts");
+                });
+
+            modelBuilder.Entity("LabGuard.Server.Data.Wallpaper", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAtUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<byte[]>("Data")
+                        .IsRequired()
+                        .HasColumnType("BLOB");
+
+                    b.Property<string>("Sha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Sha256")
+                        .IsUnique();
+
+                    b.ToTable("Wallpapers");
+                });
+
+            modelBuilder.Entity("LabGuard.Server.Data.Pc", b =>
+                {
+                    b.HasOne("LabGuard.Server.Data.Wallpaper", null)
+                        .WithMany()
+                        .HasForeignKey("WallpaperId")
+                        .OnDelete(DeleteBehavior.SetNull);
                 });
 #pragma warning restore 612, 618
         }
