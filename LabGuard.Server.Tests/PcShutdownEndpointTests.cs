@@ -734,7 +734,7 @@ public class PcShutdownEndpointTests
     }
 
     [Fact]
-    public async Task List_PendingRequestOfAnOfflinePc_IsStillShuttingDown()
+    public async Task List_PendingRequestOfAnOfflinePc_IsShuttingDownForTheOfflineGraceThenPlainOffline()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -742,12 +742,16 @@ public class PcShutdownEndpointTests
         var pc = await AddPcAsync(app);
         await HeartbeatAsync(client, pc);
         await ShutdownAsync(admin, pc.Id);
-        app.Time.Advance(TimeSpan.FromSeconds(20));
+        app.Time.Advance(TimeSpan.FromSeconds(16));
 
         var entry = await ListEntryAsync(admin, "PC-01");
 
         Assert.False(entry.GetProperty("isOnline").GetBoolean());
         Assert.Equal("shutting-down", entry.GetProperty("shutdownState").GetString());
+        app.Time.Advance(TimeSpan.FromSeconds(4));
+
+        var plainOffline = await ListEntryAsync(admin, "PC-01");
+        Assert.Equal(JsonValueKind.Null, plainOffline.GetProperty("shutdownState").ValueKind);
     }
 
     [Fact]
@@ -768,7 +772,7 @@ public class PcShutdownEndpointTests
     }
 
     [Fact]
-    public async Task List_DeliveredAndNowOffline_IsShutdown()
+    public async Task List_DeliveredAndNowOffline_IsShutdownForTheOfflineGraceThenPlainOffline()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -777,12 +781,16 @@ public class PcShutdownEndpointTests
         await HeartbeatAsync(client, pc);
         await ShutdownAsync(admin, pc.Id);
         await HeartbeatAsync(client, pc);
-        app.Time.Advance(TimeSpan.FromSeconds(20));
+        app.Time.Advance(TimeSpan.FromSeconds(16));
 
         var entry = await ListEntryAsync(admin, "PC-01");
 
         Assert.False(entry.GetProperty("isOnline").GetBoolean());
         Assert.Equal("shutdown", entry.GetProperty("shutdownState").GetString());
+        app.Time.Advance(TimeSpan.FromSeconds(4));
+
+        var plainOffline = await ListEntryAsync(admin, "PC-01");
+        Assert.Equal(JsonValueKind.Null, plainOffline.GetProperty("shutdownState").ValueKind);
     }
 
     [Fact]

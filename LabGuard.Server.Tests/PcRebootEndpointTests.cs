@@ -644,7 +644,7 @@ public class PcRebootEndpointTests
         await app.WithDbAsync(db => db.Pcs
             .Where(p => p.Id == pc.Id)
             .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ShutdownDeliveredAtUtc, (DateTimeOffset?)app.Time.GetUtcNow())));
-        app.Time.Advance(TimeSpan.FromMinutes(10));
+        app.Time.Advance(TimeSpan.FromSeconds(16));
 
         var entry = await ListEntryAsync(admin, "PC-01");
 
@@ -689,7 +689,7 @@ public class PcRebootEndpointTests
     }
 
     [Fact]
-    public async Task List_PendingRestartOfAnOfflinePc_IsStillRestarting()
+    public async Task List_PendingRestartOfAnOfflinePc_IsRestartingForTheOfflineGraceThenPlainOffline()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -697,12 +697,16 @@ public class PcRebootEndpointTests
         var pc = await AddPcAsync(app);
         await HeartbeatAsync(client, pc);
         await RebootAsync(admin, pc.Id);
-        app.Time.Advance(TimeSpan.FromSeconds(20));
+        app.Time.Advance(TimeSpan.FromSeconds(16));
 
         var entry = await ListEntryAsync(admin, "PC-01");
 
         Assert.False(entry.GetProperty("isOnline").GetBoolean());
         Assert.Equal("restarting", entry.GetProperty("shutdownState").GetString());
+        app.Time.Advance(TimeSpan.FromSeconds(4));
+
+        var plainOffline = await ListEntryAsync(admin, "PC-01");
+        Assert.Equal(JsonValueKind.Null, plainOffline.GetProperty("shutdownState").ValueKind);
     }
 
     [Fact]
@@ -723,7 +727,7 @@ public class PcRebootEndpointTests
     }
 
     [Fact]
-    public async Task List_DeliveredRestartAndNowOffline_IsRebooting()
+    public async Task List_DeliveredRestartAndNowOffline_IsRebootingForTheOfflineGraceThenPlainOffline()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -732,16 +736,20 @@ public class PcRebootEndpointTests
         await HeartbeatAsync(client, pc);
         await RebootAsync(admin, pc.Id);
         await HeartbeatAsync(client, pc);
-        app.Time.Advance(TimeSpan.FromSeconds(20));
+        app.Time.Advance(TimeSpan.FromSeconds(16));
 
         var entry = await ListEntryAsync(admin, "PC-01");
 
         Assert.False(entry.GetProperty("isOnline").GetBoolean());
         Assert.Equal("rebooting", entry.GetProperty("shutdownState").GetString());
+        app.Time.Advance(TimeSpan.FromSeconds(4));
+
+        var plainOffline = await ListEntryAsync(admin, "PC-01");
+        Assert.Equal(JsonValueKind.Null, plainOffline.GetProperty("shutdownState").ValueKind);
     }
 
     [Fact]
-    public async Task List_DeliveredRestartOffline_IsRebootingUntilFiveMinutesAndThenPlainOffline()
+    public async Task List_DeliveredRestartOffline_IsRebootingUntilTheOfflineGraceEndsAndThenPlainOffline()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -750,7 +758,7 @@ public class PcRebootEndpointTests
         await HeartbeatAsync(client, pc);
         await RebootAsync(admin, pc.Id);
         await HeartbeatAsync(client, pc);
-        app.Time.Advance(TimeSpan.FromMinutes(5) - TimeSpan.FromSeconds(1));
+        app.Time.Advance(PcEndpoints.OnlineWindow + PcShutdownRules.OfflineGrace - TimeSpan.FromSeconds(1));
 
         var rebooting = await ListEntryAsync(admin, "PC-01");
         Assert.Equal("rebooting", rebooting.GetProperty("shutdownState").GetString());
@@ -763,7 +771,7 @@ public class PcRebootEndpointTests
     }
 
     [Fact]
-    public async Task List_DeliveredShutdownOffline_StaysShutdownPastFiveMinutes()
+    public async Task List_DeliveredShutdownOfflineForMinutes_IsPlainOffline()
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
@@ -776,7 +784,7 @@ public class PcRebootEndpointTests
 
         var entry = await ListEntryAsync(admin, "PC-01");
 
-        Assert.Equal(PcShutdownRules.ShutdownState, entry.GetProperty("shutdownState").GetString());
+        Assert.Equal(JsonValueKind.Null, entry.GetProperty("shutdownState").ValueKind);
     }
 
     // Session end reason on logout

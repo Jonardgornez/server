@@ -7,10 +7,13 @@ public class PcShutdownRulesTests
 {
     private static readonly DateTimeOffset Now = new(2026, 11, 6, 10, 0, 0, TimeSpan.Zero);
 
+    // Offline for one second: the online window has just ended, so the offline grace is still running.
+    private static readonly DateTimeOffset JustOffline = Now - PcEndpoints.OnlineWindow - TimeSpan.FromSeconds(1);
+
     [Fact]
     public void StateOf_NoCommand_IsNullOnlineAndOffline()
     {
-        var pc = new Pc { Name = "PC-01" };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline };
 
         Assert.Null(PcShutdownRules.StateOf(pc, isOnline: true, Now));
         Assert.Null(PcShutdownRules.StateOf(pc, isOnline: false, Now));
@@ -19,7 +22,7 @@ public class PcShutdownRulesTests
     [Fact]
     public void StateOf_RequestWithinTheWindow_IsShuttingDown_EvenWhenOffline()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownRequestedAtUtc = Now.AddSeconds(-59) };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownRequestedAtUtc = Now.AddSeconds(-59) };
 
         Assert.Equal(PcShutdownRules.ShuttingDownState, PcShutdownRules.StateOf(pc, isOnline: false, Now));
     }
@@ -27,7 +30,7 @@ public class PcShutdownRulesTests
     [Fact]
     public void StateOf_RequestAtTheWindowEdge_IsNotPending()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownRequestedAtUtc = Now.AddSeconds(-60) };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownRequestedAtUtc = Now.AddSeconds(-60) };
 
         Assert.Null(PcShutdownRules.StateOf(pc, isOnline: false, Now));
     }
@@ -35,15 +38,15 @@ public class PcShutdownRulesTests
     [Fact]
     public void StateOf_DeliveredWhileOnlineWithinTheWindow_IsShuttingDown()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddSeconds(-10) };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddSeconds(-10) };
 
         Assert.Equal(PcShutdownRules.ShuttingDownState, PcShutdownRules.StateOf(pc, isOnline: true, Now));
     }
 
     [Fact]
-    public void StateOf_DeliveredAndOffline_IsShutdown_WhateverTheAge()
+    public void StateOf_DeliveredAndJustOffline_IsShutdown_WhateverTheDeliveryAge()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddHours(-3) };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddHours(-3) };
 
         Assert.Equal(PcShutdownRules.ShutdownState, PcShutdownRules.StateOf(pc, isOnline: false, Now));
     }
@@ -51,7 +54,7 @@ public class PcShutdownRulesTests
     [Fact]
     public void StateOf_DeliveredLongAgoWhileOnline_IsNull()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddMinutes(-5) };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddMinutes(-5) };
 
         Assert.Null(PcShutdownRules.StateOf(pc, isOnline: true, Now));
     }
@@ -66,7 +69,7 @@ public class PcShutdownRulesTests
     [Fact]
     public void StateOf_RestartRequestPending_IsRestarting_EvenWhenOffline()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownRequestedAtUtc = Now.AddSeconds(-59), PowerAction = PcShutdownRules.RestartAction };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownRequestedAtUtc = Now.AddSeconds(-59), PowerAction = PcShutdownRules.RestartAction };
 
         Assert.Equal(PcShutdownRules.RestartingState, PcShutdownRules.StateOf(pc, isOnline: false, Now));
         Assert.Equal(PcShutdownRules.RestartingState, PcShutdownRules.StateOf(pc, isOnline: true, Now));
@@ -75,39 +78,31 @@ public class PcShutdownRulesTests
     [Fact]
     public void StateOf_RestartDeliveredWhileOnlineWithinTheWindow_IsRestarting()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddSeconds(-10), PowerAction = PcShutdownRules.RestartAction };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddSeconds(-10), PowerAction = PcShutdownRules.RestartAction };
 
         Assert.Equal(PcShutdownRules.RestartingState, PcShutdownRules.StateOf(pc, isOnline: true, Now));
     }
 
     [Fact]
-    public void StateOf_RestartDeliveredAndOfflineWithinFiveMinutes_IsRebooting()
+    public void StateOf_RestartDeliveredAndJustOffline_IsRebooting()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddMinutes(-4).AddSeconds(-59), PowerAction = PcShutdownRules.RestartAction };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddMinutes(-4).AddSeconds(-59), PowerAction = PcShutdownRules.RestartAction };
 
         Assert.Equal(PcShutdownRules.RebootingState, PcShutdownRules.StateOf(pc, isOnline: false, Now));
     }
 
     [Fact]
-    public void StateOf_RestartDeliveredAndOfflineAtTheRebootingEdge_IsNull()
-    {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddMinutes(-5), PowerAction = PcShutdownRules.RestartAction };
-
-        Assert.Null(PcShutdownRules.StateOf(pc, isOnline: false, Now));
-    }
-
-    [Fact]
     public void StateOf_RestartDeliveredLongAgoWhileOnline_IsNull()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddMinutes(-5), PowerAction = PcShutdownRules.RestartAction };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddMinutes(-5), PowerAction = PcShutdownRules.RestartAction };
 
         Assert.Null(PcShutdownRules.StateOf(pc, isOnline: true, Now));
     }
 
     [Fact]
-    public void StateOf_ShutdownDeliveredAndOffline_StaysShutdownPastTheRebootingWindow()
+    public void StateOf_ShutdownDeliveredLongAgoAndJustOffline_IsShutdown()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddMinutes(-30), PowerAction = PcShutdownRules.ShutdownAction };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddMinutes(-30), PowerAction = PcShutdownRules.ShutdownAction };
 
         Assert.Equal(PcShutdownRules.ShutdownState, PcShutdownRules.StateOf(pc, isOnline: false, Now));
     }
@@ -115,7 +110,7 @@ public class PcShutdownRulesTests
     [Fact]
     public void StateOf_RowWithNoStoredAction_CountsAsShutdown()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddMinutes(-1) };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddMinutes(-1) };
 
         Assert.Equal(PcShutdownRules.ShutdownState, PcShutdownRules.StateOf(pc, isOnline: false, Now));
     }
@@ -132,29 +127,9 @@ public class PcShutdownRulesTests
     [InlineData(null, 60, false)]
     public void StateOf_DeliveryWindowFollowsTheStoredCountdown(int? countdown, int secondsSinceDelivery, bool inWindow)
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddSeconds(-secondsSinceDelivery), PowerCountdownSeconds = countdown };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddSeconds(-secondsSinceDelivery), PowerCountdownSeconds = countdown };
 
         Assert.Equal(inWindow ? PcShutdownRules.ShuttingDownState : null, PcShutdownRules.StateOf(pc, isOnline: true, Now));
-    }
-
-    [Theory]
-    [InlineData(30, 299, true)]
-    [InlineData(30, 300, false)]
-    [InlineData(600, 869, true)]
-    [InlineData(600, 870, false)]
-    [InlineData(null, 299, true)]
-    [InlineData(null, 300, false)]
-    public void StateOf_RebootingWindowFollowsTheStoredCountdown(int? countdown, int secondsSinceDelivery, bool inWindow)
-    {
-        var pc = new Pc
-        {
-            Name = "PC-01",
-            ShutdownDeliveredAtUtc = Now.AddSeconds(-secondsSinceDelivery),
-            PowerAction = PcShutdownRules.RestartAction,
-            PowerCountdownSeconds = countdown,
-        };
-
-        Assert.Equal(inWindow ? PcShutdownRules.RebootingState : null, PcShutdownRules.StateOf(pc, isOnline: false, Now));
     }
 
     [Theory]
@@ -171,27 +146,12 @@ public class PcShutdownRulesTests
     public void LogoutWindowOf_IsTheCountdownPlus90Seconds(int? countdown, int seconds) =>
         Assert.Equal(TimeSpan.FromSeconds(seconds), PcShutdownRules.LogoutWindowOf(countdown));
 
-    [Theory]
-    [InlineData(null, 300)]
-    [InlineData(30, 300)]
-    [InlineData(600, 870)]
-    public void RebootingWindowOf_IsTheCountdownPlus270Seconds(int? countdown, int seconds) =>
-        Assert.Equal(TimeSpan.FromSeconds(seconds), PcShutdownRules.RebootingWindowOf(countdown));
-
-    [Fact]
-    public void StateOf_CancelRecordedWhileOnlineWithinTheWindow_IsCancelling()
-    {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddSeconds(-10), PowerCancelRequestedAtUtc = Now.AddSeconds(-5) };
-
-        Assert.Equal(PcShutdownRules.CancellingState, PcShutdownRules.StateOf(pc, isOnline: true, Now));
-    }
-
     [Fact]
     public void StateOf_CancelRecordedForARestartWhileOnline_IsCancelling()
     {
         var pc = new Pc
         {
-            Name = "PC-01",
+            Name = "PC-01", LastSeenUtc = JustOffline,
             ShutdownDeliveredAtUtc = Now.AddSeconds(-10),
             PowerCancelRequestedAtUtc = Now.AddSeconds(-5),
             PowerAction = PcShutdownRules.RestartAction,
@@ -207,7 +167,7 @@ public class PcShutdownRulesTests
     {
         var pc = new Pc
         {
-            Name = "PC-01",
+            Name = "PC-01", LastSeenUtc = JustOffline,
             ShutdownDeliveredAtUtc = Now.AddSeconds(-10),
             PowerCancelRequestedAtUtc = Now.AddSeconds(-5),
             PowerAction = action,
@@ -219,7 +179,7 @@ public class PcShutdownRulesTests
     [Fact]
     public void StateOf_CancelRecordedOfADeliveryOutsideItsWindow_IsNull()
     {
-        var pc = new Pc { Name = "PC-01", ShutdownDeliveredAtUtc = Now.AddSeconds(-60), PowerCancelRequestedAtUtc = Now.AddSeconds(-5) };
+        var pc = new Pc { Name = "PC-01", LastSeenUtc = JustOffline, ShutdownDeliveredAtUtc = Now.AddSeconds(-60), PowerCancelRequestedAtUtc = Now.AddSeconds(-5) };
 
         Assert.Null(PcShutdownRules.StateOf(pc, isOnline: true, Now));
     }
@@ -240,5 +200,57 @@ public class PcShutdownRulesTests
     public void IsWithin_ExactlyTheWindow_IsNotWithin()
     {
         Assert.False(PcShutdownRules.IsWithin(Now.AddSeconds(-60), Now, PcShutdownRules.RequestWindow));
+    }
+
+    // After the offline grace, a PC that was shut down or restarted and has not come back reads plain offline.
+
+    [Theory]
+    [InlineData(PcShutdownRules.ShutdownAction, 4, PcShutdownRules.ShutdownState)]
+    [InlineData(PcShutdownRules.ShutdownAction, 5, null)]
+    [InlineData(PcShutdownRules.RestartAction, 4, PcShutdownRules.RebootingState)]
+    [InlineData(PcShutdownRules.RestartAction, 5, null)]
+    public void StateOf_DeliveredAndOffline_LastsOnlyTheOfflineGrace(string action, int secondsOffline, string? expected)
+    {
+        var pc = new Pc
+        {
+            Name = "PC-01",
+            LastSeenUtc = Now - PcEndpoints.OnlineWindow - TimeSpan.FromSeconds(secondsOffline),
+            ShutdownDeliveredAtUtc = Now.AddSeconds(-60),
+            PowerAction = action,
+        };
+
+        Assert.Equal(expected, PcShutdownRules.StateOf(pc, isOnline: false, Now));
+    }
+
+    [Fact]
+    public void StateOf_PendingRequestOnAPcOfflinePastTheGrace_IsNull()
+    {
+        var pc = new Pc { Name = "PC-02", LastSeenUtc = Now.AddMinutes(-10), ShutdownRequestedAtUtc = Now.AddSeconds(-5) };
+
+        Assert.Null(PcShutdownRules.StateOf(pc, isOnline: false, Now));
+    }
+
+    [Fact]
+    public void StateOf_ShutdownPcOfflineForHours_IsNull()
+    {
+        var pc = new Pc { Name = "PC-02", LastSeenUtc = Now.AddHours(-3), ShutdownDeliveredAtUtc = Now.AddHours(-3) };
+
+        Assert.Null(PcShutdownRules.StateOf(pc, isOnline: false, Now));
+    }
+
+    [Fact]
+    public void StateOf_LastSeenInTheFuture_CountsAsPastTheGrace()
+    {
+        var pc = new Pc { Name = "PC-02", LastSeenUtc = Now.AddMinutes(5), ShutdownDeliveredAtUtc = Now.AddSeconds(-60) };
+
+        Assert.Null(PcShutdownRules.StateOf(pc, isOnline: false, Now));
+    }
+
+    [Fact]
+    public void StateOf_OnlinePc_IgnoresTheOfflineGrace()
+    {
+        var pc = new Pc { Name = "PC-02", LastSeenUtc = Now.AddHours(-3), ShutdownDeliveredAtUtc = Now.AddSeconds(-10) };
+
+        Assert.Equal(PcShutdownRules.ShuttingDownState, PcShutdownRules.StateOf(pc, isOnline: true, Now));
     }
 }
