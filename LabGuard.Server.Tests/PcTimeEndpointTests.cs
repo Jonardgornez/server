@@ -57,12 +57,12 @@ public class PcTimeEndpointTests
     }
 
     // A null minutes value is an open-time account.
-    private static async Task AddAccountAsync(TestApp app, int? minutes = null)
+    private static async Task AddAccountAsync(TestApp app, int? minutes = null, string username = "student")
     {
         var hasher = app.Services.GetRequiredService<IPasswordHasher<UserAccount>>();
         await app.WithDbAsync(async db =>
         {
-            var account = new UserAccount { Username = "student", IsActive = true, DefaultTimeMinutes = minutes };
+            var account = new UserAccount { Username = username, IsActive = true, DefaultTimeMinutes = minutes };
             account.PasswordHash = hasher.HashPassword(account, StudentPassword);
             db.UserAccounts.Add(account);
             await db.SaveChangesAsync();
@@ -84,15 +84,15 @@ public class PcTimeEndpointTests
         return await client.SendAsync(request);
     }
 
-    private static Task<HttpResponseMessage> LoginAsync(HttpClient client, TestPc pc) =>
-        PostAsync(client, "/api/client/login", pc.Token, JsonContent.Create(new { username = "student", password = StudentPassword }));
+    private static Task<HttpResponseMessage> LoginAsync(HttpClient client, TestPc pc, string username = "student") =>
+        PostAsync(client, "/api/client/login", pc.Token, JsonContent.Create(new { username, password = StudentPassword }));
 
     private static Task<HttpResponseMessage> HeartbeatAsync(HttpClient client, TestPc pc, int? sessionId = null) =>
         PostAsync(client, "/api/client/heartbeat", pc.Token, sessionId is null ? null : JsonContent.Create(new { sessionId }));
 
-    private static async Task<int> LoggedInSessionIdAsync(HttpClient client, TestPc pc)
+    private static async Task<int> LoggedInSessionIdAsync(HttpClient client, TestPc pc, string username = "student")
     {
-        var response = await LoginAsync(client, pc);
+        var response = await LoginAsync(client, pc, username);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         return (await JsonOf(response)).GetProperty("sessionId").GetInt32();
     }
@@ -111,6 +111,24 @@ public class PcTimeEndpointTests
 
     private static Task<HttpResponseMessage> TimeAsync(HttpClient admin, int pcId, object body) =>
         admin.PostAsJsonAsync($"/api/pcs/{pcId}/time", body);
+
+    private static Task<HttpResponseMessage> TimeManyAsync(HttpClient admin, object body) =>
+        admin.PostAsJsonAsync("/api/pcs/time", body);
+
+    private static async Task<int> AffectedAsync(HttpResponseMessage response)
+    {
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await JsonOf(response)).GetProperty("affected").GetInt32();
+    }
+
+    // A PC with a running session. It logs in from its own address, so several PCs can be signed in at once.
+    private static async Task<(TestPc Pc, int SessionId)> PcWithSessionAsync(TestApp app, string name, string remoteIp, string username = "student")
+    {
+        using var client = app.CreatePcClient(remoteIp);
+        var pc = await AddPcAsync(app, name);
+        var sessionId = await LoggedInSessionIdAsync(client, pc, username);
+        return (pc, sessionId);
+    }
 
     // Marks PCs as seen now, so they are online at this moment, without a heartbeat's side effects on their sessions.
     private static Task BringOnlineAsync(TestApp app, params int[] pcIds) =>
@@ -572,5 +590,247 @@ public class PcTimeEndpointTests
         var account = await StoredAccountAsync(app);
         Assert.Equal(10, account.DefaultTimeMinutes);
         Assert.Equal(SessionLifecycle.TimeExpired, (await app.WithDbAsync(db => db.PcSessions.AsNoTracking().SingleAsync())).EndReason);
+    }
+
+    // Bulk time: POST /api/pcs/time
+
+    [Fact]
+    public async Task TimeManyRoute_WithoutCookie_Returns401()
+    {
+        using var app = new TestApp();
+        using var browser = app.CreateBrowser();
+
+        var response = await browser.PostAsJsonAsync("/api/pcs/time", new { ids = new[] { 1 }, action = "time-out" });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TimeManyRoute_FromThePcPort_Returns404AndChangesNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pcClient = app.CreatePcClient();
+        await AddAccountAsync(app, minutes: 10);
+        var (pc, sessionId) = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+
+        var response = await PostAsync(pcClient, "/api/pcs/time", null, JsonContent.Create(new { ids = new[] { pc.Id }, action = "time-out" }));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Null((await StoredSessionAsync(app, sessionId)).EndedAtUtc);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"action\":\"time-out\"}")]
+    [InlineData("{\"ids\":null,\"action\":\"time-out\"}")]
+    [InlineData("{\"ids\":[],\"action\":\"time-out\"}")]
+    [InlineData("{\"ids\":[\"one\"],\"action\":\"time-out\"}")]
+    [InlineData("{\"ids\":[1,null],\"action\":\"time-out\"}")]
+    [InlineData("{not json")]
+    public async Task TimeManyRoute_WithAMissingOrEmptyList_Returns400AndChangesNothing(string body)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var (pc, sessionId) = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+        var response = await admin.PostAsync("/api/pcs/time", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(InvalidRequestMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Null((await StoredSessionAsync(app, sessionId)).EndedAtUtc);
+    }
+
+    [Theory]
+    [InlineData("text/plain", "{}")]
+    [InlineData("application/x-www-form-urlencoded", "")]
+    [InlineData("application/json", "")]
+    [InlineData("application/json", "null")]
+    public async Task TimeManyRoute_WithoutAJsonBody_Returns400AndChangesNothing(string contentType, string body)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var (_, sessionId) = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+
+        using var content = new StringContent(body, Encoding.UTF8, contentType);
+        var response = await admin.PostAsync("/api/pcs/time", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(InvalidRequestMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Null((await StoredSessionAsync(app, sessionId)).EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task TimeManyRoute_WithMoreThan1000Ids_Returns400AndChangesNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var (_, sessionId) = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+
+        var response = await TimeManyAsync(admin, new { ids = Enumerable.Range(1, 1001).ToArray(), action = "time-out" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(InvalidRequestMessage, (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Null((await StoredSessionAsync(app, sessionId)).EndedAtUtc);
+    }
+
+    [Theory]
+    [InlineData("rewind", 5.0, ActionMessage)]
+    [InlineData("ADD-TIME", 5.0, ActionMessage)]
+    [InlineData("add-time", null, MinutesMessage)]
+    [InlineData("add-time", 0.0, MinutesMessage)]
+    [InlineData("add-time", 1441.0, MinutesMessage)]
+    [InlineData("add-time", 1.5, MinutesMessage)]
+    public async Task TimeManyRoute_WithAnInvalidActionOrMinutes_Returns400WithTheReason_AndChangesNothing(string action, double? minutes, string error)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var (pc, sessionId) = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+        var before = await StoredSessionAsync(app, sessionId);
+
+        var response = await TimeManyAsync(admin, new { ids = new[] { pc.Id }, action, minutes });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(error, (await JsonOf(response)).GetProperty("error").GetString());
+        var after = await StoredSessionAsync(app, sessionId);
+        Assert.Equal(before.ExpiresAtUtc, after.ExpiresAtUtc);
+        Assert.Equal(before.DefaultTimeMinutes, after.DefaultTimeMinutes);
+        Assert.Null(after.EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task TimeMany_AddTime_MovesEverySelectedSession_AndCountsEachOnce()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var first = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+        var second = await PcWithSessionAsync(app, "PC-02", "192.168.1.51");
+        var third = await PcWithSessionAsync(app, "PC-03", "192.168.1.52");
+        var expiresBefore = (await StoredSessionAsync(app, first.SessionId)).ExpiresAtUtc!.Value;
+        app.Time.Advance(TimeSpan.FromMinutes(2));
+        await BringOnlineAsync(app, first.Pc.Id, second.Pc.Id, third.Pc.Id);
+
+        var ids = new[] { first.Pc.Id, second.Pc.Id, third.Pc.Id, first.Pc.Id };
+        var affected = await AffectedAsync(await TimeManyAsync(admin, new { ids, action = "add-time", minutes = 5 }));
+
+        Assert.Equal(3, affected);
+        foreach (var sessionId in new[] { first.SessionId, second.SessionId, third.SessionId })
+        {
+            var session = await StoredSessionAsync(app, sessionId);
+            Assert.Equal(expiresBefore.AddMinutes(5).ToUnixTimeMilliseconds(), session.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
+            Assert.Null(session.EndedAtUtc);
+        }
+    }
+
+    [Fact]
+    public async Task TimeMany_OpenTime_TurnsEverySelectedSessionIntoOpenTime()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var first = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+        var second = await PcWithSessionAsync(app, "PC-02", "192.168.1.51");
+        await BringOnlineAsync(app, first.Pc.Id, second.Pc.Id);
+
+        var affected = await AffectedAsync(await TimeManyAsync(admin, new { ids = new[] { first.Pc.Id, second.Pc.Id }, action = "open-time" }));
+
+        Assert.Equal(2, affected);
+        foreach (var sessionId in new[] { first.SessionId, second.SessionId })
+        {
+            var session = await StoredSessionAsync(app, sessionId);
+            Assert.Null(session.ExpiresAtUtc);
+            Assert.Null(session.DefaultTimeMinutes);
+            Assert.Null(session.EndedAtUtc);
+        }
+    }
+
+    [Fact]
+    public async Task TimeMany_TimeOut_EndsEverySelectedSession()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var first = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+        var second = await PcWithSessionAsync(app, "PC-02", "192.168.1.51");
+        await BringOnlineAsync(app, first.Pc.Id, second.Pc.Id);
+
+        var affected = await AffectedAsync(await TimeManyAsync(admin, new { ids = new[] { first.Pc.Id, second.Pc.Id }, action = "time-out" }));
+
+        Assert.Equal(2, affected);
+        foreach (var sessionId in new[] { first.SessionId, second.SessionId })
+        {
+            var session = await StoredSessionAsync(app, sessionId);
+            Assert.Equal(SessionLifecycle.TimeExpired, session.EndReason);
+            Assert.NotNull(session.EndedAtUtc);
+        }
+    }
+
+    [Fact]
+    public async Task TimeMany_SkipsOfflinePcs_PcsWithoutASession_AndUnknownIds()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var online = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+        var offline = await PcWithSessionAsync(app, "PC-02", "192.168.1.51");
+        var noSession = await AddPcAsync(app, "PC-03");
+        app.Time.Advance(TimeSpan.FromMinutes(1));
+        await BringOnlineAsync(app, online.Pc.Id, noSession.Id);
+
+        var ids = new[] { online.Pc.Id, offline.Pc.Id, noSession.Id, 999 };
+        var affected = await AffectedAsync(await TimeManyAsync(admin, new { ids, action = "time-out" }));
+
+        Assert.Equal(1, affected);
+        Assert.NotNull((await StoredSessionAsync(app, online.SessionId)).EndedAtUtc);
+        Assert.Null((await StoredSessionAsync(app, offline.SessionId)).EndedAtUtc);
+        Assert.Equal(2, await app.WithDbAsync(db => db.PcSessions.CountAsync()));
+    }
+
+    [Fact]
+    public async Task TimeMany_AddTime_SkipsAPcOverTheDayLimit_WhileTheOthersApply()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 1439, username: "long");
+        await AddAccountAsync(app, minutes: 10);
+        var capped = await PcWithSessionAsync(app, "PC-01", "192.168.1.50", "long");
+        var normal = await PcWithSessionAsync(app, "PC-02", "192.168.1.51");
+        var cappedBefore = (await StoredSessionAsync(app, capped.SessionId)).ExpiresAtUtc!.Value;
+        var normalBefore = (await StoredSessionAsync(app, normal.SessionId)).ExpiresAtUtc!.Value;
+        await BringOnlineAsync(app, capped.Pc.Id, normal.Pc.Id);
+
+        var ids = new[] { capped.Pc.Id, normal.Pc.Id };
+        var affected = await AffectedAsync(await TimeManyAsync(admin, new { ids, action = "add-time", minutes = 2 }));
+
+        Assert.Equal(1, affected);
+        Assert.Equal(cappedBefore.ToUnixTimeMilliseconds(), (await StoredSessionAsync(app, capped.SessionId)).ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.Equal(normalBefore.AddMinutes(2).ToUnixTimeMilliseconds(), (await StoredSessionAsync(app, normal.SessionId)).ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
+    }
+
+    [Fact]
+    public async Task TimeMany_TimeOut_SkipsAPausedPc_WhileTheOthersEnd()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        await AddAccountAsync(app, minutes: 10);
+        var paused = await PcWithSessionAsync(app, "PC-01", "192.168.1.50");
+        var running = await PcWithSessionAsync(app, "PC-02", "192.168.1.51");
+        await BringOnlineAsync(app, paused.Pc.Id, running.Pc.Id);
+        await LockAsync(admin, paused.Pc.Id);
+        var pausedAt = (await StoredSessionAsync(app, paused.SessionId)).PausedAtUtc;
+
+        var affected = await AffectedAsync(await TimeManyAsync(admin, new { ids = new[] { paused.Pc.Id, running.Pc.Id }, action = "time-out" }));
+
+        Assert.Equal(1, affected);
+        var pausedSession = await StoredSessionAsync(app, paused.SessionId);
+        Assert.Null(pausedSession.EndedAtUtc);
+        Assert.Equal(pausedAt, pausedSession.PausedAtUtc);
+        Assert.Equal(SessionLifecycle.TimeExpired, (await StoredSessionAsync(app, running.SessionId)).EndReason);
     }
 }

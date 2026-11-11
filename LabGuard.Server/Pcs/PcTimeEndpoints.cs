@@ -24,15 +24,9 @@ public static partial class PcEndpoints
             return AuthEndpoints.InvalidRequest();
         }
 
-        if (request.Action is not (AddTimeAction or OpenTimeAction or TimeOutAction))
+        if (TimeRequestError(request.Action, request.Minutes) is { } error)
         {
-            return AuthEndpoints.BadRequest($"Action must be \"{AddTimeAction}\", \"{OpenTimeAction}\" or \"{TimeOutAction}\".");
-        }
-
-        var minutes = WholeMinutes(request.Minutes);
-        if (request.Action == AddTimeAction && minutes is null)
-        {
-            return AuthEndpoints.BadRequest($"Minutes must be a whole number from {MinAddedMinutes} to {MaxAddedMinutes}.");
+            return error;
         }
 
         // The same order as the lock: closing expired sessions first, then the PC, then its session, all in one transaction.
@@ -57,8 +51,7 @@ public static partial class PcEndpoints
             return ConflictResponse("This PC has no session.");
         }
 
-        // minutes is only read for add-time, which was checked above.
-        var rejection = await ApplyTimeActionAsync(db, session, request.Action, minutes ?? 0, now, ct);
+        var rejection = await ApplyTimeActionAsync(db, session, request.Action!, WholeMinutes(request.Minutes) ?? 0, now, ct);
         if (rejection is not null)
         {
             return rejection;
@@ -66,6 +59,71 @@ public static partial class PcEndpoints
 
         await transaction.CommitAsync(ct);
         return Results.NoContent();
+    }
+
+    // Sent by the bulk time route. Action and Minutes are checked the same way as PcTimeRequest.
+    private static async Task<IResult> AdjustTimeManyAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    {
+        var request = await AuthEndpoints.ReadBodyAsync<PcTimeManyRequest>(http.Request);
+        var pcIds = ValidPcIds(request?.Ids);
+        if (request is null || pcIds is null)
+        {
+            return AuthEndpoints.InvalidRequest();
+        }
+
+        if (TimeRequestError(request.Action, request.Minutes) is { } error)
+        {
+            return error;
+        }
+
+        // The same rules as the single route, for every listed PC, in one transaction. Offline PCs, PCs without a session
+        // and unknown ids are skipped. A PC whose time can't change is skipped too, and nothing is written for it.
+        var ct = http.RequestAborted;
+        var now = clock.GetUtcNow();
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await SessionLifecycle.EndExpiredAsync(db, now, ct);
+        var onlinePcIds = (await db.Pcs
+            .AsNoTracking()
+            .Where(p => pcIds.Contains(p.Id))
+            .Select(p => new { p.Id, p.LastSeenUtc })
+            .ToListAsync(ct))
+            .Where(p => IsOnline(p.LastSeenUtc, now))
+            .Select(p => p.Id)
+            .ToHashSet();
+        var activeSessions = await db.PcSessions
+            .AsNoTracking()
+            .Where(s => s.EndedAtUtc == null && pcIds.Contains(s.PcId))
+            .ToListAsync(ct);
+
+        // minutes is only read for add-time, which was checked above.
+        var minutes = WholeMinutes(request.Minutes) ?? 0;
+        var affected = 0;
+        foreach (var session in activeSessions.Where(s => onlinePcIds.Contains(s.PcId)))
+        {
+            if (await ApplyTimeActionAsync(db, session, request.Action!, minutes, now, ct) is null)
+            {
+                affected++;
+            }
+        }
+
+        await transaction.CommitAsync(ct);
+        return Results.Ok(new AffectedPcsResponse(affected));
+    }
+
+    // Null when the action and, for add-time, the minutes are valid. Otherwise the error to send.
+    private static IResult? TimeRequestError(string? action, double? minutes)
+    {
+        if (action is not (AddTimeAction or OpenTimeAction or TimeOutAction))
+        {
+            return AuthEndpoints.BadRequest($"Action must be \"{AddTimeAction}\", \"{OpenTimeAction}\" or \"{TimeOutAction}\".");
+        }
+
+        if (action == AddTimeAction && WholeMinutes(minutes) is null)
+        {
+            return AuthEndpoints.BadRequest($"Minutes must be a whole number from {MinAddedMinutes} to {MaxAddedMinutes}.");
+        }
+
+        return null;
     }
 
     // Returns the error to send, or null once the action has been applied. Nothing is written for an error.
