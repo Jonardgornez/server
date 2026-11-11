@@ -16,5 +16,5 @@ public class PcServiceReport
     public string EventsJson { get; set; } = "[]";
 }
 
-// One event the service reported. Level is information, warning, error or message.
+// One event the service reported. Level is information, warning or error.
 public sealed record ServiceReportEvent(DateTimeOffset At, string Level, string Message);

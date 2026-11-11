@@ -44,6 +44,19 @@ public static partial class PcEndpoints
             report.ClientVersion,
             report.UserSignedIn,
             hasUpdate ? new PcServiceUpdate(report.UpdateVersion, report.UpdateState, report.UpdateError) : null,
-            JsonSerializer.Deserialize<ServiceReportEvent[]>(report.EventsJson) ?? []));
+            ReadEvents(report.EventsJson)));
+    }
+
+    // The events are written by the server, but a damaged row shows no events rather than failing the whole view.
+    private static ServiceReportEvent[] ReadEvents(string eventsJson)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<ServiceReportEvent?[]>(eventsJson)?.OfType<ServiceReportEvent>().ToArray() ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 }

@@ -24,18 +24,22 @@ internal static class ServiceReportReader
     public const int MaxEvents = 20;
     public const int MaxEventMessageLength = 300;
 
+    // How far an event's time may lie from the server's time: a week back, and a little ahead for a PC clock that runs fast.
+    public static readonly TimeSpan MaxEventAge = TimeSpan.FromDays(7);
+    public static readonly TimeSpan MaxEventLead = TimeSpan.FromMinutes(5);
+
     // The service reports every state of an update, where the heartbeat reports only the ones from downloading on.
     private static readonly string[] UpdateStates = ["pending", "waiting", "downloading", "installing", "failed"];
     private static readonly string[] EventLevels = ["information", "warning", "error"];
 
-    public static ServiceReportValues Read(ServiceReportRequest request) =>
+    public static ServiceReportValues Read(ServiceReportRequest request, DateTimeOffset now) =>
         new(
             ClientUpdateHeartbeat.ReadVersion(request.ServiceVersion)?.ToString(),
             IsTrue(request.ClientRunning),
             ClientUpdateHeartbeat.ReadVersion(request.ClientVersion),
             IsTrue(request.UserSignedIn),
             ReadUpdate(request.Update),
-            ReadEvents(request.Events));
+            ReadEvents(request.Events, now));
 
     private static bool IsTrue(JsonElement? element) => element is { ValueKind: JsonValueKind.True };
 
@@ -56,8 +60,8 @@ internal static class ServiceReportReader
     }
 
     // The first MaxEvents readable events are kept, in the order the service sent them. An event with an unknown level, a time
-    // that doesn't parse, or no text left is left out.
-    private static IReadOnlyList<ServiceReportEvent> ReadEvents(JsonElement? element)
+    // that doesn't parse or lies outside MaxEventAge before to MaxEventLead after now, or no text left is left out.
+    private static IReadOnlyList<ServiceReportEvent> ReadEvents(JsonElement? element, DateTimeOffset now)
     {
         if (element is not { ValueKind: JsonValueKind.Array } events)
         {
@@ -72,7 +76,7 @@ internal static class ServiceReportReader
                 break;
             }
 
-            if (ReadEvent(item) is { } readable)
+            if (ReadEvent(item, now) is { } readable)
             {
                 kept.Add(readable);
             }
@@ -81,7 +85,7 @@ internal static class ServiceReportReader
         return kept;
     }
 
-    private static ServiceReportEvent? ReadEvent(JsonElement element)
+    private static ServiceReportEvent? ReadEvent(JsonElement element, DateTimeOffset now)
     {
         if (element.ValueKind != JsonValueKind.Object)
         {
@@ -95,6 +99,8 @@ internal static class ServiceReportReader
             || !EventLevels.Contains(level)
             || at is null
             || !DateTimeOffset.TryParse(at, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var time)
+            || time < now - MaxEventAge
+            || time > now + MaxEventLead
             || message is null)
         {
             return null;

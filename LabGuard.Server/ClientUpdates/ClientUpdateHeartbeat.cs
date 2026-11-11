@@ -19,6 +19,9 @@ public static class ClientUpdateHeartbeat
 
     private static readonly string[] ReportedStates = ["downloading", "installing", "failed"];
 
+    // The update states a client reports on its heartbeat. Progress in any other state is never recorded on the PC.
+    internal static bool IsReportedState(string state) => ReportedStates.Contains(state);
+
     // Records the version and update progress the PC reports, clears a target that is done or no longer the stored release,
     // and returns the offer when the PC still needs the stored release.
     public static async Task<ClientUpdateOffer?> HandleAsync(
@@ -122,7 +125,7 @@ public static class ClientUpdateHeartbeat
             return null;
         }
 
-        if (ReadString(report, "state") is not { } state || !ReportedStates.Contains(state))
+        if (ReadString(report, "state") is not { } state || !IsReportedState(state))
         {
             return null;
         }

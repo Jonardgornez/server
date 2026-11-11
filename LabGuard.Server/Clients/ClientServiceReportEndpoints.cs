@@ -44,35 +44,48 @@ public static partial class ClientEndpoints
         }
 
         var now = clock.GetUtcNow();
-        var values = ServiceReportReader.Read(request);
-        await SaveServiceReportAsync(db, pcId, values, now, ct);
+        var values = ServiceReportReader.Read(request, now);
+        // The PC can be removed while its report is on the way. The report is then not saved, and answered like any unknown PC.
+        if (!await SaveServiceReportAsync(db, pcId, values, now, ct))
+        {
+            return NotRegistered();
+        }
 
-        var progress = values.Update is { Version: { } version, State: { } state }
-            ? new ClientUpdateReport(version, state, values.Update.Error)
-            : null;
-        var clientUpdate = await ClientUpdateHeartbeat.HandleServiceReportAsync(db, pcId, values.ClientVersion, progress, now, ct);
+        var clientUpdate = await ClientUpdateHeartbeat.HandleServiceReportAsync(db, pcId, values.ClientVersion, HeartbeatProgress(values.Update), now, ct);
         return Results.Ok(new ServiceReportResponse(clientUpdate));
     }
 
-    // Keeps one row per PC: the first report adds it, later reports replace it. The row goes with the PC, so a report never outlives its PC.
-    private static async Task SaveServiceReportAsync(AppDbContext db, int pcId, ServiceReportValues values, DateTimeOffset now, CancellationToken ct)
-    {
-        var report = await db.PcServiceReports.FirstOrDefaultAsync(r => r.PcId == pcId, ct);
-        if (report is null)
-        {
-            report = new PcServiceReport { PcId = pcId };
-            db.PcServiceReports.Add(report);
-        }
+    // Only the update states the heartbeat also reports are recorded on the PC. The service's own pending and waiting stay in the
+    // stored report: the client reports downloading for the same phase, so recording them would flip the PC's state every minute.
+    private static ClientUpdateReport? HeartbeatProgress(ServiceReportUpdate? update) =>
+        update is { Version: { } version, State: { } state } && ClientUpdateHeartbeat.IsReportedState(state)
+            ? new ClientUpdateReport(version, state, update.Error)
+            : null;
 
-        report.ReceivedAtUtc = now;
-        report.ServiceVersion = values.ServiceVersion;
-        report.ClientRunning = values.ClientRunning;
-        report.ClientVersion = values.ClientVersion?.ToString();
-        report.UserSignedIn = values.UserSignedIn;
-        report.UpdateVersion = values.Update?.Version;
-        report.UpdateState = values.Update?.State;
-        report.UpdateError = values.Update?.Error;
-        report.EventsJson = JsonSerializer.Serialize(values.Events);
-        await db.SaveChangesAsync(ct);
+    // Keeps one row per PC: the first report adds it, later reports replace it. The row goes with the PC, so a report never outlives its PC.
+    // One statement, so two first reports at once never clash on the key, and a PC removed meanwhile gets no row. False when the PC is gone.
+    private static async Task<bool> SaveServiceReportAsync(AppDbContext db, int pcId, ServiceReportValues values, DateTimeOffset now, CancellationToken ct)
+    {
+        var receivedAt = now.ToUnixTimeMilliseconds();
+        var clientVersion = values.ClientVersion?.ToString();
+        var eventsJson = JsonSerializer.Serialize(values.Events);
+        var saved = await db.Database.ExecuteSqlAsync($"""
+            INSERT INTO "PcServiceReports"
+                ("PcId", "ReceivedAtUtc", "ServiceVersion", "ClientRunning", "ClientVersion", "UserSignedIn", "UpdateVersion", "UpdateState", "UpdateError", "EventsJson")
+            SELECT {pcId}, {receivedAt}, {values.ServiceVersion}, {values.ClientRunning}, {clientVersion}, {values.UserSignedIn},
+                {values.Update?.Version}, {values.Update?.State}, {values.Update?.Error}, {eventsJson}
+            WHERE EXISTS (SELECT 1 FROM "Pcs" WHERE "Id" = {pcId})
+            ON CONFLICT ("PcId") DO UPDATE SET
+                "ReceivedAtUtc" = excluded."ReceivedAtUtc",
+                "ServiceVersion" = excluded."ServiceVersion",
+                "ClientRunning" = excluded."ClientRunning",
+                "ClientVersion" = excluded."ClientVersion",
+                "UserSignedIn" = excluded."UserSignedIn",
+                "UpdateVersion" = excluded."UpdateVersion",
+                "UpdateState" = excluded."UpdateState",
+                "UpdateError" = excluded."UpdateError",
+                "EventsJson" = excluded."EventsJson"
+            """, ct);
+        return saved > 0;
     }
 }

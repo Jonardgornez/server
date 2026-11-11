@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using static LabGuard.Server.Tests.ClientUpdateTestSupport;
 using static LabGuard.Server.Tests.PcShutdownEndpointTests;
 
@@ -22,6 +24,7 @@ public class PcDiagnosticsEndpointTests
         using var admin = await SignedInAsync(app);
         using var pc = app.CreatePcClient(OtherPcAddress);
         var registered = await AddPcAsync(app, "PC-01", seenAgo: TimeSpan.FromMinutes(5));
+        var eventAt = app.Time.GetUtcNow().AddMinutes(-3);
         await PostAsync(pc, ServiceReportRoute, registered.Token, JsonContent.Create(new
         {
             serviceVersion = "0.23.0",
@@ -29,7 +32,7 @@ public class PcDiagnosticsEndpointTests
             clientVersion = "0.22.3",
             userSignedIn = false,
             update = new { version = "0.23.0", state = "installing", error = (string?)null },
-            events = new[] { new { at = "2026-11-11T05:00:00Z", level = "error", message = "Client stopped." } },
+            events = new[] { new { at = eventAt.ToString("O", CultureInfo.InvariantCulture), level = "error", message = "Client stopped." } },
         }));
 
         var response = await admin.GetAsync(DiagnosticsRoute(registered.Id));
@@ -53,7 +56,7 @@ public class PcDiagnosticsEndpointTests
         Assert.Equal(1, events.GetArrayLength());
         Assert.Equal("error", events[0].GetProperty("level").GetString());
         Assert.Equal("Client stopped.", events[0].GetProperty("message").GetString());
-        Assert.Equal(DateTimeOffset.Parse("2026-11-11T05:00:00Z").ToUnixTimeMilliseconds(), events[0].GetProperty("at").GetDateTimeOffset().ToUnixTimeMilliseconds());
+        Assert.Equal(eventAt.ToUnixTimeMilliseconds(), events[0].GetProperty("at").GetDateTimeOffset().ToUnixTimeMilliseconds());
     }
 
     [Fact]
@@ -68,6 +71,27 @@ public class PcDiagnosticsEndpointTests
         var body = await JsonOf(await admin.GetAsync(DiagnosticsRoute(registered.Id)));
 
         Assert.Equal(JsonValueKind.Null, body.GetProperty("update").ValueKind);
+        Assert.Equal(0, body.GetProperty("events").GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{\"at\":1}")]
+    [InlineData("[{\"At\":\"yesterday\"}]")]
+    public async Task Diagnostics_WithStoredEventsThatCannotBeRead_ShowsNoEvents(string eventsJson)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var registered = await AddPcAsync(app, "PC-01");
+        await PostAsync(pc, ServiceReportRoute, registered.Token, JsonContent.Create(new { clientRunning = true }));
+        await app.WithDbAsync(db => db.PcServiceReports.ExecuteUpdateAsync(setters => setters.SetProperty(r => r.EventsJson, eventsJson)));
+
+        var response = await admin.GetAsync(DiagnosticsRoute(registered.Id));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await JsonOf(response);
+        Assert.True(body.GetProperty("clientRunning").GetBoolean());
         Assert.Equal(0, body.GetProperty("events").GetArrayLength());
     }
 

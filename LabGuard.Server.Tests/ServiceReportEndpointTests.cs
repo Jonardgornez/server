@@ -1,3 +1,5 @@
+using System.Data.Common;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
@@ -6,7 +8,9 @@ using LabGuard.Server.ClientUpdates;
 using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using static LabGuard.Server.Tests.ClientUpdateTestSupport;
@@ -20,6 +24,10 @@ public class ServiceReportEndpointTests
     private const string ServiceReportRoute = "/api/client/service-report";
     private const string NotRegisteredMessage = "This PC isn't registered.";
     private const string InvalidMessage = "Invalid request.";
+
+    // An event time an hour before any test server's clock, which starts at the real time when the server is made.
+    private static readonly DateTimeOffset Recent = new(DateTimeOffset.UtcNow.AddHours(-1).Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, TimeSpan.Zero);
+    private static readonly string RecentAt = Recent.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
     private static async Task<(TestApp App, HttpClient Admin, HttpClient Pc, FakeInstallerInspector Inspector)> AppWithReleaseAsync(string version = "0.20.0")
     {
@@ -41,6 +49,36 @@ public class ServiceReportEndpointTests
         Assert.Equal(1, await AffectedAsync(await OfferStoredAsync(admin, pc.Id)));
         return pc;
     }
+
+    // Runs a statement on its own connection right before the report is saved, standing in for another request that got there first.
+    private sealed class BeforeSaveInterceptor(string statement) : DbCommandInterceptor
+    {
+        public bool Fired { get; private set; }
+
+        public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!Fired && command.CommandText.Contains("INSERT INTO \"PcServiceReports\"") && eventData.Context is { } context)
+            {
+                Fired = true;
+                await using var connection = new SqliteConnection(context.Database.GetConnectionString());
+                await connection.OpenAsync(cancellationToken);
+                await using var competing = connection.CreateCommand();
+                competing.CommandText = statement;
+                await competing.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            return result;
+        }
+    }
+
+    private static TestApp AppWith(BeforeSaveInterceptor interceptor) =>
+        new(configureServices: services =>
+            // EF Core takes interceptors from the options, not from DI, so the test adds this one to the context's options.
+            services.AddDbContext<AppDbContext>(options => options.AddInterceptors(interceptor)));
 
     private static Task<HttpResponseMessage> ReportAsync(HttpClient pc, TestPc registered, object body) =>
         PostAsync(pc, ServiceReportRoute, registered.Token, JsonContent.Create(body));
@@ -64,7 +102,7 @@ public class ServiceReportEndpointTests
         clientVersion,
         userSignedIn = true,
         update = new { version = "0.23.0", state = "downloading", error = (string?)null },
-        events = new[] { new { at = "2026-11-11T05:00:00Z", level = "warning", message = "Client restarted." } },
+        events = new[] { new { at = RecentAt, level = "warning", message = "Client restarted." } },
     };
 
     // Saved
@@ -90,7 +128,7 @@ public class ServiceReportEndpointTests
         Assert.Null(stored.UpdateError);
         Assert.Equal(app.Time.GetUtcNow().ToUnixTimeMilliseconds(), stored.ReceivedAtUtc.ToUnixTimeMilliseconds());
         var events = await StoredEventsAsync(app, registered.Id);
-        Assert.Equal([new ServiceReportEvent(DateTimeOffset.Parse("2026-11-11T05:00:00Z"), "warning", "Client restarted.")], events);
+        Assert.Equal([new ServiceReportEvent(Recent, "warning", "Client restarted.")], events);
     }
 
     [Fact]
@@ -102,7 +140,7 @@ public class ServiceReportEndpointTests
         await ReportAsync(pc, registered, new { clientRunning = true, serviceVersion = "0.23.0" });
         app.Time.Advance(TimeSpan.FromMinutes(1));
 
-        var response = await ReportAsync(pc, registered, new { clientRunning = false, serviceVersion = "0.24.0", events = new[] { new { at = "2026-11-11T05:01:00Z", level = "error", message = "Stopped." } } });
+        var response = await ReportAsync(pc, registered, new { clientRunning = false, serviceVersion = "0.24.0", events = new[] { new { at = RecentAt, level = "error", message = "Stopped." } } });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(1, await ReportCountAsync(app));
@@ -138,6 +176,46 @@ public class ServiceReportEndpointTests
         var response = await admin.DeleteAsync($"/api/pcs/{registered.Id}");
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(0, await ReportCountAsync(app));
+    }
+
+    // Two first reports for the same PC race: the other one saves its row after this one has started.
+    [Fact]
+    public async Task Report_WhenAnotherReportSavesFirst_ReplacesIt()
+    {
+        var interceptor = new BeforeSaveInterceptor("""
+            INSERT INTO "PcServiceReports" ("PcId", "ReceivedAtUtc", "ClientRunning", "UserSignedIn", "EventsJson")
+            SELECT "Id", 0, 0, 0, '[]' FROM "Pcs"
+            """);
+        using var app = AppWith(interceptor);
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var registered = await AddPcAsync(app, "PC-01");
+
+        var response = await ReportAsync(pc, registered, FullReport());
+
+        Assert.True(interceptor.Fired);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, await ReportCountAsync(app));
+        var stored = await StoredReportAsync(app, registered.Id);
+        Assert.True(stored!.ClientRunning);
+        Assert.Equal("0.23.0", stored.ServiceVersion);
+        Assert.Equal(app.Time.GetUtcNow().ToUnixTimeMilliseconds(), stored.ReceivedAtUtc.ToUnixTimeMilliseconds());
+    }
+
+    // The PC is removed after its token was checked but before its report is saved.
+    [Fact]
+    public async Task Report_WhenThePcIsRemovedBeforeTheSave_Returns401_AndSavesNothing()
+    {
+        var interceptor = new BeforeSaveInterceptor("DELETE FROM \"Pcs\"");
+        using var app = AppWith(interceptor);
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var registered = await AddPcAsync(app, "PC-01");
+
+        var response = await ReportAsync(pc, registered, FullReport());
+
+        Assert.True(interceptor.Fired);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(NotRegisteredMessage, (await JsonOf(response)).GetProperty("error").GetString());
         Assert.Equal(0, await ReportCountAsync(app));
     }
 
@@ -279,7 +357,7 @@ public class ServiceReportEndpointTests
         using var app = new TestApp();
         using var pc = app.CreatePcClient(OtherPcAddress);
         var registered = await AddPcAsync(app, "PC-01");
-        var events = Enumerable.Range(0, 25).Select(i => new { at = "2026-11-11T05:00:00Z", level = "information", message = $"m{i}" });
+        var events = Enumerable.Range(0, 25).Select(i => new { at = RecentAt, level = "information", message = $"m{i}" });
 
         await ReportAsync(pc, registered, new { events });
 
@@ -299,13 +377,13 @@ public class ServiceReportEndpointTests
         {
             events = new object[]
             {
-                new { at = "2026-11-11T05:00:00Z", level = "debug", message = "unknown level" },
-                new { at = "2026-11-11T05:00:00Z", level = "message", message = "not a level the admin understands" },
+                new { at = RecentAt, level = "debug", message = "unknown level" },
+                new { at = RecentAt, level = "message", message = "not a level the admin understands" },
                 new { at = "not a time", level = "warning", message = "bad time" },
-                new { at = "2026-11-11T05:00:00Z", level = "warning", message = "‎ \n" },
-                new { at = "2026-11-11T05:00:00Z", level = 3, message = "wrong type" },
+                new { at = RecentAt, level = "warning", message = "‎ \n" },
+                new { at = RecentAt, level = 3, message = "wrong type" },
                 5,
-                new { at = "2026-11-11T05:00:00Z", level = "information", message = "kept" },
+                new { at = RecentAt, level = "information", message = "kept" },
             },
         });
 
@@ -320,7 +398,7 @@ public class ServiceReportEndpointTests
         var registered = await AddPcAsync(app, "PC-01");
         var message = "a\u0000b" + new string('x', 400);
 
-        await ReportAsync(pc, registered, new { events = new[] { new { at = "2026-11-11T05:00:00Z", level = "error", message } } });
+        await ReportAsync(pc, registered, new { events = new[] { new { at = RecentAt, level = "error", message } } });
 
         var stored = (await StoredEventsAsync(app, registered.Id)).Single();
         Assert.Equal(300, stored.Message.Length);
@@ -334,11 +412,31 @@ public class ServiceReportEndpointTests
         using var pc = app.CreatePcClient(OtherPcAddress);
         var registered = await AddPcAsync(app, "PC-01");
 
-        await ReportAsync(pc, registered, new { events = new[] { new { at = "2026-11-11T13:00:00+08:00", level = "information", message = "local" } } });
+        var local = Recent.ToOffset(TimeSpan.FromHours(8)).ToString("yyyy-MM-ddTHH:mm:sszzz", CultureInfo.InvariantCulture);
+
+        await ReportAsync(pc, registered, new { events = new[] { new { at = local, level = "information", message = "local" } } });
 
         var stored = (await StoredEventsAsync(app, registered.Id)).Single();
-        Assert.Equal(DateTimeOffset.Parse("2026-11-11T05:00:00Z"), stored.At);
+        Assert.Equal(Recent, stored.At);
         Assert.Equal(TimeSpan.Zero, stored.At.Offset);
+    }
+
+    [Theory]
+    [InlineData(-7 * 24 * 60 - 1, false)]
+    [InlineData(-7 * 24 * 60 + 1, true)]
+    [InlineData(0, true)]
+    [InlineData(4, true)]
+    [InlineData(6, false)]
+    public async Task Report_KeepsOnlyEventsFromTheLastWeekUpToFiveMinutesAhead(int minutesFromNow, bool kept)
+    {
+        using var app = new TestApp();
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var registered = await AddPcAsync(app, "PC-01");
+        var at = app.Time.GetUtcNow().AddMinutes(minutesFromNow).ToString("O", CultureInfo.InvariantCulture);
+
+        await ReportAsync(pc, registered, new { events = new[] { new { at, level = "information", message = "event" } } });
+
+        Assert.Equal(kept ? 1 : 0, (await StoredEventsAsync(app, registered.Id)).Length);
     }
 
     // Offers
@@ -418,18 +516,39 @@ public class ServiceReportEndpointTests
         Assert.Null(await ClientUpdateOfListEntryAsync(admin, "PC-01"));
     }
 
-    [Fact]
-    public async Task Report_RecordsTheUpdateProgress_ForTheTarget()
+    [Theory]
+    [InlineData("downloading")]
+    [InlineData("installing")]
+    public async Task Report_RecordsTheUpdateProgress_ForTheTarget(string state)
     {
         var (app, admin, pc, _) = await AppWithReleaseAsync("0.20.0");
         using var _app = app;
         using var _admin = admin;
         var registered = await TargetedPcAsync(app, admin);
 
-        await ReportAsync(pc, registered, new { update = new { version = "0.20.0", state = "waiting", error = (string?)null } });
+        await ReportAsync(pc, registered, new { update = new { version = "0.20.0", state, error = (string?)null } });
 
         var entry = await ClientUpdateOfListEntryAsync(admin, "PC-01");
-        Assert.Equal("waiting", entry!.Value.GetProperty("state").GetString());
+        Assert.Equal(state, entry!.Value.GetProperty("state").GetString());
+    }
+
+    // The client reports downloading for the phase the service calls pending or waiting, so those never replace the heartbeat's state.
+    [Theory]
+    [InlineData("pending")]
+    [InlineData("waiting")]
+    public async Task Report_WithAStateTheHeartbeatDoesNotUse_LeavesThePcStateAlone_AndKeepsItInTheReport(string state)
+    {
+        var (app, admin, pc, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var registered = await TargetedPcAsync(app, admin);
+        await HeartbeatWithAsync(pc, registered, new { clientUpdate = new { state = "downloading", version = "0.20.0", error = (string?)null } });
+
+        var response = await ReportAsync(pc, registered, new { update = new { version = "0.20.0", state, error = (string?)null } });
+
+        Assert.NotNull(await ClientUpdateOfHeartbeatAsync(response));
+        Assert.Equal("downloading", (await ClientUpdateOfListEntryAsync(admin, "PC-01"))!.Value.GetProperty("state").GetString());
+        Assert.Equal(state, (await StoredReportAsync(app, registered.Id))!.UpdateState);
     }
 
     [Fact]
