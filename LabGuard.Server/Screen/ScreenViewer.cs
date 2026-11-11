@@ -12,6 +12,7 @@ public sealed class ScreenViewer : IDisposable
     private readonly ScreenInputRateLimiter _moves = new(ScreenProtocol.MaxMovesPerSecond);
     private readonly ScreenInputRateLimiter _otherInput = new(ScreenProtocol.MaxOtherInputPerSecond);
     private readonly ScreenInputRateLimiter _exemptInput = new(ScreenProtocol.MaxExemptInputPerSecond);
+    private readonly ScreenInputRateLimiter _sasInput = new(ScreenProtocol.MaxSasPerSecond);
     private readonly ScreenInputRateLimiter _controlRequests = new(ScreenProtocol.ControlRequestsPerSecond);
 
     // The keys and buttons the server has relayed as down. An up or release is relayed only for one of these, and the set is cleared when control ends.
@@ -337,6 +338,7 @@ public sealed class ScreenViewer : IDisposable
     {
         InputRate.Move => _moves.TryTake(now),
         InputRate.Other => _otherInput.TryTake(now),
+        InputRate.Sas => _sasInput.TryTake(now),
         _ => _exemptInput.TryTake(now),
     };
 

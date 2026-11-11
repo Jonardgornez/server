@@ -515,6 +515,47 @@ public class ScreenStreamHubControlTests
     }
 
     [Fact]
+    public async Task Sas_IsNotRelayedWhileControlIsOff_AndIsRelayedAsCanonicalTextWhileOn()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (viewer, _) = await OpenAsync(hub, app);
+        var (pc, pcSocket) = await AttachAsync(hub, viewer);
+
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"sas\"}"));
+        await hub.RequestControlAsync(viewer, isServerPc: false);
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"sas\"}"));
+        await hub.ConfirmControlAsync(viewer, pc);
+        app.Time.Advance(TimeSpan.FromSeconds(1));
+        await hub.RelayInputAsync(viewer, Input("{ \"t\" : \"sas\" }"));
+
+        Assert.Equal(new[] { PcOn, "{\"t\":\"sas\"}" }, TextsOf(pcSocket));
+    }
+
+    [Fact]
+    public async Task Sas_IsCappedAtOnePerSecond_AndNotCountedAgainstOtherInput()
+    {
+        using var app = new TestApp();
+        var (hub, viewer, _, _, pcSocket) = await OnControlAsync(app);
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            await hub.RelayInputAsync(viewer, Input("{\"t\":\"sas\"}"));
+        }
+
+        Assert.Equal(1, TextsOf(pcSocket).Count(text => text == "{\"t\":\"sas\"}"));
+
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"wheel\",\"dx\":0,\"dy\":120}"));
+        app.Time.Advance(TimeSpan.FromMilliseconds(999));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"sas\"}"));
+        Assert.Equal(1, TextsOf(pcSocket).Count(text => text == "{\"t\":\"sas\"}"));
+
+        app.Time.Advance(TimeSpan.FromMilliseconds(1));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"sas\"}"));
+        Assert.Equal(2, TextsOf(pcSocket).Count(text => text == "{\"t\":\"sas\"}"));
+    }
+
+    [Fact]
     public async Task Input_AfterTheSessionDeadline_ClosesTheViewAndIsNotRelayed()
     {
         using var app = new TestApp();
