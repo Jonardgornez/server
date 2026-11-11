@@ -363,7 +363,7 @@ public class PcCancelPowerEndpointTests
         // An older client keeps heartbeating without acting on the cancel, then the PC goes down anyway.
         await HeartbeatAsync(client, pc);
         Assert.Equal(PcShutdownRules.CancellingState, (await ListEntryAsync(admin, "PC-01")).GetProperty("shutdownState").GetString());
-        app.Time.Advance(TimeSpan.FromSeconds(20));
+        app.Time.Advance(TimeSpan.FromSeconds(16));
 
         var entry = await ListEntryAsync(admin, "PC-01");
         Assert.False(entry.GetProperty("isOnline").GetBoolean());

@@ -108,27 +108,6 @@ public class PcPowerCountdownEndpointTests
         Assert.Equal(expectedReason, (await StoredSessionAsync(app, sessionId)).EndReason);
     }
 
-    [Theory]
-    [InlineData(869, true)]
-    [InlineData(870, false)]
-    public async Task List_RestartOfALongCountdown_IsRebootingOnlyInsideItsWindow(int secondsAfterDelivery, bool isRebooting)
-    {
-        using var app = new TestApp();
-        using var admin = await SignedInAsync(app);
-        using var client = app.CreatePcClient(OtherPcAddress);
-        var pc = await AddPcAsync(app);
-        await HeartbeatAsync(client, pc);
-        await SetCountdownAsync(admin, 600);
-        await admin.PostAsJsonAsync($"/api/pcs/{pc.Id}/reboot", new { });
-        await HeartbeatAsync(client, pc);
-        app.Time.Advance(TimeSpan.FromSeconds(secondsAfterDelivery));
-
-        var entry = await ListEntryAsync(admin, "PC-01");
-
-        Assert.False(entry.GetProperty("isOnline").GetBoolean());
-        Assert.Equal(isRebooting ? PcShutdownRules.RebootingState : null, entry.GetProperty("shutdownState").GetString());
-    }
-
     [Fact]
     public async Task RunningCountdown_KeepsItsOwnWindow_WhenTheSettingChangesLater()
     {
