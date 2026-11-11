@@ -109,7 +109,7 @@ public class PcEndpointTests
 
         var entry = (await JsonOf(response))[0];
         Assert.Equal(
-            new[] { "clientUpdate", "clientVersion", "id", "internetBlockApplied", "internetBlocked", "ipAddress", "isLocked", "isOnline", "isServerPc", "lastSeenAt", "name", "registeredAt", "session", "shutdownState", "wallpaper" },
+            new[] { "clientUpdate", "clientVersion", "id", "internetBlockApplied", "internetBlocked", "ipAddress", "isLocked", "isOnline", "isServerPc", "lastSeenAt", "name", "registeredAt", "service", "session", "shutdownState", "wallpaper" },
             entry.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal).ToArray());
         Assert.Equal(id, entry.GetProperty("id").GetInt32());
         Assert.Equal("PC-07", entry.GetProperty("name").GetString());
@@ -201,6 +201,46 @@ public class PcEndpointTests
         var entry = (await JsonOf(await client.GetAsync("/api/pcs")))[0];
 
         Assert.Equal(JsonValueKind.Null, entry.GetProperty("ipAddress").ValueKind);
+    }
+
+    [Fact]
+    public async Task List_ServiceIsNull_UntilTheServiceHasReported()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        await AddAsync(app, "PC-01");
+
+        var entry = (await JsonOf(await client.GetAsync("/api/pcs")))[0];
+
+        Assert.Equal(JsonValueKind.Null, entry.GetProperty("service").ValueKind);
+    }
+
+    [Fact]
+    public async Task List_ServiceShowsTheLatestReportTime_AndWhetherTheClientRan()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        var id = await AddAsync(app, "PC-01", seenAgo: TimeSpan.FromMinutes(5));
+        await app.WithDbAsync(async db =>
+        {
+            db.PcServiceReports.Add(new PcServiceReport
+            {
+                PcId = id,
+                ReceivedAtUtc = app.Time.GetUtcNow().AddSeconds(-20),
+                ClientRunning = false,
+                EventsJson = "[]",
+            });
+            await db.SaveChangesAsync();
+            return 0;
+        });
+
+        var entry = (await JsonOf(await client.GetAsync("/api/pcs")))[0];
+
+        var service = entry.GetProperty("service");
+        Assert.Equal(["clientRunning", "lastSeenAt"], service.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal).ToArray());
+        Assert.Equal(app.Time.GetUtcNow().AddSeconds(-20).ToUnixTimeMilliseconds(), service.GetProperty("lastSeenAt").GetDateTimeOffset().ToUnixTimeMilliseconds());
+        Assert.False(service.GetProperty("clientRunning").GetBoolean());
+        Assert.False(entry.GetProperty("isOnline").GetBoolean());
     }
 
     [Fact]
