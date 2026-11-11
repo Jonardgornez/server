@@ -233,6 +233,24 @@ public class WallpaperEndpointTests
     }
 
     [Fact]
+    public async Task ReuploadOfTheSameImage_RestartsItsHour_SoTheNextCleanupKeepsIt()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var first = await UploadIdAsync(admin, BackgroundTestImages.Png(16, 16));
+        app.Time.Advance(TimeSpan.FromMinutes(59));
+        using var again = await SignedInAsync(app);
+        var reused = await UploadIdAsync(again, BackgroundTestImages.Png(16, 16));
+        app.Time.Advance(TimeSpan.FromMinutes(2));
+        using var later = await SignedInAsync(app);
+
+        await UploadIdAsync(later, BackgroundTestImages.Png(32, 32));
+
+        Assert.Equal(first, reused);
+        Assert.True(await WallpaperStoredAsync(app, first));
+    }
+
+    [Fact]
     public async Task UnassignedUpload_JustUnderAnHour_IsKept()
     {
         using var app = new TestApp();

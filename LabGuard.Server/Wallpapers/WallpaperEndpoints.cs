@@ -92,7 +92,7 @@ public static class WallpaperEndpoints
         await WallpaperCleanup.RemoveStaleUnassignedAsync(db, now, ct);
         if (await FindBySha256Async(db, image.Sha256, ct) is { } existing)
         {
-            return existing;
+            return await RefreshedAsync(db, existing, now, ct);
         }
 
         var wallpaper = new Wallpaper
@@ -111,11 +111,21 @@ public static class WallpaperEndpoints
         {
             // The same bytes were stored by a concurrent upload after this one looked, so that row is used instead.
             db.ChangeTracker.Clear();
-            return await FindBySha256Async(db, image.Sha256, ct)
+            var stored = await FindBySha256Async(db, image.Sha256, ct)
                 ?? throw new InvalidOperationException("The wallpaper reported as stored by a concurrent upload can't be read.");
+            return await RefreshedAsync(db, stored, now, ct);
         }
 
         return new WallpaperSummary(wallpaper.Id, wallpaper.ContentType, wallpaper.Sha256, wallpaper.Data.Length);
+    }
+
+    // A reused row counts as uploaded now, so the stale-upload cleanup can't remove it between this upload and its assignment.
+    private static async Task<WallpaperSummary> RefreshedAsync(AppDbContext db, WallpaperSummary existing, DateTimeOffset now, CancellationToken ct)
+    {
+        await db.Wallpapers
+            .Where(w => w.Id == existing.Id)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(w => w.CreatedAtUtc, now), ct);
+        return existing;
     }
 
     private static Task<WallpaperSummary?> FindBySha256Async(AppDbContext db, string sha256, CancellationToken ct) =>
