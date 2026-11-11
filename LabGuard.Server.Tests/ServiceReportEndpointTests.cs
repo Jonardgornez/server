@@ -117,7 +117,7 @@ public class ServiceReportEndpointTests
         var response = await ReportAsync(pc, registered, FullReport());
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("{}", await response.Content.ReadAsStringAsync());
+        Assert.Equal("""{"keepAwake":false}""", await response.Content.ReadAsStringAsync());
         var stored = await StoredReportAsync(app, registered.Id);
         Assert.Equal("0.23.0", stored!.ServiceVersion);
         Assert.True(stored.ClientRunning);
@@ -474,7 +474,7 @@ public class ServiceReportEndpointTests
     }
 
     [Fact]
-    public async Task Report_WithoutATarget_AnswersAnEmptyObject()
+    public async Task Report_WithoutATarget_AnswersOnlyKeepAwake()
     {
         var (app, admin, pc, _) = await AppWithReleaseAsync("0.20.0");
         using var _app = app;
@@ -483,7 +483,7 @@ public class ServiceReportEndpointTests
 
         var response = await ReportAsync(pc, registered, new { clientVersion = "0.19.0" });
 
-        Assert.Equal("{}", await response.Content.ReadAsStringAsync());
+        Assert.Equal("""{"keepAwake":false}""", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -577,6 +577,71 @@ public class ServiceReportEndpointTests
         await ReportAsync(pc, registered, new { update = new { version = "0.19.0", state = "failed", error = "old" } });
 
         Assert.Equal("pending", (await ClientUpdateOfListEntryAsync(admin, "PC-01"))!.Value.GetProperty("state").GetString());
+    }
+
+    // Keep awake
+
+    [Fact]
+    public async Task Report_AnswersKeepAwakeTrue_WhenTheAdministratorTurnedItOn()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var registered = await AddPcAsync(app, "PC-01");
+        Assert.Equal(1, await AffectedAsync(await admin.PostAsJsonAsync("/api/pcs/keep-awake", new { ids = new[] { registered.Id }, keepAwake = true })));
+
+        var response = await ReportAsync(pc, registered, FullReport());
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True((await JsonOf(response)).GetProperty("keepAwake").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Report_AnswersKeepAwakeFalse_WhenTheAdministratorTurnedItOff()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var registered = await AddPcAsync(app, "PC-01");
+        await admin.PostAsJsonAsync("/api/pcs/keep-awake", new { ids = new[] { registered.Id }, keepAwake = true });
+        Assert.Equal(1, await AffectedAsync(await admin.PostAsJsonAsync("/api/pcs/keep-awake", new { ids = new[] { registered.Id }, keepAwake = false })));
+
+        var response = await ReportAsync(pc, registered, FullReport());
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False((await JsonOf(response)).GetProperty("keepAwake").GetBoolean());
+    }
+
+    // Each PC gets its own setting, never another PC's.
+    [Fact]
+    public async Task Report_AnswersTheKeepAwakeOfThatPc()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var awake = await AddPcAsync(app, "PC-01");
+        var other = await AddPcAsync(app, "PC-02");
+        await admin.PostAsJsonAsync("/api/pcs/keep-awake", new { ids = new[] { awake.Id }, keepAwake = true });
+
+        var response = await ReportAsync(pc, other, FullReport());
+
+        Assert.False((await JsonOf(response)).GetProperty("keepAwake").GetBoolean());
+    }
+
+    // The offer and the setting are answered together.
+    [Fact]
+    public async Task Report_WithAnOffer_AlsoAnswersKeepAwake()
+    {
+        var (app, admin, pc, _) = await AppWithReleaseAsync("0.20.0");
+        using var _app = app;
+        using var _admin = admin;
+        var registered = await TargetedPcAsync(app, admin);
+        await admin.PostAsJsonAsync("/api/pcs/keep-awake", new { ids = new[] { registered.Id }, keepAwake = true });
+
+        var body = await JsonOf(await ReportAsync(pc, registered, new { clientVersion = "0.19.0" }));
+
+        Assert.Equal("0.20.0", body.GetProperty("clientUpdate").GetProperty("version").GetString());
+        Assert.True(body.GetProperty("keepAwake").GetBoolean());
     }
 
     // Identity and refusals
