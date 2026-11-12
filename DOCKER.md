@@ -62,7 +62,9 @@ Needs Windows 11 22H2 or later.
    ```powershell
    .\docker\migrate-from-windows.ps1
    ```
-   It refuses to run while anything listens on port 5000/5001, or if the volume already has a database.
+   It refuses to run while anything listens on port 5000/5001, and never copies into a volume that already
+   holds data. If a run fails partway and the server has **never** been started in Docker, the volume only holds
+   that partial copy: remove it with `wsl -d Ubuntu --exec docker volume rm lykantra-data` and run the script again.
    It copies `lykantra.db`, `client-updates\` and the PC key (exported from `pc-channel.dat`, so every PC stays
    paired) into the volume. The Windows files are not changed; keep them as a backup.
    If the server ran from another folder, add `-DataFolder 'C:\path\to\that\folder'`.
@@ -105,11 +107,14 @@ wsl -d Ubuntu --exec docker run --rm --user 0 --entrypoint tar -v lykantra-data:
 wsl -d Ubuntu --exec docker compose start server
 ```
 
+Run one test backup after setup. If it fails with "Permission denied", also give the Windows account that runs
+WSL access: `icacls C:\LykantraBackups /grant:r "<you>:(OI)(CI)F"`.
+
 Restore (replaces everything in the volume; the archive is checked first, so a bad file changes nothing):
 
 ```powershell
 wsl -d Ubuntu --exec docker compose stop server
-wsl -d Ubuntu --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v /mnt/c/LykantraBackups:/backup:ro lykantra-server -c 'tar tzf /backup/lykantra-backup.tgz >/dev/null && find /data -mindepth 1 -delete && tar xzf /backup/lykantra-backup.tgz -C /data && chown -R "$APP_UID" /data && chmod -R go-rwx /data'
+wsl -d Ubuntu --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v /mnt/c/LykantraBackups:/backup:ro lykantra-server -c 'tar tzf /backup/lykantra-backup.tgz | grep -qx ./lykantra.db && find /data -mindepth 1 -delete && tar xzf /backup/lykantra-backup.tgz -C /data && chown -R "$APP_UID" /data && chmod -R go-rwx /data'
 wsl -d Ubuntu --exec docker compose start server
 ```
 

@@ -75,9 +75,9 @@ try {
     wsl.exe -d $Distro --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v "${wslStaging}:/import:ro" lykantra-server `
         -c '[ -z "$(ls -A /data)" ] || exit 3; cp -a /import/. /data/ && chown -R "$APP_UID" /data && chmod -R go-rwx /data'
     if ($LASTEXITCODE -eq 3) {
-        throw 'The lykantra-data volume already has data, so nothing was copied. The data has probably been moved already.'
+        throw 'The lykantra-data volume already has data, so nothing was copied. Either the data was moved already, or an earlier run of this script failed partway (see DOCKER.md, step 2).'
     }
-    if ($LASTEXITCODE -ne 0) { throw 'Copying into the volume failed.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Copying into the volume failed partway, so it may hold a partial copy (see DOCKER.md, step 2).' }
 } finally {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $staging) {
