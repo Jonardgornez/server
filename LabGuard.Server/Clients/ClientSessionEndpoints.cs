@@ -48,6 +48,7 @@ public record HeartbeatBackgrounds(string? Login, string? Lock);
 // Wallpaper is the SHA-256 of this PC's own wallpaper, null when the administrator has given it none. The PC downloads it only when it changes.
 // Backgrounds holds the hashes of the login and lock background images, so the PC downloads only a changed one. Left out when neither is set.
 // ClientUpdate offers the stored installer while this PC's pending update targets it and it is still behind. Left out otherwise.
+// PcName is this PC's current name, always set, so the PC shows a rename by the administrator. An older client ignores it.
 public record HeartbeatResponse(
     PcSessionInfo? Session,
     string? EndedReason,
@@ -60,6 +61,7 @@ public record HeartbeatResponse(
     bool InternetBlocked,
     HeartbeatScreenView? ScreenView,
     string? Wallpaper,
+    string PcName,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PcMessageDelivery[]? Messages = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatLoginRequest? LoginRequest = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatBackgrounds? Backgrounds = null,
@@ -467,6 +469,7 @@ public static partial class ClientEndpoints
             .Select(p => new
             {
                 p.Id,
+                p.Name,
                 p.LastSeenUtc,
                 IsLocked = p.LockedAtUtc != null,
                 p.LockMessage,
@@ -574,6 +577,7 @@ public static partial class ClientEndpoints
             known.InternetBlocked,
             screenView,
             known.WallpaperSha256,
+            known.Name,
             messages.Length == 0 ? null : messages,
             loginRequest,
             backgrounds,

@@ -9,6 +9,20 @@ public static partial class PcNaming
 {
     public const string Prefix = "PC-";
 
+    // The numbers a PC-<number> name can have. They match the regex below: no leading zero and at most nine digits.
+    public const int MinNumber = 1;
+    public const int MaxNumber = 999_999_999;
+
+    public static bool IsValidNumber(int number) => number is >= MinNumber and <= MaxNumber;
+
+    // The name for a number, such as PC-9. The number must be in range.
+    public static string NameFor(int number)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(number, MinNumber);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(number, MaxNumber);
+        return Prefix + number.ToString(CultureInfo.InvariantCulture);
+    }
+
     // Only names shaped like PC-<number> count. Any other name, such as one typed by hand before automatic names, is ignored.
     [GeneratedRegex(@"^PC-([1-9][0-9]{0,8})\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex NumberedName();
