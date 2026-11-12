@@ -66,6 +66,7 @@ public static partial class PcEndpoints
         group.MapGet("/", ListAsync);
         group.MapDelete("/{id:int}", DeleteAsync);
         group.MapGet("/{id:int}/diagnostics", DiagnosticsAsync);
+        group.MapPut("/{id:int}/name", RenameAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/lock", LockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/unlock", UnlockAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/{id:int}/time", AdjustTimeAsync).AddEndpointFilter<PcStorageErrorFilter>();

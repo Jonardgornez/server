@@ -106,4 +106,36 @@ public class PcNamingTests
         Assert.NotEqual(0, PcNaming.DisplayOrder.Compare("PC-1", "PC-01"));
         Assert.Equal(0, PcNaming.DisplayOrder.Compare("PC-1", "PC-1"));
     }
+
+    [Theory]
+    [InlineData(1, "PC-1")]
+    [InlineData(9, "PC-9")]
+    [InlineData(10, "PC-10")]
+    [InlineData(999_999_999, "PC-999999999")]
+    public void NameFor_ReturnsThePrefixAndTheNumber(int number, string expected)
+    {
+        Assert.Equal(expected, PcNaming.NameFor(number));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    [InlineData(1_000_000_000)]
+    [InlineData(int.MaxValue)]
+    public void NameFor_OutOfRange_Throws(int number)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => PcNaming.NameFor(number));
+    }
+
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(999_999_999, true)]
+    [InlineData(0, false)]
+    [InlineData(-5, false)]
+    [InlineData(1_000_000_000, false)]
+    public void IsValidNumber_AcceptsOnlyOneToNineDigits(int number, bool expected)
+    {
+        Assert.Equal(expected, PcNaming.IsValidNumber(number));
+    }
 }
