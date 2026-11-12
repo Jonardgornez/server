@@ -20,8 +20,18 @@ public sealed class PcChannelStoreTests : IDisposable
 
     public void Dispose() => Directory.Delete(_folder, recursive: true);
 
+    private string PortablePath => Path.Combine(_folder, "pc-channel.json");
+
     private static string PublicKeyHash(X509Certificate2 certificate) =>
         Convert.ToHexString(SHA256.HashData(certificate.PublicKey.ExportSubjectPublicKeyInfo()));
+
+    private static byte[] NewPfx()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var certificate = new CertificateRequest("CN=Test channel", key, HashAlgorithmName.SHA256)
+            .CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+        return certificate.Export(X509ContentType.Pkcs12);
+    }
 
     [Fact]
     public void Open_FirstRun_CreatesTheFile()
@@ -40,6 +50,11 @@ public sealed class PcChannelStoreTests : IDisposable
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public void Open_FirstRun_StoresOnlyTheCertificateAndItsFormatVersion()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var store = PcChannelStore.Open(FilePath);
 
         var stored = JsonNode.Parse(ProtectedData.Unprotect(File.ReadAllBytes(FilePath), Entropy, DataProtectionScope.LocalMachine))!.AsObject();
@@ -52,6 +67,11 @@ public sealed class PcChannelStoreTests : IDisposable
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public void Open_RestrictsTheFileToTheServerAccountAndAdmins()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var store = PcChannelStore.Open(FilePath);
 
         var security = new FileInfo(FilePath).GetAccessControl();
@@ -113,6 +133,11 @@ public sealed class PcChannelStoreTests : IDisposable
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public void Open_FileWrittenWithARegistrationSecret_StillOpens_WithTheSameCertificate()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         string keyHash;
         using (var created = PcChannelStore.Open(FilePath))
         {
@@ -135,6 +160,11 @@ public sealed class PcChannelStoreTests : IDisposable
     [Fact]
     public void File_DoesNotContainThePfxInTheClear()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var store = PcChannelStore.Open(FilePath);
         var bytes = File.ReadAllBytes(FilePath);
         // The loaded key is deliberately not exportable, so the certificate's DER stands in for the PFX (the PFX embeds it).
@@ -151,6 +181,11 @@ public sealed class PcChannelStoreTests : IDisposable
     {
         var garbage = "this is not a protected blob"u8.ToArray();
         File.WriteAllBytes(FilePath, garbage);
+        if (!OperatingSystem.IsWindows())
+        {
+            // Owner-only, so the content check is what fails rather than the permission check.
+            File.SetUnixFileMode(FilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
 
         var exception = Assert.Throws<InvalidOperationException>(() => PcChannelStore.Open(FilePath));
 
@@ -179,6 +214,11 @@ public sealed class PcChannelStoreTests : IDisposable
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public void Open_WithValidlyProtectedButWrongContent_Fails()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         File.WriteAllBytes(FilePath, ProtectedData.Protect("{}"u8.ToArray(), Entropy, DataProtectionScope.LocalMachine));
 
         Assert.Throws<InvalidOperationException>(() => PcChannelStore.Open(FilePath));
@@ -194,5 +234,198 @@ public sealed class PcChannelStoreTests : IDisposable
 
         Assert.Equal(Path.Combine(_folder, "pc-channel.dat"), PcChannelStore.ResolvePath(none, _folder));
         Assert.Equal(Path.Combine(_folder, "other.dat"), PcChannelStore.ResolvePath(custom, _folder));
+    }
+
+    [Fact]
+    public void Portable_WriteThenOpen_GivesTheSameCertificate_AndLeavesNoTempFile()
+    {
+        var pfx = NewPfx();
+        using var expected = X509CertificateLoader.LoadPkcs12(pfx, password: null);
+
+        PcChannelStore.WritePortable(PortablePath, pfx, overwrite: false);
+        using var store = PcChannelStore.OpenPortable(PortablePath);
+
+        Assert.Equal(expected.Thumbprint, store.Certificate.Thumbprint);
+        Assert.True(store.Certificate.HasPrivateKey);
+        Assert.False(File.Exists(PortablePath + ".tmp"));
+    }
+
+    [Fact]
+    public void Portable_File_IsPlainJsonWithTheSameLayout()
+    {
+        var pfx = NewPfx();
+
+        PcChannelStore.WritePortable(PortablePath, pfx, overwrite: false);
+
+        var stored = JsonNode.Parse(File.ReadAllBytes(PortablePath))!.AsObject();
+        Assert.Equal(new[] { "Pfx", "Version" }, stored.Select(property => property.Key).Order().ToArray());
+        Assert.Equal(1, stored["Version"]!.GetValue<int>());
+        Assert.Equal(Convert.ToBase64String(pfx), stored["Pfx"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"Version\":2,\"Pfx\":\"AAAA\"}")]
+    [InlineData("{\"Version\":1,\"Pfx\":\"not base64!\"}")]
+    [InlineData("{\"Version\":1,\"Pfx\":\"AAAA\"}")]
+    [InlineData("null")]
+    [InlineData("this is not json")]
+    [InlineData("")]
+    public void Portable_OpenWithABadLayout_FailsWithAClearMessage_AndLeavesTheFileAlone(string content)
+    {
+        var bytes = Encoding.UTF8.GetBytes(content);
+        File.WriteAllBytes(PortablePath, bytes);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(PortablePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+
+        var exception = Assert.Throws<InvalidOperationException>(() => PcChannelStore.OpenPortable(PortablePath));
+
+        Assert.Contains(PortablePath, exception.Message);
+        Assert.Contains("disconnect every registered PC", exception.Message);
+        Assert.Equal(bytes, File.ReadAllBytes(PortablePath));
+    }
+
+    [Fact]
+    public void Portable_WriteWithoutOverwrite_RefusesAnExistingFile_AndRemovesItsTempFile()
+    {
+        File.WriteAllText(PortablePath, "existing");
+
+        Assert.ThrowsAny<IOException>(() => PcChannelStore.WritePortable(PortablePath, NewPfx(), overwrite: false));
+
+        Assert.Equal("existing", File.ReadAllText(PortablePath));
+        Assert.False(File.Exists(PortablePath + ".tmp"));
+    }
+
+    [Fact]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public void Export_WritesTheDpapiIdentityAsAPortableFile()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string keyHash;
+        string thumbprint;
+        using (var created = PcChannelStore.Open(FilePath))
+        {
+            keyHash = PublicKeyHash(created.Certificate);
+            thumbprint = created.Certificate.Thumbprint;
+        }
+
+        var source = File.ReadAllBytes(FilePath);
+
+        PcChannelStore.ExportPortable(FilePath, PortablePath);
+        using var exported = PcChannelStore.OpenPortable(PortablePath);
+
+        Assert.Equal(thumbprint, exported.Certificate.Thumbprint);
+        Assert.Equal(keyHash, PublicKeyHash(exported.Certificate));
+        Assert.True(exported.Certificate.HasPrivateKey);
+        Assert.Equal(source, File.ReadAllBytes(FilePath));
+        Assert.False(File.Exists(PortablePath + ".tmp"));
+    }
+
+    [Fact]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public void Export_RestrictsTheExportedFileToTheServerAccountAndAdmins()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using (PcChannelStore.Open(FilePath))
+        {
+        }
+
+        PcChannelStore.ExportPortable(FilePath, PortablePath);
+
+        var security = new FileInfo(PortablePath).GetAccessControl();
+        Assert.True(security.AreAccessRulesProtected);
+        Assert.Equal(
+            new HashSet<string>
+            {
+                WindowsIdentity.GetCurrent().User!.Value,
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value,
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
+            },
+            security.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>()
+                .Select(rule => rule.IdentityReference.Value)
+                .ToHashSet());
+    }
+
+    [Fact]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public void Export_RefusesToOverwriteTheDestination()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using (PcChannelStore.Open(FilePath))
+        {
+        }
+
+        File.WriteAllText(PortablePath, "existing");
+
+        var exception = Assert.Throws<InvalidOperationException>(() => PcChannelStore.ExportPortable(FilePath, PortablePath));
+
+        Assert.Contains(PortablePath, exception.Message);
+        Assert.Equal("existing", File.ReadAllText(PortablePath));
+    }
+
+    [Fact]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public void Export_WithoutASourceFile_Fails_AndCreatesNoIdentity()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var exception = Assert.Throws<InvalidOperationException>(() => PcChannelStore.ExportPortable(FilePath, PortablePath));
+
+        Assert.Contains(FilePath, exception.Message);
+        Assert.False(File.Exists(FilePath));
+        Assert.False(File.Exists(PortablePath));
+    }
+
+    [Fact]
+    public void Open_OnUnix_CreatesThePortableFileReadableByTheOwnerOnly()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var store = PcChannelStore.Open(FilePath);
+
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(FilePath));
+        using var reopened = PcChannelStore.OpenPortable(FilePath);
+        Assert.Equal(store.Certificate.Thumbprint, reopened.Certificate.Thumbprint);
+    }
+
+    [Fact]
+    public void Open_OnUnix_WithAFileOthersCanRead_RefusesToStart_AndLeavesTheFileAlone()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        PcChannelStore.WritePortable(FilePath, NewPfx(), overwrite: false);
+        var bytes = File.ReadAllBytes(FilePath);
+        var looseMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead;
+        File.SetUnixFileMode(FilePath, looseMode);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => PcChannelStore.Open(FilePath));
+
+        Assert.Contains("chmod 600", exception.Message);
+        Assert.Equal(looseMode, File.GetUnixFileMode(FilePath));
+        Assert.Equal(bytes, File.ReadAllBytes(FilePath));
     }
 }

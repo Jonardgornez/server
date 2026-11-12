@@ -38,7 +38,7 @@ public static class ClientUpdateEndpoints
 
     public static IServiceCollection AddClientUpdates(this IServiceCollection services)
     {
-        services.AddSingleton<IInstallerInspector, FileVersionInstallerInspector>();
+        services.AddSingleton<IInstallerInspector, PeVersionInstallerInspector>();
         services.AddSingleton<ClientUploadLimiter>();
         services.AddSingleton(sp => new ClientReleaseFiles(
             ClientReleaseFiles.ResolveFolder(sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IHostEnvironment>()),

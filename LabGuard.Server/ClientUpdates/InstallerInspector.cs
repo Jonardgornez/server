@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 namespace LabGuard.Server.ClientUpdates;
 
 // What the Windows version resource of an installer says about it. Null fields mean the resource was not readable.
@@ -12,20 +10,8 @@ public interface IInstallerInspector
     InstallerInfo? Read(string path);
 }
 
-public sealed class FileVersionInstallerInspector : IInstallerInspector
+// Reads the resource with a managed parser rather than FileVersionInfo, which only reads it on Windows and the server also runs on Linux.
+public sealed class PeVersionInstallerInspector : IInstallerInspector
 {
-    public InstallerInfo? Read(string path)
-    {
-        try
-        {
-            var info = FileVersionInfo.GetVersionInfo(path);
-            // The version resource pads its strings with spaces, so they are trimmed before anything compares them.
-            return new InstallerInfo(info.ProductName?.Trim(), info.FileVersion?.Trim());
-        }
-        catch (Exception)
-        {
-            // Any failure to read the resource means the file can't be identified, whatever the exception type.
-            return null;
-        }
-    }
+    public InstallerInfo? Read(string path) => PeVersionReader.Read(path);
 }
