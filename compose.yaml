@@ -1,0 +1,45 @@
+
+services:
+
+  # React Admin Frontend
+  frontend:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+
+    container_name: lykantra-admin
+
+    ports:
+      - "5173:5173"
+
+    depends_on:
+      - server
+
+    restart: always
+
+    volumes:
+      - ./admin:/app
+      - admin_node_modules:/app/node_modules
+
+
+  # ASP.NET Core Backend
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+
+    container_name: lykantra-server
+
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+
+    restart: always
+
+    volumes:
+      - labguard_data:/data
+
+
+volumes:
+  admin_node_modules:
+  labguard_data:
