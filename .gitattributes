@@ -1,0 +1,3 @@
+Dockerfile text eol=lf
+*.template text eol=lf
+compose.yaml text eol=lf

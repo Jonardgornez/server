@@ -1,0 +1,21 @@
+services:
+  server:
+    build: .
+    image: lykantra-server
+    # Host networking (with WSL mirrored mode) so lab PCs reach port 5001 on pc-server's real IP, the server sees each
+    # PC's real address, and the admin port stays on this computer's loopback.
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      # Lets the admin console (served by the admin container) open live view.
+      Screen__AllowedOrigins__0: http://localhost:${ADMIN_PORT:-5173}
+      Screen__AllowedOrigins__1: http://127.0.0.1:${ADMIN_PORT:-5173}
+    volumes:
+      - lykantra-data:/data
+
+volumes:
+  # All server data. Rebuilding or updating the container keeps it; only `docker compose down -v` or
+  # `docker volume rm lykantra-data` deletes it.
+  lykantra-data:
+    name: lykantra-data

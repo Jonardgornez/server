@@ -11,13 +11,30 @@ using LabGuard.Server.Requests;
 using LabGuard.Server.Screen;
 using LabGuard.Server.Settings;
 using LabGuard.Server.Wallpapers;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using System.Net.WebSockets;
 using System.Security.Authentication;
 
+if (PcChannelExportCommand.IsRequested(args))
+{
+    Environment.ExitCode = PcChannelExportCommand.Run(args);
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
+
+// In the container the sign-in cookie keys must outlive a rebuild, so they are kept in a mounted folder.
+// Without the setting the default key location is used, as before, so existing sign-ins stay valid.
+var dataProtectionKeysFolder = builder.Configuration["DataProtection:KeysFolder"];
+if (!string.IsNullOrWhiteSpace(dataProtectionKeysFolder))
+{
+    builder.Services.AddDataProtection()
+        .PersistKeysToFileSystem(new DirectoryInfo(Path.GetFullPath(dataProtectionKeysFolder, builder.Environment.ContentRootPath)))
+        .SetApplicationName("Lykantra");
+}
 
 // Two separate ports: the admin web UI listens on loopback only, so no setting can expose it to the LAN,
 // while lab PCs reach /api/client/* on the client port. ChannelGuard keeps the two paths apart.
