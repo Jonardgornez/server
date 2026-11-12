@@ -45,30 +45,13 @@ builder.Services.AddSingleton(services =>
         services.GetRequiredService<IConfiguration>(),
         services.GetRequiredService<IHostEnvironment>().ContentRootPath)));
 
-// builder.WebHost.ConfigureKestrel(options =>
-// {
-//     var ports = options.ApplicationServices.GetRequiredService<ServerPorts>();
-//     options.ListenLocalhost(ports.AdminPort);
-//     options.ListenAnyIP(ports.ClientPort, listen => listen.UseHttps(https =>
-//     {
-//         https.ServerCertificate = options.ApplicationServices.GetRequiredService<PcChannelStore>().Certificate;
-//         https.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
-//     }));
-// });
-
 builder.WebHost.ConfigureKestrel(options =>
 {
     var ports = options.ApplicationServices.GetRequiredService<ServerPorts>();
-
-    // Admin API: accessible to the React container
-    options.ListenAnyIP(ports.AdminPort);
-
-    // Client API: HTTPS accessible through the server IP
+    options.ListenLocalhost(ports.AdminPort);
     options.ListenAnyIP(ports.ClientPort, listen => listen.UseHttps(https =>
     {
-        https.ServerCertificate = options.ApplicationServices
-            .GetRequiredService<PcChannelStore>().Certificate;
-
+        https.ServerCertificate = options.ApplicationServices.GetRequiredService<PcChannelStore>().Certificate;
         https.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
     }));
 });
