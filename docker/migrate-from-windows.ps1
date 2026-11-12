@@ -72,8 +72,9 @@ try {
 
     Write-Host 'Copying data into the lykantra-data volume...'
     # The emptiness check and the copy run in one container, so existing data in the volume is never overwritten.
+    # No double quotes inside the sh script: Windows PowerShell 5.1 breaks them when passing arguments to wsl.exe.
     wsl.exe -d $Distro --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v "${wslStaging}:/import:ro" lykantra-server `
-        -c '[ -z "$(ls -A /data)" ] || exit 3; cp -a /import/. /data/ && chown -R "$APP_UID" /data && chmod -R go-rwx /data'
+        -c '[ $(ls -A /data | wc -l) -eq 0 ] || exit 3; cp -a /import/. /data/ && chown -R $APP_UID /data && chmod -R go-rwx /data'
     if ($LASTEXITCODE -eq 3) {
         throw 'The lykantra-data volume already has data, so nothing was copied. Either the data was moved already, or an earlier run of this script failed partway (see DOCKER.md, step 2).'
     }

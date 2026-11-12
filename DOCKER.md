@@ -250,13 +250,21 @@ wsl -d Ubuntu --exec docker compose start server
 
 ```powershell
 wsl -d Ubuntu --exec docker compose stop server
-wsl -d Ubuntu --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v /mnt/c/LykantraBackups:/backup:ro lykantra-server -c 'tar tzf /backup/lykantra-backup.tgz | grep -qx ./lykantra.db && find /data -mindepth 1 -delete && tar xzf /backup/lykantra-backup.tgz -C /data && chown -R "$APP_UID" /data && chmod -R go-rwx /data'
+wsl -d Ubuntu --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v /mnt/c/LykantraBackups:/backup:ro lykantra-server -c 'tar tzf /backup/lykantra-backup.tgz | grep -qx ./lykantra.db && find /data -mindepth 1 -delete && tar xzf /backup/lykantra-backup.tgz -C /data && chown -R $APP_UID /data && chmod -R go-rwx /data'
 wsl -d Ubuntu --exec docker compose start server
 ```
 
 ---
 
 ## If something goes wrong
+
+**First, run the check script** (normal PowerShell, from `C:\...\server`). It only reads information, and it
+copies the result to your clipboard so you can paste it to whoever is helping you:
+
+```powershell
+.\docker\diagnose.ps1
+```
+
 
 | What you see | What to do |
 |---|---|
