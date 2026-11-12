@@ -9,3 +9,6 @@ pc-channel.dat.tmp
 .vs/
 *.user
 LabGuard.Server/client-updates/
+*.tgz
+**/pc-channel.json
+**/pc-channel.json.tmp

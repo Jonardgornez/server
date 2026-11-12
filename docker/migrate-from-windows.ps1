@@ -45,10 +45,6 @@ try {
 }
 
 Invoke-Docker volume create lykantra-data | Out-Null
-wsl.exe -d $Distro --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data lykantra-server -c 'test -e /data/lykantra.db'
-if ($LASTEXITCODE -eq 0) {
-    throw 'The lykantra-data volume already has a database, so nothing was copied. The data has already been moved.'
-}
 
 # The staging folder briefly holds the PC key unencrypted, so it is always removed at the end.
 $staging = Join-Path ([IO.Path]::GetTempPath()) ('lykantra-import-' + [guid]::NewGuid().ToString('N'))
@@ -75,10 +71,18 @@ try {
     if ($LASTEXITCODE -ne 0 -or -not $wslStaging) { throw "Could not translate $staging to a WSL path." }
 
     Write-Host 'Copying data into the lykantra-data volume...'
-    Invoke-Docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v "${wslStaging}:/import:ro" lykantra-server `
-        -c 'cp -a /import/. /data/ && chown -R "$APP_UID" /data && chmod -R go-rwx /data'
+    # The emptiness check and the copy run in one container, so existing data in the volume is never overwritten.
+    wsl.exe -d $Distro --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v "${wslStaging}:/import:ro" lykantra-server `
+        -c '[ -z "$(ls -A /data)" ] || exit 3; cp -a /import/. /data/ && chown -R "$APP_UID" /data && chmod -R go-rwx /data'
+    if ($LASTEXITCODE -eq 3) {
+        throw 'The lykantra-data volume already has data, so nothing was copied. The data has probably been moved already.'
+    }
+    if ($LASTEXITCODE -ne 0) { throw 'Copying into the volume failed.' }
 } finally {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $staging) {
+        Write-Warning "Could not delete $staging. It holds the PC key unencrypted: delete that folder by hand now."
+    }
 }
 
 Write-Host ''

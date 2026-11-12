@@ -17,3 +17,6 @@ compose.yaml
 deploy.ps1
 docker
 DOCKER.md
+*.tgz
+**/pc-channel.json
+**/pc-channel.json.tmp

@@ -7,6 +7,10 @@ services:
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       # Lets the admin console (served by the admin container) open live view.
       Screen__AllowedOrigins__0: http://localhost:${ADMIN_PORT:-5173}

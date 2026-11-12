@@ -88,22 +88,28 @@ build leaves the old version running. Database migrations run when the new serve
 
 ## 4. Backup and restore
 
-Back up (stops the server for a few seconds so the database copy is consistent):
+A backup holds the PC key and the login keys unencrypted, so it goes in a folder outside the repo that only
+administrators can read. Create that folder once (PowerShell as administrator):
 
 ```powershell
-cd server
+New-Item -ItemType Directory C:\LykantraBackups
+icacls C:\LykantraBackups /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F"
+```
+
+Back up (from the `server` folder, PowerShell as administrator; stops the server for a few seconds so the
+database copy is consistent):
+
+```powershell
 wsl -d Ubuntu --exec docker compose stop server
-wsl -d Ubuntu --exec docker run --rm --user 0 --entrypoint tar -v lykantra-data:/data:ro -v "$(wsl -d Ubuntu --exec wslpath -a $PWD):/backup" lykantra-server czf /backup/lykantra-backup.tgz -C /data .
+wsl -d Ubuntu --exec docker run --rm --user 0 --entrypoint tar -v lykantra-data:/data:ro -v /mnt/c/LykantraBackups:/backup lykantra-server czf /backup/lykantra-backup.tgz -C /data .
 wsl -d Ubuntu --exec docker compose start server
 ```
 
-The `.tgz` contains the PC key unencrypted: keep it somewhere only administrators can read.
-
-Restore (replaces everything in the volume):
+Restore (replaces everything in the volume; the archive is checked first, so a bad file changes nothing):
 
 ```powershell
 wsl -d Ubuntu --exec docker compose stop server
-wsl -d Ubuntu --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v "$(wsl -d Ubuntu --exec wslpath -a $PWD):/backup:ro" lykantra-server -c 'find /data -mindepth 1 -delete && tar xzf /backup/lykantra-backup.tgz -C /data && chown -R "$APP_UID" /data'
+wsl -d Ubuntu --exec docker run --rm --user 0 --entrypoint sh -v lykantra-data:/data -v /mnt/c/LykantraBackups:/backup:ro lykantra-server -c 'tar tzf /backup/lykantra-backup.tgz >/dev/null && find /data -mindepth 1 -delete && tar xzf /backup/lykantra-backup.tgz -C /data && chown -R "$APP_UID" /data && chmod -R go-rwx /data'
 wsl -d Ubuntu --exec docker compose start server
 ```
 
@@ -118,6 +124,14 @@ git checkout main            # when the fix is pushed, then .\deploy.ps1
 
 A newer server may have already changed the database (migrations only go forward). Restore a backup taken
 before the update if the older server can't start.
+
+## Security notes
+
+- In Docker the PC key (`pc-channel.json`) and the admin login keys (`keys/`) are stored unencrypted in the volume
+  (on Windows the PC key was DPAPI-encrypted). Only the container's user can read them, but anyone in the WSL
+  `docker` group or with Windows administrator rights can. Keep pc-server's admin accounts to the people who run it.
+- If the admin account still has the old development password (`admin123`), change it in the console now.
+- A fresh install (no migrated database) runs in Production and creates no admin account.
 
 ## Never run
 
