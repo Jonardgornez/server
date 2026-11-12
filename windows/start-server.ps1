@@ -19,6 +19,10 @@ foreach ($name in 'server', 'server-errors') {
     }
 }
 
+# Admin sign-in keys are kept next to the database. The default per-user store can't be read by the startup task,
+# which runs before anyone signs in, and admins would be signed out after every reboot.
+$env:DataProtection__KeysFolder = Join-Path $project 'keys'
+
 # Run from the project folder, so the database and PC key are found where they always were.
 Start-Process -FilePath 'dotnet' -ArgumentList 'run' -WorkingDirectory $project -NoNewWindow -Wait `
     -RedirectStandardOutput (Join-Path $logs 'server.log') `

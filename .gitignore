@@ -13,4 +13,4 @@ LabGuard.Server/client-updates/
 **/pc-channel.json
 **/pc-channel.json.tmp
 **/keys/
-logs/
+/logs/
