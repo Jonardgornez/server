@@ -1,5 +1,9 @@
 # Lykantra in Docker on pc-server
 
+> **Not in use.** pc-server runs Lykantra directly on Windows: see `WINDOWS.md`. Docker Desktop can't run this
+> server correctly (it hides the lab PCs' real IP addresses), and the Ubuntu + Docker Engine setup below was too
+> involved. This guide is kept only for reference.
+
 This guide moves the **server** and the **admin console** on pc-server from Windows into Docker.
 Lab PCs don't change: they keep their client and stay paired.
 
