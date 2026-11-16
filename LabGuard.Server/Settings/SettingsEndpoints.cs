@@ -35,6 +35,7 @@ public static class SettingsEndpoints
         var group = app.MapGroup("/api/settings");
         group.MapGet("/", GetAsync);
         group.MapPut("/", SaveAsync);
+        group.MapUninstallPasswordEndpoints();
         return app;
     }
 
@@ -59,6 +60,8 @@ public static class SettingsEndpoints
 
         var ct = http.RequestAborted;
         var settings = await ServerSettingsStore.GetAsync(db, ct);
+        // The uninstall password has its own route, so this save carries the stored one over unchanged.
+        UninstallPassword.Store(validated, UninstallPassword.StoredIn(settings));
         db.Entry(settings).CurrentValues.SetValues(validated);
         await db.SaveChangesAsync(ct);
         return Results.Ok(ToResponse(settings));

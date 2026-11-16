@@ -566,6 +566,17 @@ namespace LabGuard.Server.Migrations
                         .HasColumnType("INTEGER")
                         .HasDefaultValue(30);
 
+                    b.Property<string>("UninstallPasswordHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("UninstallPasswordIterations")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("UninstallPasswordSalt")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
 
                     b.ToTable("ServerSettings", null, t =>
