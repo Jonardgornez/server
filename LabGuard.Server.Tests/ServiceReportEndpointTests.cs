@@ -117,7 +117,7 @@ public class ServiceReportEndpointTests
         var response = await ReportAsync(pc, registered, FullReport());
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("""{"keepAwake":false}""", await response.Content.ReadAsStringAsync());
+        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null}""", await response.Content.ReadAsStringAsync());
         var stored = await StoredReportAsync(app, registered.Id);
         Assert.Equal("0.23.0", stored!.ServiceVersion);
         Assert.True(stored.ClientRunning);
@@ -483,7 +483,7 @@ public class ServiceReportEndpointTests
 
         var response = await ReportAsync(pc, registered, new { clientVersion = "0.19.0" });
 
-        Assert.Equal("""{"keepAwake":false}""", await response.Content.ReadAsStringAsync());
+        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null}""", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]

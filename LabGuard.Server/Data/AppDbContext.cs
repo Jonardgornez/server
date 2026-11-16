@@ -204,6 +204,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             // The default is also the value an existing settings row gets when this column is added.
             entity.Property(s => s.PowerCountdownSeconds).HasDefaultValue(ServerSettings.DefaultPowerCountdownSeconds);
             entity.Property(s => s.LockMessage).HasMaxLength(ServerSettings.MaxLockMessageLength).IsRequired().HasDefaultValue(ServerSettings.DefaultLockMessage);
+            entity.Property(s => s.UninstallPasswordHash).HasMaxLength(64);
+            entity.Property(s => s.UninstallPasswordSalt).HasMaxLength(64);
         });
     }
 }

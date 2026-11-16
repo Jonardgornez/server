@@ -28,4 +28,8 @@ public class ServerSettings
     public int PowerCountdownSeconds { get; set; } = DefaultPowerCountdownSeconds;
     // Shown on a locked PC that has no message of its own.
     public string LockMessage { get; set; } = DefaultLockMessage;
+    // The one uninstall password of all PCs, kept only as a PBKDF2 hash. All three are null while no password is set.
+    public string? UninstallPasswordHash { get; set; }
+    public string? UninstallPasswordSalt { get; set; }
+    public int? UninstallPasswordIterations { get; set; }
 }
