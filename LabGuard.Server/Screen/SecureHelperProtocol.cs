@@ -15,6 +15,11 @@ public static class SecureHelperProtocol
     public static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(15);
     public static readonly TimeSpan KeepAliveTimeout = TimeSpan.FromSeconds(15);
 
+    // A helper streams at most 30 frames a second, so more than this means it is flooding, and it is closed.
+    public const int MaxFramesPerSecond = 40;
+    // Frames a helper had on the way when it was told to stop are dropped, not refused, for this long after the stop.
+    public static readonly TimeSpan StopGrace = TimeSpan.FromSeconds(1);
+
     public static readonly byte[] StopMessage = "{\"t\":\"stop\"}"u8.ToArray();
     private static readonly byte[] StartNotifiedMessage = "{\"t\":\"start\",\"mode\":\"notified\"}"u8.ToArray();
     private static readonly byte[] StartAnonymousMessage = "{\"t\":\"start\",\"mode\":\"anonymous\"}"u8.ToArray();
@@ -54,10 +59,37 @@ public enum HelperMessageKind
     ControlOff,
 }
 
-// One helper connection: the PC it serves, the hash of the token it signed in with, so a replaced token closes it, and its socket.
+// One helper connection: the PC it serves, the hash of the token it signed in with, so a replaced token closes it, its socket,
+// its frame cap, and when it was last told to stop.
 public sealed class SecureHelperConnection(int pcId, string tokenHash, ScreenSocket socket)
 {
+    private readonly Lock _sync = new();
+    private readonly ScreenInputRateLimiter _frames = new(SecureHelperProtocol.MaxFramesPerSecond);
+    private DateTimeOffset? _lastStoppedAt;
+
     public int PcId { get; } = pcId;
     public string TokenHash { get; } = tokenHash;
     public ScreenSocket Socket { get; } = socket;
+
+    public DateTimeOffset? LastStoppedAt
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _lastStoppedAt;
+            }
+        }
+    }
+
+    public void MarkStopped(DateTimeOffset now)
+    {
+        lock (_sync)
+        {
+            _lastStoppedAt = now;
+        }
+    }
+
+    // False once the helper has sent more frames than the cap allows in the last second.
+    public bool TryTakeFrameSlot(DateTimeOffset now) => _frames.TryTake(now);
 }

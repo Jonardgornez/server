@@ -40,10 +40,26 @@ public sealed class ScreenViewMonitor(
         await base.StopAsync(cancellationToken);
     }
 
+    // Each check runs on its own, so a failure in one never skips the other.
     public async Task CheckOnceAsync(CancellationToken cancellationToken)
     {
-        await CheckHelpersAsync(cancellationToken);
-        await CheckViewsAsync(cancellationToken);
+        try
+        {
+            await CheckHelpersAsync(cancellationToken);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("Couldn't check the secure-desktop helpers: {ExceptionType}.", exception.GetType().Name);
+        }
+
+        try
+        {
+            await CheckViewsAsync(cancellationToken);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("Couldn't check the live screen views: {ExceptionType}.", exception.GetType().Name);
+        }
     }
 
     // A helper is closed once its PC is removed or its token is replaced, so a revoked token can't keep a helper connected.

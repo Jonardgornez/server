@@ -34,6 +34,10 @@ public static partial class ClientEndpoints
     // The service sends its report once a minute, so 6 a minute leaves room for a retry without letting a PC flood the table.
     public const int MaxServiceReportsPerMinute = 6;
     public const string ServiceReportRateLimitPolicy = "pc-service-report";
+    // The secure-desktop helper connects once and stays connected, so a few connects a minute cover its reconnects. Its own
+    // counter keeps a reconnecting helper from using up the heartbeats' share, and the reverse.
+    public const int MaxSecureHelperConnectsPerMinute = 20;
+    public const string SecureHelperRateLimitPolicy = "pc-secure-helper";
 
     private const int MaxTokenLength = 64;
     private const string BearerPrefix = "Bearer ";
@@ -75,6 +79,8 @@ public static partial class ClientEndpoints
                 PerAddressLimit(context, ClientUpdateRateLimitPolicy, MaxClientUpdateDownloadsPerMinute));
             options.AddPolicy(ServiceReportRateLimitPolicy, context =>
                 PerAddressLimit(context, ServiceReportRateLimitPolicy, MaxServiceReportsPerMinute));
+            options.AddPolicy(SecureHelperRateLimitPolicy, context =>
+                PerAddressLimit(context, SecureHelperRateLimitPolicy, MaxSecureHelperConnectsPerMinute));
             // Per address, so registering fake PCs can't get around the per-PC login lockout.
             options.AddPolicy(LoginRateLimitPolicy, context =>
                 PerAddressLimit(context, LoginRateLimitPolicy, MaxLoginsPerMinute));
@@ -116,7 +122,7 @@ public static partial class ClientEndpoints
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapGet("/screen/stream", ScreenStreamAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
-        group.MapGet("/screen/secure-stream", SecureScreenStreamAsync).RequireRateLimiting(TrafficRateLimitPolicy)
+        group.MapGet("/screen/secure-stream", SecureScreenStreamAsync).RequireRateLimiting(SecureHelperRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapPost("/messages/{id:long}/ack", AckMessageAsync).RequireRateLimiting(TrafficRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();

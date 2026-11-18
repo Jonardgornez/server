@@ -35,14 +35,20 @@ public sealed partial class ScreenStreamHub
             _helpersByPc[helper.PcId] = helper;
         }
 
-        if (CurrentFor(helper.PcId) is { } viewer)
+        try
         {
-            await SwitchSourceAsync(viewer);
+            if (CurrentFor(helper.PcId) is { } viewer)
+            {
+                await SwitchSourceAsync(viewer);
+            }
         }
-
-        if (replaced is not null)
+        finally
         {
-            await CloseHelperSocketAsync(replaced, ScreenProtocol.ReplacedCloseStatus, "Replaced by another helper connection.");
+            // Closed however the switch ended, so a failed switch never leaves the replaced helper connected.
+            if (replaced is not null)
+            {
+                await CloseHelperSocketAsync(replaced, ScreenProtocol.ReplacedCloseStatus, "Replaced by another helper connection.");
+            }
         }
     }
 
@@ -126,6 +132,25 @@ public sealed partial class ScreenStreamHub
         }
     }
 
+    // Whether a frame the helper sent is allowed at all. Within the frame cap, it is allowed while the helper streams for an open
+    // view, and for a short grace after it was told to stop, since frames already on the way are not its fault. Otherwise the
+    // helper is sending unasked, and the caller closes it.
+    public bool IsHelperFrameAllowed(SecureHelperConnection helper)
+    {
+        var now = clock.GetUtcNow();
+        if (!helper.TryTakeFrameSlot(now))
+        {
+            return false;
+        }
+
+        if (CurrentFor(helper.PcId) is { } viewer && viewer.IsCurrentSource(helper.Socket))
+        {
+            return true;
+        }
+
+        return helper.LastStoppedAt is { } stoppedAt && now - stoppedAt < SecureHelperProtocol.StopGrace;
+    }
+
     private ScreenSocket? ConnectedHelperFor(int pcId)
     {
         lock (_sync)
@@ -142,13 +167,32 @@ public sealed partial class ScreenStreamHub
         await viewer.StateGate.WaitAsync();
         try
         {
-            if (viewer.TrySwitchSource(ConnectedHelperFor(viewer.PcId)) is not { } change)
+            SourceSwitch change;
+            // The switch and its messages happen under the input gate, so no input is chosen for the old source and sent after
+            // that source was released or stopped.
+            await viewer.InputGate.WaitAsync();
+            try
             {
-                return;
+                if (viewer.TrySwitchSource(ConnectedHelperFor(viewer.PcId)) is not { } switched)
+                {
+                    return;
+                }
+
+                change = switched;
+                await SendSwitchMessagesAsync(viewer, change);
+                // The view may have closed while the helper was being started. Its close might have told the helper to stop before
+                // the start went out, so the helper is told again and never stays started with no view.
+                if (change.StartedHelper is { } started && viewer.IsClosed)
+                {
+                    await StopHelperAsync(started);
+                }
+            }
+            finally
+            {
+                viewer.InputGate.Release();
             }
 
             ended = change.EndedControl;
-            await SendSwitchMessagesAsync(viewer, change);
             if (ended is not null)
             {
                 await SendControlMessageAsync(viewer, ScreenControlMessages.OffMessage(ControlReasons.Connection));
@@ -171,11 +215,42 @@ public sealed partial class ScreenStreamHub
         }
     }
 
-    private static async Task SendSwitchMessagesAsync(ScreenViewer viewer, SourceSwitch change)
+    // The helper's stop when its view closes. It waits, briefly, for a switch that is sending, so the stop goes out after that
+    // switch's start. A close never waits longer than that bound.
+    private async Task StopHelperOnCloseAsync(ScreenViewer viewer, ScreenSocket helper)
+    {
+        var isGated = await viewer.InputGate.WaitAsync(ScreenProtocol.ControlInputSendTimeout);
+        try
+        {
+            await StopHelperAsync(helper);
+        }
+        finally
+        {
+            if (isGated)
+            {
+                viewer.InputGate.Release();
+            }
+        }
+    }
+
+    // Tells the helper to stop, and notes when, so the frames it already had on the way are dropped rather than refused.
+    private async Task StopHelperAsync(ScreenSocket helper)
+    {
+        SecureHelperConnection? connection;
+        lock (_sync)
+        {
+            connection = _helpersByPc.Values.FirstOrDefault(candidate => ReferenceEquals(candidate.Socket, helper));
+        }
+
+        connection?.MarkStopped(clock.GetUtcNow());
+        await SendOrAbortAsync(helper, SecureHelperProtocol.StopMessage);
+    }
+
+    private async Task SendSwitchMessagesAsync(ScreenViewer viewer, SourceSwitch change)
     {
         if (change.StoppedHelper is { } stopped)
         {
-            await SendOrAbortAsync(stopped, SecureHelperProtocol.StopMessage);
+            await StopHelperAsync(stopped);
         }
 
         if (change.ReleasedPc is { } released)

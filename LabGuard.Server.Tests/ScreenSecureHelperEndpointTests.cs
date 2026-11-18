@@ -307,7 +307,7 @@ public class ScreenSecureHelperEndpointTests
     }
 
     [Fact]
-    public async Task AnIdleHelper_IsNotStarted_WhileThePcStreams_AndItsFramesAreDropped()
+    public async Task AnIdleHelperSendingAFrame_IsClosedWith1008_AndNothingReachesTheBrowser()
     {
         using var app = new TestApp();
         var view = await OpenViewAsync(app);
@@ -315,11 +315,67 @@ public class ScreenSecureHelperEndpointTests
         using var helper = await ConnectHelperAsync(app, view.PcId, view.Token);
 
         await LiveViewClient.SendAsync(helper, LiveViewClient.Frame("idle"));
+        Assert.Equal(WebSocketCloseStatus.PolicyViolation, await CloseStatusAsync(helper));
         await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("pc"));
 
         Assert.Equal("pc", LiveViewClient.LabelOf((await LiveViewClient.ReceiveAsync(view.Browser)).Payload, 2));
         await FinishAsync(app, view);
-        Assert.Equal(WebSocketState.Open, helper.State);
+    }
+
+    [Fact]
+    public async Task AFrameWithinTheGraceAfterStop_IsDropped_ButOneAfterItClosesTheHelper()
+    {
+        using var app = new TestApp();
+        var view = await OpenViewAsync(app);
+        using var pc = await ConnectPcAsync(app, view);
+        using var helper = await ConnectHelperAsync(app, view.PcId, view.Token);
+        await PauseOntoHelperAsync(view, pc, helper);
+        await LiveViewClient.SendTextAsync(pc, "resumed");
+        Assert.Equal(Stop, await TextAsync(helper));
+        Assert.Equal(Live, await TextAsync(view.Browser));
+
+        await LiveViewClient.SendAsync(helper, LiveViewClient.Frame("in-grace"));
+        await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("pc"));
+        Assert.Equal("pc", LiveViewClient.LabelOf((await LiveViewClient.ReceiveAsync(view.Browser)).Payload, 2));
+        app.Time.Advance(SecureHelperProtocol.StopGrace);
+        await LiveViewClient.SendAsync(helper, LiveViewClient.Frame("too-late"));
+
+        Assert.Equal(WebSocketCloseStatus.PolicyViolation, await CloseStatusAsync(helper));
+        await FinishAsync(app, view);
+    }
+
+    [Fact]
+    public async Task AStreamingHelperOverTheFrameCap_IsClosedWith1008()
+    {
+        using var app = new TestApp();
+        var view = await OpenViewAsync(app);
+        using var pc = await ConnectPcAsync(app, view);
+        using var helper = await ConnectHelperAsync(app, view.PcId, view.Token);
+        await PauseOntoHelperAsync(view, pc, helper);
+
+        for (var frame = 0; frame <= SecureHelperProtocol.MaxFramesPerSecond; frame++)
+        {
+            await LiveViewClient.SendAsync(helper, LiveViewClient.Frame($"f{frame}"));
+        }
+
+        Assert.Equal(WebSocketCloseStatus.PolicyViolation, await CloseStatusAsync(helper));
+        await FinishAsync(app, view);
+    }
+
+    [Fact]
+    public async Task SecureStream_HasItsOwnRateLimit_ThatDoesNotUseUpTheHeartbeats()
+    {
+        using var app = new TestApp();
+        var (_, token) = await LiveViewClient.AddPcAsync(app);
+        for (var attempt = 0; attempt < LabGuard.Server.Clients.ClientEndpoints.MaxSecureHelperConnectsPerMinute; attempt++)
+        {
+            Assert.Equal(401, await LiveViewClient.RefusedStatusAsync(() => LiveViewClient.OpenHelperAsync(app, "not-a-real-token")));
+        }
+
+        var limited = await LiveViewClient.RefusedStatusAsync(() => LiveViewClient.OpenHelperAsync(app, token));
+
+        Assert.Equal(429, limited);
+        await LiveViewClient.HeartbeatAsync(app, token);
     }
 
     [Fact]

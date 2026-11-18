@@ -138,6 +138,8 @@ public static partial class ClientEndpoints
         finally
         {
             await hub.DetachHelperAsync(helper);
+            // After a close this side sent (1008, 1009), the peer gets a moment to read the code before the connection ends.
+            await helper.Socket.DrainUntilPeerClosesAsync(ScreenProtocol.CloseHandshakeTimeout);
             await helper.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "The stream ended.");
             helper.Socket.Dispose();
         }
@@ -159,6 +161,13 @@ public static partial class ClientEndpoints
             if (kind == HelperMessageKind.Invalid)
             {
                 await helper.Socket.CloseAsync(SecureHelperProtocol.ProtocolErrorCloseStatus, "Unexpected message.");
+                return;
+            }
+
+            // A helper that sends frames unasked, or faster than the cap, is closed, so an idle helper can't flood the server.
+            if (kind == HelperMessageKind.Frame && !hub.IsHelperFrameAllowed(helper))
+            {
+                await helper.Socket.CloseAsync(SecureHelperProtocol.ProtocolErrorCloseStatus, "Unexpected frame.");
                 return;
             }
 

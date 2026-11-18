@@ -22,6 +22,11 @@ public sealed class ScreenViewer : IDisposable
     // Held around each state change and its send, so states reach the browser in the order they were recorded.
     // Control changes take it too. Closing the view doesn't, so a close never waits behind a send that is stuck.
     public SemaphoreSlim StateGate { get; } = new(1, 1);
+
+    // Held around choosing an input's target and sending it, and around the messages of a source switch and the helper's stop
+    // on close. So input can't reach a source after it was released or stopped, and a helper's start and stop can't cross.
+    // Taken after StateGate when both are needed, never before it.
+    public SemaphoreSlim InputGate { get; } = new(1, 1);
     // Each frame the browser hasn't acknowledged yet, oldest first, with its sender. An ack goes back to the sender of the oldest one.
     private readonly Queue<InFlightFrame> _framesInFlight = new();
     private ScreenSocket? _pc;
@@ -95,6 +100,26 @@ public sealed class ScreenViewer : IDisposable
             {
                 return _control;
             }
+        }
+    }
+
+    public bool IsClosed
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _isClosed;
+            }
+        }
+    }
+
+    // True while the socket is the source of frames: the helper streaming in the PC's place, or the PC when no helper does.
+    public bool IsCurrentSource(ScreenSocket socket)
+    {
+        lock (_sync)
+        {
+            return !_isClosed && ReferenceEquals(_helper ?? _pc, socket);
         }
     }
 

@@ -316,15 +316,24 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
             return;
         }
 
-        if (viewer.TakeControlInputTarget(input, now, ConnectedHelperFor(viewer.PcId)) is not { } pc)
+        // The target is chosen and sent to under the input gate, so a switch of source can't slip between the two.
+        await viewer.InputGate.WaitAsync();
+        try
         {
-            return;
-        }
+            if (viewer.TakeControlInputTarget(input, now, ConnectedHelperFor(viewer.PcId)) is not { } pc)
+            {
+                return;
+            }
 
-        // Bounded, so one slow PC can't hold the browser's loop. A PC that doesn't take input in time is cut off, which ends control.
-        if (!await pc.SendAsync(Encoding.UTF8.GetBytes(input.Canonical), WebSocketMessageType.Text, ScreenProtocol.ControlInputSendTimeout))
+            // Bounded, so one slow PC can't hold the browser's loop. A PC that doesn't take input in time is cut off, which ends control.
+            if (!await pc.SendAsync(Encoding.UTF8.GetBytes(input.Canonical), WebSocketMessageType.Text, ScreenProtocol.ControlInputSendTimeout))
+            {
+                pc.Abort();
+            }
+        }
+        finally
         {
-            pc.Abort();
+            viewer.InputGate.Release();
         }
     }
 
@@ -353,7 +362,7 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
             await Task.WhenAll(
                 viewer.Browser.CloseAsync(status, reason),
                 pc?.CloseAsync(status, reason) ?? Task.CompletedTask,
-                helper is null ? Task.CompletedTask : SendOrAbortAsync(helper, SecureHelperProtocol.StopMessage));
+                helper is null ? Task.CompletedTask : StopHelperOnCloseAsync(viewer, helper));
 
             // Cancelling the lifetime resets the connection, so each peer first gets a moment to receive the close code.
             await Task.WhenAll(
