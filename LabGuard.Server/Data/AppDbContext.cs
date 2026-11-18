@@ -19,6 +19,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Wallpaper> Wallpapers => Set<Wallpaper>();
     public DbSet<ClientRelease> ClientReleases => Set<ClientRelease>();
     public DbSet<PcServiceReport> PcServiceReports => Set<PcServiceReport>();
+    public DbSet<SharedFile> SharedFiles => Set<SharedFile>();
+    public DbSet<PcFileTransfer> PcFileTransfers => Set<PcFileTransfer>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -138,6 +140,43 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(r => r.UpdateState).HasMaxLength(16);
             entity.Property(r => r.UpdateError).HasMaxLength(200);
             entity.Property(r => r.EventsJson).IsRequired();
+        });
+
+        modelBuilder.Entity<SharedFile>(entity =>
+        {
+            entity.Property(f => f.Name).HasMaxLength(200).IsRequired();
+            entity.Property(f => f.Sha256).HasMaxLength(64).IsRequired();
+            // One row per distinct file, enforced by the database.
+            entity.HasIndex(f => f.Sha256).IsUnique();
+            entity.Property(f => f.CreatedUtc).HasConversion(unixMilliseconds);
+        });
+
+        modelBuilder.Entity<PcFileTransfer>(entity =>
+        {
+            // Removed with the PC.
+            entity.HasOne<Pc>()
+                .WithMany()
+                .HasForeignKey(t => t.PcId)
+                .OnDelete(DeleteBehavior.Cascade);
+            // A finished transfer outlives the shared file's bytes, so it keeps its own copies of the file's details.
+            entity.HasOne<SharedFile>()
+                .WithMany()
+                .HasForeignKey(t => t.SharedFileId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.Property(t => t.PcName).HasMaxLength(32).IsRequired();
+            entity.Property(t => t.FileName).HasMaxLength(200).IsRequired();
+            entity.Property(t => t.Sha256).HasMaxLength(64).IsRequired();
+            entity.Property(t => t.Folder).HasMaxLength(16).IsRequired();
+            entity.Property(t => t.Subfolder).HasMaxLength(200).IsRequired();
+            entity.Property(t => t.Status).HasMaxLength(16).IsRequired();
+            entity.Property(t => t.Decision).HasMaxLength(16);
+            entity.Property(t => t.SavedAs).HasMaxLength(255);
+            entity.Property(t => t.Error).HasMaxLength(200);
+            entity.Property(t => t.CreatedUtc).HasConversion(unixMilliseconds);
+            entity.Property(t => t.UpdatedUtc).HasConversion(unixMilliseconds);
+            // The heartbeat looks up a PC's transfers by status, and the cleanup finds old ones by age.
+            entity.HasIndex(t => new { t.PcId, t.Status });
+            entity.HasIndex(t => t.CreatedUtc);
         });
 
         modelBuilder.Entity<PcSession>(entity =>

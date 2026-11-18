@@ -86,6 +86,7 @@ public static partial class PcEndpoints
         group.MapPost("/client-update/cancel", CancelClientUpdateAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/wallpaper", SetWallpaperAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/keep-awake", SetKeepAwakeAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapFileTransferEndpoints();
         return app;
     }
 
@@ -190,6 +191,8 @@ public static partial class PcEndpoints
             await SessionLifecycle.EndForPcAsync(db, id, SessionLifecycle.PcRemoved, now, cancellationToken);
             await LoginRequestLifecycle.CancelPendingForPcAsync(db, id, LoginRequestLifecycle.PcRemoved, now, cancellationToken);
             await WallpaperCleanup.RemoveUnusedAsync(db, wallpaperId is { } removedWallpaperId ? [removedWallpaperId] : [], cancellationToken);
+            // The files sent to the PC go with it. Their shared files are removed by the cleanup once nothing else needs them.
+            await db.PcFileTransfers.Where(t => t.PcId == id).ExecuteDeleteAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             // The token went with the PC, so its secure-desktop helper is closed at once.
             await screens.CloseHelperForPcAsync(id, ScreenProtocol.PcOfflineCloseStatus, "The PC was removed.");

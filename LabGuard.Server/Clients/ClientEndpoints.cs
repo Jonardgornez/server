@@ -52,6 +52,16 @@ public static partial class ClientEndpoints
             {
                 var policy = context.HttpContext.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>()?.PolicyName;
                 context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                // A refused download says when to try again: the window's own time when the limiter knows it,
+                // otherwise 10 seconds (refused because another download from this PC is still running).
+                if (policy == FileDownloadRateLimitPolicy)
+                {
+                    context.HttpContext.Response.Headers.RetryAfter =
+                        context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter)
+                            ? ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            : "10";
+                }
+
                 if (policy == LoginRateLimitPolicy)
                 {
                     context.HttpContext.Response.Headers.RetryAfter = "60";
@@ -77,6 +87,9 @@ public static partial class ClientEndpoints
                 PerAddressLimit(context, WallpaperRateLimitPolicy, MaxWallpaperDownloadsPerMinute));
             options.AddPolicy(ClientUpdateRateLimitPolicy, context =>
                 PerAddressLimit(context, ClientUpdateRateLimitPolicy, MaxClientUpdateDownloadsPerMinute));
+            options.AddPolicy(FileTransferReportRateLimitPolicy, context =>
+                PerAddressLimit(context, FileTransferReportRateLimitPolicy, MaxFileTransferReportsPerMinute));
+            options.AddPolicy(FileDownloadRateLimitPolicy, PerAddressDownloadLimit);
             options.AddPolicy(ServiceReportRateLimitPolicy, context =>
                 PerAddressLimit(context, ServiceReportRateLimitPolicy, MaxServiceReportsPerMinute));
             options.AddPolicy(SecureHelperRateLimitPolicy, context =>
@@ -85,6 +98,24 @@ public static partial class ClientEndpoints
             options.AddPolicy(LoginRateLimitPolicy, context =>
                 PerAddressLimit(context, LoginRateLimitPolicy, MaxLoginsPerMinute));
         });
+
+    // A few downloads a minute and one at a time, per address. The concurrency slot is taken first, so a download refused for
+    // running in parallel doesn't use up one of the minute's downloads. The slot is held until the response has been sent.
+    private static RateLimitPartition<string> PerAddressDownloadLimit(HttpContext context) =>
+        RateLimitPartition.Get(
+            $"{FileDownloadRateLimitPolicy}:{RemoteAddress(context)?.ToString() ?? "unknown"}",
+            _ => RateLimiter.CreateChained(
+                new ConcurrencyLimiter(new ConcurrencyLimiterOptions
+                {
+                    PermitLimit = MaxConcurrentFileDownloads,
+                    QueueLimit = 0,
+                }),
+                new FixedWindowRateLimiter(new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = MaxFileDownloadsPerMinute,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0,
+                })));
 
     private static RateLimitPartition<string> PerAddressLimit(HttpContext context, string policy, int permitLimit) =>
         RateLimitPartition.GetFixedWindowLimiter(
@@ -135,6 +166,10 @@ public static partial class ClientEndpoints
         group.MapGet("/wallpaper", WallpaperEndpoints.DownloadForPcAsync).RequireRateLimiting(WallpaperRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapGet("/client-update/{sha256}", ClientUpdateDownloadEndpoints.DownloadForPcAsync).RequireRateLimiting(ClientUpdateRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapGet("/files/{transferId:long}", DownloadFileTransferAsync).RequireRateLimiting(FileDownloadRateLimitPolicy)
+            .AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapPost("/files/{transferId:long}/status", ReportFileTransferAsync).RequireRateLimiting(FileTransferReportRateLimitPolicy)
             .AddEndpointFilter<ClientStorageErrorFilter>();
         return app;
     }
