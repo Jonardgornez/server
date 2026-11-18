@@ -67,6 +67,21 @@ public class ScreenStreamHubSecureHelperTests
     }
 
     [Fact]
+    public async Task Text_WhileTheHelperIsTheSource_IsRelayedToTheHelper_NotToThePc()
+    {
+        const string text = "{\"t\":\"text\",\"s\":\"p@ss\"}";
+        using var app = new TestApp();
+        var (hub, viewer, pc, pcSocket, _, helperSocket) = await SetUpAsync(app);
+        await TurnControlOnAsync(hub, viewer, pc);
+        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+
+        await hub.RelayInputAsync(viewer, ScreenControlMessages.Parse(WebSocketMessageType.Text, Encoding.UTF8.GetBytes(text)));
+
+        Assert.Equal(text, TextsOf(helperSocket).Last());
+        Assert.DoesNotContain(text, TextsOf(pcSocket));
+    }
+
+    [Fact]
     public async Task ClosingTheView_StopsAStreamingHelper_WithinTheBound_EvenWhileTheInputGateIsHeld()
     {
         using var app = new TestApp();

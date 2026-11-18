@@ -364,6 +364,27 @@ public class ScreenViewerTests
     }
 
     [Fact]
+    public void TakeControlInputTarget_CapsTextOnItsOwn_IndependentOfMovesAndOtherInput()
+    {
+        var viewer = ConfirmedViewer(out _);
+        var now = DateTimeOffset.UtcNow;
+        var textInput = new BrowserControlMessage(BrowserControlKind.Input, "{}", InputRate.Text);
+        for (var attempt = 0; attempt < ScreenProtocol.MaxOtherInputPerSecond; attempt++)
+        {
+            viewer.TakeControlInputTarget(WheelInput, now);
+        }
+
+        var texts = Enumerable.Range(0, ScreenProtocol.MaxTextPerSecond + 5)
+            .Count(_ => viewer.TakeControlInputTarget(textInput, now) is not null);
+
+        Assert.Equal(40, ScreenProtocol.MaxTextPerSecond);
+        Assert.Equal(ScreenProtocol.MaxTextPerSecond, texts);
+        Assert.Null(viewer.TakeControlInputTarget(WheelInput, now));
+        Assert.NotNull(viewer.TakeControlInputTarget(MoveInput, now));
+        Assert.NotNull(viewer.TakeControlInputTarget(textInput, now.AddSeconds(1)));
+    }
+
+    [Fact]
     public void TakeControlInputTarget_AnUpOrReleaseIsRelayedOnlyForSomethingHeld()
     {
         var viewer = ConfirmedViewer(out _);

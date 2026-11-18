@@ -8,6 +8,7 @@ public class ScreenViewerSourceTests
     private static readonly DateTimeOffset Now = DateTimeOffset.UtcNow;
     private static readonly BrowserControlMessage MoveInput = new(BrowserControlKind.Move, "{\"t\":\"move\",\"x\":1,\"y\":1}", InputRate.Move);
     private static readonly BrowserControlMessage SasInput = new(BrowserControlKind.Input, "{\"t\":\"sas\"}", InputRate.Sas);
+    private static readonly BrowserControlMessage TextInput = new(BrowserControlKind.Input, "{\"t\":\"text\",\"s\":\"a\"}", InputRate.Text);
 
     private static ScreenViewer NewViewer() =>
         new("0123456789abcdef0123456789abcdef", pcId: 7, mode: ScreenProtocol.NotifiedMode, auditId: 1, DateTimeOffset.UtcNow.AddMinutes(30),
@@ -171,6 +172,21 @@ public class ScreenViewerSourceTests
 
         Assert.Same(helper, viewer.TakeControlInputTarget(SasInput, Now, connectedHelper: helper));
         Assert.Same(pc, viewer.TakeControlInputTarget(SasInput, Now.AddSeconds(2)));
+    }
+
+    [Fact]
+    public void Text_GoesToTheSourceThatCarriesControl_NotToAConnectedHelperWhileThePcIsTheSource()
+    {
+        var (viewer, pc) = LiveViewer();
+        var helper = NewSocket();
+        TurnControlOn(viewer);
+
+        Assert.Same(pc, viewer.TakeControlInputTarget(TextInput, Now, connectedHelper: helper));
+
+        viewer.TrySetPcPaused(pc, isPaused: true);
+        viewer.TrySwitchSource(helper);
+
+        Assert.Same(helper, viewer.TakeControlInputTarget(TextInput, Now, connectedHelper: helper));
     }
 
     [Fact]

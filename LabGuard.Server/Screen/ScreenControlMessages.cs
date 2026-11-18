@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using LabGuard.Server.Common;
 
 namespace LabGuard.Server.Screen;
 
@@ -12,6 +13,8 @@ public static class ScreenControlMessages
     public const int MaxWheelDelta = 1200;
     public const int MaxButton = 4;
     public const int MaxKeyCodeLength = 32;
+    // Pasted text arrives in chunks of at most this many UTF-16 units. A chunk never splits a surrogate pair.
+    public const int MaxTextLength = 64;
 
     private static readonly JsonDocumentOptions ParseOptions = new() { MaxDepth = 4, CommentHandling = JsonCommentHandling.Disallow };
     private static readonly BrowserControlMessage Dropped = new(BrowserControlKind.Invalid);
@@ -72,6 +75,7 @@ public static class ScreenControlMessages
             "up" => ParseButton("up", fields),
             "wheel" => ParseWheel(fields),
             "key" => ParseKey(fields),
+            "text" => ParseText(fields),
             "release" => HasExactly(fields, "t")
                 ? new BrowserControlMessage(BrowserControlKind.Input, "{\"t\":\"release\"}", InputRate.Exempt, HeldEffect.ReleaseAll)
                 : Dropped,
@@ -160,6 +164,59 @@ public static class ScreenControlMessages
             $"k{code}");
     }
 
+    // Text to type on the PC. It is never logged or audited, since it may be a password.
+    private static BrowserControlMessage ParseText(Dictionary<string, JsonElement> fields)
+    {
+        if (!HasExactly(fields, "t", "s")
+            || fields["s"].ValueKind != JsonValueKind.String
+            || fields["s"].GetString() is not { } text
+            || !IsTextChunk(text))
+        {
+            return Dropped;
+        }
+
+        return new BrowserControlMessage(BrowserControlKind.Input, TextMessage(text), InputRate.Text);
+    }
+
+    // 1 to 64 UTF-16 units, no unpaired surrogate, and no control character but a line break or a tab. char.IsControl is exactly
+    // C0 (U+0000-001F), DEL (U+007F) and C1 (U+0080-009F). Format characters such as the zero width joiner in an emoji are allowed.
+    private static bool IsTextChunk(string text) =>
+        text.Length is >= 1 and <= MaxTextLength
+        && !text.Any(unit => char.IsControl(unit) && unit is not ('\n' or '\t'))
+        && !UnpairedSurrogates.IsPresentIn(text);
+
+    // The canonical text message. Only the quote, the backslash and the two allowed controls are escaped. Everything else is written
+    // as itself, so a valid chunk takes at most 3 UTF-8 bytes per unit, and the whole message is at most 211 bytes, well within the
+    // PC's 512-byte message limit. The encoders of System.Text.Json would write every emoji, private use, unassigned and line or
+    // paragraph separator character as an escape of 6 bytes per unit, even with UnsafeRelaxedJsonEscaping, so this stays compact.
+    private static string TextMessage(string text)
+    {
+        var message = new StringBuilder("{\"t\":\"text\",\"s\":\"", 20 + (2 * text.Length));
+        foreach (var unit in text)
+        {
+            switch (unit)
+            {
+                case '"':
+                    message.Append("\\\"");
+                    break;
+                case '\\':
+                    message.Append("\\\\");
+                    break;
+                case '\n':
+                    message.Append("\\n");
+                    break;
+                case '\t':
+                    message.Append("\\t");
+                    break;
+                default:
+                    message.Append(unit);
+                    break;
+            }
+        }
+
+        return message.Append("\"}").ToString();
+    }
+
     // Letters and digits only, so the code can go into the canonical text without escaping. The client holds the allow-list.
     private static bool IsKeyCode(string code) =>
         code.Length is >= 1 and <= MaxKeyCodeLength && code.All(char.IsAsciiLetterOrDigit);
@@ -225,13 +282,15 @@ public enum BrowserControlKind
     Input,
 }
 
-// How often the input may be relayed. Moves, presses and scrolls, and the secure attention sequence have their own caps. Exempt inputs have a backstop.
+// How often the input may be relayed. Moves, presses and scrolls, the secure attention sequence and pasted text have their own
+// caps. Exempt inputs have a backstop.
 public enum InputRate
 {
     Exempt,
     Move,
     Other,
     Sas,
+    Text,
 }
 
 // What an input does to the keys and buttons held on the PC. The server relays an up or release only for something it relayed as down.

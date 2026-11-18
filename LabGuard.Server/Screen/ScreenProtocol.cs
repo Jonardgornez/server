@@ -31,7 +31,8 @@ public static class ScreenProtocol
     // Per message type. A PC frame is at most 2 MiB, and the PC sends nothing as text but "paused" or "resumed".
     public const int MaxPcBinaryBytes = 2 * 1024 * 1024;
     public const int MaxPcTextBytes = 16;
-    // The browser only sends "ack", so anything larger is not a legitimate message.
+    // The browser sends "ack" and control messages. The largest is a text chunk of 64 units as JSON.stringify writes it, at most
+    // 211 bytes, so anything larger is not a legitimate message.
     public const int MaxBrowserMessageBytes = 256;
     public static readonly MessageLimits PcLimits = new(MaxPcTextBytes, MaxPcBinaryBytes);
     public static readonly MessageLimits BrowserLimits = new(MaxBrowserMessageBytes, MaxBrowserMessageBytes);
@@ -60,6 +61,9 @@ public static class ScreenProtocol
     public const int MaxExemptInputPerSecond = 1000;
     // Ctrl+Alt+Del is a secure attention sequence. It is capped on its own, so it can't be repeated faster than once a second.
     public const int MaxSasPerSecond = 1;
+    // Pasted text is typed in chunks, capped on their own. The administrator's page paces about 12.5 chunks a second. The cap leaves
+    // room for delayed chunks that arrive together, so a paste doesn't lose a chunk midway.
+    public const int MaxTextPerSecond = 40;
     // The keys and buttons the server has relayed as held at once. A press beyond this is dropped.
     public const int MaxHeldInputs = 256;
     // A viewer may ask for control this often. Requests beyond it are ignored.
