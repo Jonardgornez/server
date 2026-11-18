@@ -556,6 +556,71 @@ public class ScreenStreamHubControlTests
     }
 
     [Fact]
+    public async Task Text_IsNotRelayedWhileControlIsOff_AndIsRelayedAsCanonicalTextWhileOn()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (viewer, _) = await OpenAsync(hub, app);
+        var (pc, pcSocket) = await AttachAsync(hub, viewer);
+
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"before\"}"));
+        await hub.RequestControlAsync(viewer, isServerPc: false);
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"requesting\"}"));
+        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.RelayInputAsync(viewer, Input("{ \"s\" : \"a\\u0062\\n\", \"t\" : \"text\" }"));
+        await hub.StopControlAsync(viewer);
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"after\"}"));
+
+        Assert.Equal(new[] { PcOn, "{\"t\":\"text\",\"s\":\"ab\\n\"}", PcOff }, TextsOf(pcSocket));
+    }
+
+    [Fact]
+    public async Task Text_KeepsItsOrderWithKeys()
+    {
+        using var app = new TestApp();
+        var (hub, viewer, _, _, pcSocket) = await OnControlAsync(app);
+
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"key\",\"c\":\"ControlLeft\",\"d\":true}"));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"key\",\"c\":\"ControlLeft\",\"d\":false}"));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"one\"}"));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"key\",\"c\":\"Enter\",\"d\":true}"));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"two\"}"));
+
+        Assert.Equal(
+            new[]
+            {
+                PcOn,
+                "{\"t\":\"key\",\"c\":\"ControlLeft\",\"d\":true}",
+                "{\"t\":\"key\",\"c\":\"ControlLeft\",\"d\":false}",
+                "{\"t\":\"text\",\"s\":\"one\"}",
+                "{\"t\":\"key\",\"c\":\"Enter\",\"d\":true}",
+                "{\"t\":\"text\",\"s\":\"two\"}",
+            },
+            TextsOf(pcSocket));
+    }
+
+    [Fact]
+    public async Task Text_IsCappedAtFortyPerSecond_AndNotCountedAgainstOtherInput()
+    {
+        using var app = new TestApp();
+        var (hub, viewer, _, _, pcSocket) = await OnControlAsync(app);
+
+        for (var attempt = 0; attempt < ScreenProtocol.MaxTextPerSecond + 5; attempt++)
+        {
+            await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"a\"}"));
+        }
+
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"wheel\",\"dx\":0,\"dy\":120}"));
+        var texts = TextsOf(pcSocket);
+        Assert.Equal(ScreenProtocol.MaxTextPerSecond, texts.Count(text => text == "{\"t\":\"text\",\"s\":\"a\"}"));
+        Assert.Contains("{\"t\":\"wheel\",\"dx\":0,\"dy\":120}", texts);
+
+        app.Time.Advance(TimeSpan.FromSeconds(1));
+        await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"a\"}"));
+        Assert.Equal(ScreenProtocol.MaxTextPerSecond + 1, TextsOf(pcSocket).Count(text => text == "{\"t\":\"text\",\"s\":\"a\"}"));
+    }
+
+    [Fact]
     public async Task Input_AfterTheSessionDeadline_ClosesTheViewAndIsNotRelayed()
     {
         using var app = new TestApp();
