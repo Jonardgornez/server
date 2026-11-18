@@ -235,6 +235,80 @@ namespace LabGuard.Server.Migrations
                     b.ToTable("Pcs");
                 });
 
+            modelBuilder.Entity("LabGuard.Server.Data.PcFileTransfer", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Decision")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Error")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Folder")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PcId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PcName")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SavedAs")
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Sha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("SharedFileId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Subfolder")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedUtc");
+
+                    b.HasIndex("SharedFileId");
+
+                    b.HasIndex("PcId", "Status");
+
+                    b.ToTable("PcFileTransfers");
+                });
+
             modelBuilder.Entity("LabGuard.Server.Data.PcMessage", b =>
                 {
                     b.Property<long>("Id")
@@ -585,6 +659,36 @@ namespace LabGuard.Server.Migrations
                         });
                 });
 
+            modelBuilder.Entity("LabGuard.Server.Data.SharedFile", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Sha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Sha256")
+                        .IsUnique();
+
+                    b.ToTable("SharedFiles");
+                });
+
             modelBuilder.Entity("LabGuard.Server.Data.UserAccount", b =>
                 {
                     b.Property<int>("Id")
@@ -654,6 +758,20 @@ namespace LabGuard.Server.Migrations
                     b.HasOne("LabGuard.Server.Data.Wallpaper", null)
                         .WithMany()
                         .HasForeignKey("WallpaperId")
+                        .OnDelete(DeleteBehavior.SetNull);
+                });
+
+            modelBuilder.Entity("LabGuard.Server.Data.PcFileTransfer", b =>
+                {
+                    b.HasOne("LabGuard.Server.Data.Pc", null)
+                        .WithMany()
+                        .HasForeignKey("PcId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("LabGuard.Server.Data.SharedFile", null)
+                        .WithMany()
+                        .HasForeignKey("SharedFileId")
                         .OnDelete(DeleteBehavior.SetNull);
                 });
 

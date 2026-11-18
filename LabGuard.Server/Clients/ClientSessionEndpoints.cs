@@ -48,6 +48,8 @@ public record HeartbeatBackgrounds(string? Login, string? Lock);
 // Wallpaper is the SHA-256 of this PC's own wallpaper, null when the administrator has given it none. The PC downloads it only when it changes.
 // Backgrounds holds the hashes of the login and lock background images, so the PC downloads only a changed one. Left out when neither is set.
 // ClientUpdate offers the stored installer while this PC's pending update targets it and it is still behind. Left out otherwise.
+// FileTransfers are the sent files handed to the PC on this heartbeat: new ones, and ones whose existing file now has the
+// administrator's decision. The field is left out when there are none.
 // PcName is this PC's current name, always set, so the PC shows a rename by the administrator. An older client ignores it.
 public record HeartbeatResponse(
     PcSessionInfo? Session,
@@ -65,7 +67,8 @@ public record HeartbeatResponse(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PcMessageDelivery[]? Messages = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatLoginRequest? LoginRequest = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HeartbeatBackgrounds? Backgrounds = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ClientUpdateOffer? ClientUpdate = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ClientUpdateOffer? ClientUpdate = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] FileTransferDelivery[]? FileTransfers = null);
 
 // Login, logout, going offline and heartbeat on the PC channel. The server owns the session clock; the PC only displays it.
 public static partial class ClientEndpoints
@@ -559,6 +562,7 @@ public static partial class ClientEndpoints
         }
 
         var messages = await HandOverMessagesAsync(db, pcId, now, ct);
+        var fileTransfers = await HandOverFileTransfersAsync(db, pcId, now, ct);
         var loginRequest = await HeartbeatLoginRequestAsync(db, pcId, now, ct);
 
         var settings = await ServerSettingsStore.GetAsync(db, ct);
@@ -581,7 +585,8 @@ public static partial class ClientEndpoints
             messages.Length == 0 ? null : messages,
             loginRequest,
             backgrounds,
-            clientUpdate));
+            clientUpdate,
+            fileTransfers.Length == 0 ? null : fileTransfers));
     }
 
     internal static Task<int?> FindPcIdAsync(AppDbContext db, string token, CancellationToken ct)

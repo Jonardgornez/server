@@ -6,6 +6,7 @@ using System.Text.Json;
 using LabGuard.Server.ClientUpdates;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
+using LabGuard.Server.SharedFiles;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -33,6 +34,8 @@ public sealed class TestApp : WebApplicationFactory<Program>
     private readonly string _channelPath = Path.Combine(Path.GetTempPath(), $"lykantra-test-{Guid.NewGuid():N}.pc-channel.dat");
     // Each test server keeps its installer files in its own folder, so parallel tests never share one.
     private readonly string _clientUpdatesPath = Path.Combine(Path.GetTempPath(), $"lykantra-test-{Guid.NewGuid():N}-client-updates");
+    // Each test server keeps its shared files in its own folder too.
+    private readonly string _sharedFilesPath = Path.Combine(Path.GetTempPath(), $"lykantra-test-{Guid.NewGuid():N}-shared-files");
     private readonly string _environment;
 
 
@@ -50,6 +53,9 @@ public sealed class TestApp : WebApplicationFactory<Program>
 
     /// <summary>The folder this server keeps its client installer in.</summary>
     public string ClientUpdatesFolder => _clientUpdatesPath;
+
+    /// <summary>The folder this server keeps the files it sends to PCs in.</summary>
+    public string SharedFilesFolder => _sharedFilesPath;
 
     /// <summary>A LAN address of the machine running the test server. Other PCs in tests use 203.0.113.x.</summary>
     public const string MachineLanAddress = "198.51.100.10";
@@ -133,6 +139,7 @@ public sealed class TestApp : WebApplicationFactory<Program>
                 ["ConnectionStrings:AppDb"] = $"Data Source={_databasePath}",
                 [PcChannelStore.FileConfigurationKey] = _channelPath,
                 [ClientReleaseFiles.FolderConfigurationKey] = _clientUpdatesPath,
+                [SharedFileStorage.FolderConfigurationKey] = _sharedFilesPath,
                 ["Seed:AdminUsername"] = Username,
                 ["Seed:AdminPassword"] = Password,
                 ["Screen:AllowedOrigins:0"] = "http://localhost:5173",
@@ -185,6 +192,7 @@ public sealed class TestApp : WebApplicationFactory<Program>
         DeleteWhenReleased(_channelPath);
         DeleteWhenReleased(_channelPath + ".tmp");
         DeleteFolderWhenReleased(_clientUpdatesPath);
+        DeleteFolderWhenReleased(_sharedFilesPath);
     }
 
     private static void DeleteFolderWhenReleased(string path)

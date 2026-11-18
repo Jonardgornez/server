@@ -10,6 +10,7 @@ using LabGuard.Server.Pcs;
 using LabGuard.Server.Requests;
 using LabGuard.Server.Screen;
 using LabGuard.Server.Settings;
+using LabGuard.Server.SharedFiles;
 using LabGuard.Server.Wallpapers;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
@@ -61,6 +62,7 @@ builder.Services.AddAdminAuth();
 builder.Services.AddClientRateLimiting();
 builder.Services.AddScreenViewing();
 builder.Services.AddClientUpdates();
+builder.Services.AddSharedFiles();
 builder.Services.AddSingleton<DummyLoginCredential>();
 builder.Services.AddSingleton<PcMessageSends>();
 builder.Services.AddSingleton<ILocalAddressSource, NetworkInterfaceAddressSource>();
@@ -108,6 +110,12 @@ using (var scope = app.Services.CreateScope())
         db,
         services.GetRequiredService<TimeProvider>().GetUtcNow(),
         CancellationToken.None);
+    // Sent files past their lifetimes, and upload temp files left by a crash, are cleaned up before any request arrives.
+    await SharedFileCleanup.RunAsync(
+        db,
+        services.GetRequiredService<SharedFileStorage>(),
+        services.GetRequiredService<TimeProvider>().GetUtcNow(),
+        CancellationToken.None);
 }
 
 app.UseMiddleware<ChannelGuard>();
@@ -136,6 +144,7 @@ app.MapSettingsEndpoints();
 app.MapBackgroundEndpoints();
 app.MapWallpaperEndpoints();
 app.MapClientUpdateEndpoints();
+app.MapSharedFileEndpoints();
 app.MapServerInfoEndpoints();
 app.MapClientEndpoints();
 
