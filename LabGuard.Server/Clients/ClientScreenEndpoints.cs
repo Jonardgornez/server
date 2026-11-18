@@ -82,16 +82,97 @@ public static partial class ClientEndpoints
                     await hub.RelayFrameAsync(viewer, pc, message.Payload);
                     break;
                 case PcMessageKind.Paused:
-                    await hub.RelayPcStateAsync(viewer, pc, ScreenProtocol.PausedState);
+                    await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
                     break;
                 case PcMessageKind.Resumed:
-                    await hub.RelayPcStateAsync(viewer, pc, ScreenProtocol.LiveState);
+                    await hub.SetPcPausedAsync(viewer, pc, isPaused: false);
                     break;
                 case PcMessageKind.ControlOn:
                     await hub.ConfirmControlAsync(viewer, pc);
                     break;
                 case PcMessageKind.ControlOff:
-                    await hub.EndControlAsync(viewer, ControlReasons.PcEnded);
+                    await hub.EndControlFromAsync(viewer, pc);
+                    break;
+            }
+        }
+    }
+
+    // The PC's secure-desktop helper. It runs as SYSTEM in the console session, signs in with the PC's token, and stays connected
+    // while idle. It streams only when told to, while a view is open and the PC's own stream is paused. One helper per PC.
+    private static async Task<IResult> SecureScreenStreamAsync(HttpContext http, AppDbContext db, ScreenStreamHub hub, TimeProvider clock)
+    {
+        if (ReadBearerToken(http.Request) is not { } token)
+        {
+            return NotRegistered();
+        }
+
+        var ct = http.RequestAborted;
+        if (await FindPcIdAsync(db, token, ct) is not { } pcId)
+        {
+            return NotRegistered();
+        }
+
+        if (!http.WebSockets.IsWebSocketRequest)
+        {
+            return AuthEndpoints.BadRequest("This address needs a WebSocket connection.");
+        }
+
+        if (!hub.TryReserveHelperAttach(pcId, clock.GetUtcNow()))
+        {
+            http.Response.Headers.RetryAfter = "1";
+            return Results.Json(new ErrorResponse("The helper reconnected too soon."), statusCode: StatusCodes.Status429TooManyRequests);
+        }
+
+        var socket = await http.WebSockets.AcceptWebSocketAsync(new WebSocketAcceptContext
+        {
+            KeepAliveInterval = SecureHelperProtocol.KeepAliveInterval,
+            KeepAliveTimeout = SecureHelperProtocol.KeepAliveTimeout,
+        });
+        // The token's hash is kept, so the monitor can close the helper once the PC's token is replaced or the PC is removed.
+        var helper = new SecureHelperConnection(pcId, HashToken(token), new ScreenSocket(socket, ScreenProtocol.SendTimeout));
+        try
+        {
+            await hub.AttachHelperAsync(helper);
+            await ReceiveHelperMessagesAsync(hub, helper, ct);
+        }
+        finally
+        {
+            await hub.DetachHelperAsync(helper);
+            await helper.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "The stream ended.");
+            helper.Socket.Dispose();
+        }
+
+        return Results.Empty;
+    }
+
+    // Strict: anything but a relayable frame or a known text closes the helper. A replaced helper stops here.
+    private static async Task ReceiveHelperMessagesAsync(ScreenStreamHub hub, SecureHelperConnection helper, CancellationToken cancellationToken)
+    {
+        while (await helper.Socket.ReceiveAsync(ScreenProtocol.PcLimits, cancellationToken) is { } message)
+        {
+            if (!hub.IsCurrentHelper(helper))
+            {
+                return;
+            }
+
+            var kind = SecureHelperProtocol.Classify(message.Type, message.Payload.Span);
+            if (kind == HelperMessageKind.Invalid)
+            {
+                await helper.Socket.CloseAsync(SecureHelperProtocol.ProtocolErrorCloseStatus, "Unexpected message.");
+                return;
+            }
+
+            var viewer = hub.CurrentFor(helper.PcId);
+            switch (kind)
+            {
+                case HelperMessageKind.Frame:
+                    await hub.RelayHelperFrameAsync(helper, message.Payload);
+                    break;
+                case HelperMessageKind.ControlOn when viewer is not null:
+                    await hub.ConfirmControlAsync(viewer, helper.Socket);
+                    break;
+                case HelperMessageKind.ControlOff when viewer is not null:
+                    await hub.EndControlFromAsync(viewer, helper.Socket);
                     break;
             }
         }

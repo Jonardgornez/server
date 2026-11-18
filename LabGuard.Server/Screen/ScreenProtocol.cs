@@ -19,9 +19,14 @@ public static class ScreenProtocol
     public const string WaitingState = "waiting";
     public const string LiveState = "live";
     public const string PausedState = "paused";
+    // The PC is showing a protected screen, and the secure-desktop helper streams it in the PC's place.
+    public const string SecureState = "secure";
 
     // The PC may have this many frames unacknowledged. Anything beyond that is dropped, never queued.
     public const int MaxFramesInFlight = 2;
+    // Each source has its own window, so right after a switch between the PC and its helper the browser can have both windows'
+    // frames unacknowledged. Never more than this.
+    public const int MaxFramesInFlightAcrossSwitch = 2 * MaxFramesInFlight;
 
     // Per message type. A PC frame is at most 2 MiB, and the PC sends nothing as text but "paused" or "resumed".
     public const int MaxPcBinaryBytes = 2 * 1024 * 1024;
@@ -69,6 +74,7 @@ public static class ScreenProtocol
     private static readonly byte[] WaitingMessage = "{\"state\":\"waiting\"}"u8.ToArray();
     private static readonly byte[] LiveMessage = "{\"state\":\"live\"}"u8.ToArray();
     private static readonly byte[] PausedMessage = "{\"state\":\"paused\"}"u8.ToArray();
+    private static readonly byte[] SecureMessage = "{\"state\":\"secure\"}"u8.ToArray();
     public static readonly byte[] AckMessage = "ack"u8.ToArray();
 
     // Null when the mode isn't one the view accepts. A missing mode means notified.
@@ -85,6 +91,7 @@ public static class ScreenProtocol
         WaitingState => WaitingMessage,
         LiveState => LiveMessage,
         PausedState => PausedMessage,
+        SecureState => SecureMessage,
         _ => throw new ArgumentOutOfRangeException(nameof(state), "Unknown view state."),
     };
 

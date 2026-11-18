@@ -6,7 +6,8 @@ namespace LabGuard.Server.Screen;
 
 // The in-memory registry of live views: at most one viewer per PC. Frames are relayed through it and never stored.
 // It holds no frame beyond the one being sent, and a closed view can't be attached to or relay anything again.
-public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit controlAudit, TimeProvider clock)
+// It also holds each PC's secure-desktop helper, which streams in the PC's place while the PC's stream is paused.
+public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit controlAudit, TimeProvider clock)
 {
     private readonly Lock _sync = new();
     private readonly Dictionary<int, ScreenViewer> _viewersByPc = [];
@@ -130,22 +131,29 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
             replaced.Abort();
         }
 
-        await SetStateAsync(viewer, ScreenProtocol.LiveState, requiredPc: pc);
+        await SwitchSourceAsync(viewer);
         return true;
     }
 
+    // A helper streaming for the PC that left is told to stop, and the browser hears that the view waits.
     public async Task DetachPcAsync(ScreenViewer viewer, ScreenSocket pc)
     {
         if (viewer.TryDetachPc(pc))
         {
             await EndControlAsync(viewer, ControlReasons.Connection);
-            await SetStateAsync(viewer, ScreenProtocol.WaitingState, requiredPc: null);
+            await SwitchSourceAsync(viewer);
         }
     }
 
-    // A PC's own state change (paused or resumed). Ignored unless that PC is the attached one.
-    public Task RelayPcStateAsync(ScreenViewer viewer, ScreenSocket pc, string state) =>
-        SetStateAsync(viewer, state, requiredPc: pc);
+    // The PC says it can't capture its screen (paused) or can again (resumed). Ignored unless that PC is the attached one.
+    // While paused, a connected helper streams in its place and the browser hears secure. With no helper the browser hears paused.
+    public async Task SetPcPausedAsync(ScreenViewer viewer, ScreenSocket pc, bool isPaused)
+    {
+        if (viewer.TrySetPcPaused(pc, isPaused))
+        {
+            await SwitchSourceAsync(viewer);
+        }
+    }
 
     // A frame goes out only while the attached PC has a credit. Otherwise it is dropped on the spot, so nothing queues up.
     // A frame that arrives after the administrator's session has run out closes the view instead, so none is sent late.
@@ -168,17 +176,13 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         }
     }
 
-    // Each browser ack returns one credit and is passed on to the PC. An ack with no outstanding credit is not passed on.
+    // Each browser ack returns one credit and is passed on to the sender of the oldest frame, the PC or the helper.
+    // An ack with no outstanding credit is not passed on, and neither is one for a sender that is no longer the source.
     public async Task RelayAckAsync(ScreenViewer viewer)
     {
-        if (!viewer.TryReturnFrameCredit())
+        if (viewer.TryReturnFrameCredit(out var sender) && sender is not null)
         {
-            return;
-        }
-
-        if (viewer.CurrentPc is { } pc)
-        {
-            await pc.SendAsync(ScreenProtocol.AckMessage, WebSocketMessageType.Text);
+            await sender.SendAsync(ScreenProtocol.AckMessage, WebSocketMessageType.Text);
         }
     }
 
@@ -240,7 +244,8 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         return viewer.ControlState == ScreenControlState.Off && viewer.TryTakeControlRequestSlot(clock.GetUtcNow());
     }
 
-    // The PC has shown the notice and will replay input. Only the attached PC that was asked can confirm, while the request is pending.
+    // The PC has shown the notice and will replay input, or the helper is ready to. Only the socket that was asked can confirm,
+    // while the request is pending.
     // The audit row is written before control turns on, so control is never on unrecorded. The write is bounded. A write that fails or
     // runs out of time ends the request as unsupported, and the PC stream stays open.
     public async Task ConfirmControlAsync(ScreenViewer viewer, ScreenSocket pc)
@@ -285,16 +290,22 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         }
     }
 
-    // Ends control for a reason: the administrator stopped it, the PC ended it, or the connection that held it went away.
+    // Ends control for a reason: the administrator stopped it, or the connection that held it went away.
     public Task EndControlAsync(ScreenViewer viewer, string reason) =>
         EndControlPeriodAsync(viewer, viewer.TryEndControl, reason);
+
+    // The PC or the helper says control has ended. Only the socket that carries control can end it, so the paused PC can't end
+    // control that the helper carries.
+    public Task EndControlFromAsync(ScreenViewer viewer, ScreenSocket source) =>
+        EndControlPeriodAsync(viewer, () => viewer.TryEndControlFrom(source), ControlReasons.PcEnded);
 
     // The administrator's control off. It is always answered as stopped, even when no control is in progress.
     // The PC is told off only if it was asked on, which is the case while requesting or on.
     public Task StopControlAsync(ScreenViewer viewer) =>
         EndControlPeriodAsync(viewer, viewer.TryEndControl, ControlReasons.Stopped, answerWhenIdle: true);
 
-    // Input the browser sent. It is relayed in its canonical form, to the attached PC, only while control is on and within the cap.
+    // Input the browser sent. It is relayed in its canonical form, only while control is on and within the cap, to the socket that
+    // carries control. Ctrl+Alt+Del goes to the PC's helper whenever one is connected, since only the helper can have it sent.
     // Nothing is queued: an input that can't go out now is dropped.
     public async Task RelayInputAsync(ScreenViewer viewer, BrowserControlMessage input)
     {
@@ -305,7 +316,7 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
             return;
         }
 
-        if (viewer.TakeControlInputTarget(input, now) is not { } pc)
+        if (viewer.TakeControlInputTarget(input, now, ConnectedHelperFor(viewer.PcId)) is not { } pc)
         {
             return;
         }
@@ -318,12 +329,13 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
     }
 
     // Closes the view and its sockets with the same code, then ends the audit rows. Only the first call does anything.
-    // The sockets close first, so the administrator sees the close without waiting for the database.
+    // The sockets close first, so the administrator sees the close without waiting for the database. A helper that was streaming
+    // is told to stop, and stays connected for the next view.
     public async Task CloseAsync(ScreenViewer viewer, WebSocketCloseStatus status, string reason)
     {
         // Taken before the close handshake, so both audit rows record the moment the view closed.
         var closedAt = clock.GetUtcNow();
-        if (!viewer.TryClose(out var pc))
+        if (!viewer.TryClose(out var pc, out var helper))
         {
             return;
         }
@@ -340,7 +352,8 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         {
             await Task.WhenAll(
                 viewer.Browser.CloseAsync(status, reason),
-                pc?.CloseAsync(status, reason) ?? Task.CompletedTask);
+                pc?.CloseAsync(status, reason) ?? Task.CompletedTask,
+                helper is null ? Task.CompletedTask : SendOrAbortAsync(helper, SecureHelperProtocol.StopMessage));
 
             // Cancelling the lifetime resets the connection, so each peer first gets a moment to receive the close code.
             await Task.WhenAll(
@@ -373,29 +386,8 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
         await Task.WhenAll(viewers.Select(viewer => CloseAsync(viewer, status, reason)));
     }
 
-    // Records the state if it changed, and sends it. Only a change is sent, so repeated states don't reach the browser.
-    private async Task SetStateAsync(ScreenViewer viewer, string state, ScreenSocket? requiredPc)
-    {
-        await viewer.StateGate.WaitAsync();
-        try
-        {
-            if (!viewer.TrySetState(state, requiredPc))
-            {
-                return;
-            }
-
-            if (!await viewer.Browser.SendAsync(ScreenProtocol.StateMessage(state), WebSocketMessageType.Text))
-            {
-                await CloseStalledAsync(viewer);
-            }
-        }
-        finally
-        {
-            viewer.StateGate.Release();
-        }
-    }
-
-    // Ends the control period if the condition still holds, then tells the browser and the attached PC, and records the end.
+    // Ends the control period if the condition still holds, then tells the browser, the attached PC and the streaming helper,
+    // and records the end.
     // The state gate is held for the change and the sends, so the browser hears them in order. The audit write happens after it.
     private async Task EndControlPeriodAsync(ScreenViewer viewer, Func<ControlPeriodEnd?> tryEnd, string reason, bool answerWhenIdle = false)
     {
@@ -410,10 +402,7 @@ public sealed class ScreenStreamHub(ScreenViewAudit audit, ScreenControlAudit co
             }
 
             await SendControlMessageAsync(viewer, ScreenControlMessages.OffMessage(reason));
-            if (ended?.AttachedPc is { } pc)
-            {
-                await pc.SendAsync(ScreenControlMessages.PcOffMessage, WebSocketMessageType.Text);
-            }
+            await SendPcControlOffAsync(ended);
         }
         finally
         {

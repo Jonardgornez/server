@@ -46,10 +46,10 @@ public class ScreenViewerTests
         var pc = NewSocket();
         viewer.TryAttachPc(pc, out _);
 
-        Assert.False(viewer.TryReturnFrameCredit());
+        Assert.False(viewer.TryReturnFrameCredit(out _));
         viewer.TryTakeFrameCredit(pc);
-        Assert.True(viewer.TryReturnFrameCredit());
-        Assert.False(viewer.TryReturnFrameCredit());
+        Assert.True(viewer.TryReturnFrameCredit(out _));
+        Assert.False(viewer.TryReturnFrameCredit(out _));
     }
 
     [Fact]
@@ -139,9 +139,9 @@ public class ScreenViewerTests
         var pc = NewSocket();
         viewer.TryAttachPc(pc, out _);
 
-        Assert.True(viewer.TryClose(out var handedBack));
+        Assert.True(viewer.TryClose(out var handedBack, out _));
         Assert.Same(pc, handedBack);
-        Assert.False(viewer.TryClose(out var second));
+        Assert.False(viewer.TryClose(out var second, out _));
         Assert.Null(second);
     }
 
@@ -149,7 +149,7 @@ public class ScreenViewerTests
     public void AfterClose_NothingCanAttachTakeCreditOrChangeState()
     {
         var viewer = NewViewer();
-        viewer.TryClose(out _);
+        viewer.TryClose(out _, out _);
 
         Assert.False(viewer.TryAttachPc(NewSocket(), out _));
         Assert.False(viewer.TrySetState(ScreenProtocol.LiveState));
@@ -470,7 +470,7 @@ public class ScreenViewerTests
         viewer.TryAttachPc(pc, out _);
         viewer.TryBeginControlRequest();
         viewer.TryConfirmControl(pc, 9);
-        viewer.TryClose(out _);
+        viewer.TryClose(out _, out _);
 
         Assert.Equal(9, viewer.EndControlOnClose());
         Assert.Equal(ScreenControlState.Off, viewer.ControlState);
@@ -485,7 +485,7 @@ public class ScreenViewerTests
         var pc = NewSocket();
         viewer.TryAttachPc(pc, out _);
         viewer.TryBeginControlRequest();
-        viewer.TryClose(out _);
+        viewer.TryClose(out _, out _);
 
         Assert.False(viewer.IsAwaitingConfirmation(pc));
         Assert.False(viewer.TryConfirmControl(pc, 9));

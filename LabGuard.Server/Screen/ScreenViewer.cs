@@ -3,8 +3,9 @@ using System.Text;
 
 namespace LabGuard.Server.Screen;
 
-// One administrator's live view of one PC: the browser socket, the PC's socket while it is connected, the frame credits,
-// the last state relayed, the lifetime that stops the relay loops and the remote control state. Everything mutable is guarded by one lock.
+// One administrator's live view of one PC: the browser socket, the PC's socket while it is connected, the secure-desktop helper
+// while it is the source of frames, the frame credits, the last state relayed, the lifetime that stops the relay loops and the
+// remote control state. Everything mutable is guarded by one lock.
 public sealed class ScreenViewer : IDisposable
 {
     private readonly Lock _sync = new();
@@ -21,12 +22,21 @@ public sealed class ScreenViewer : IDisposable
     // Held around each state change and its send, so states reach the browser in the order they were recorded.
     // Control changes take it too. Closing the view doesn't, so a close never waits behind a send that is stuck.
     public SemaphoreSlim StateGate { get; } = new(1, 1);
+    // Each frame the browser hasn't acknowledged yet, oldest first, with its sender. An ack goes back to the sender of the oldest one.
+    private readonly Queue<InFlightFrame> _framesInFlight = new();
     private ScreenSocket? _pc;
-    private int _framesInFlight;
+    private bool _isPcPaused;
+    // The secure-desktop helper while it streams in place of the paused PC. Null while the PC's own stream is the source.
+    private ScreenSocket? _helper;
+    // Counts the helper's streaming runs. A helper starts each run with a fresh window, so frames from an earlier run no longer count.
+    private long _helperRun;
     private string? _lastState;
     private bool _isClosed;
     private ScreenControlState _control = ScreenControlState.Off;
+    // The PC connection the control period belongs to. Control ends with that connection.
     private ScreenSocket? _controlPc;
+    // The socket that carries control now: the one asked to confirm, and the one input goes to. The PC or the streaming helper.
+    private ScreenSocket? _controlSource;
     private long _controlRequestId;
     private int? _controlAuditId;
 
@@ -107,8 +117,8 @@ public sealed class ScreenViewer : IDisposable
     public bool ViewIdMatches(string? candidate) =>
         candidate is not null && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(ViewId), Encoding.UTF8.GetBytes(candidate));
 
-    // Attaches the PC's socket. The credit window starts again for the new connection. False once the view is closed.
-    // The socket it replaces is returned, so the caller can end it.
+    // Attaches the PC's socket. The credit window starts again for the new connection, which is not paused until it says so.
+    // False once the view is closed. The socket it replaces is returned, so the caller can end it.
     public bool TryAttachPc(ScreenSocket socket, out ScreenSocket? replaced)
     {
         lock (_sync)
@@ -120,8 +130,71 @@ public sealed class ScreenViewer : IDisposable
             }
 
             _pc = socket;
-            _framesInFlight = 0;
+            _isPcPaused = false;
+            _framesInFlight.Clear();
             return true;
+        }
+    }
+
+    // Records whether the attached PC can capture its screen. False when the sender is not the attached PC.
+    public bool TrySetPcPaused(ScreenSocket pc, bool isPaused)
+    {
+        lock (_sync)
+        {
+            if (_isClosed || !ReferenceEquals(_pc, pc))
+            {
+                return false;
+            }
+
+            _isPcPaused = isPaused;
+            return true;
+        }
+    }
+
+    // Makes the source of frames and input match the situation: the connected helper while the attached PC is paused, otherwise
+    // the PC. Null when nothing changed. Otherwise it says what the hub must send: stop to the helper that was the source, start
+    // to the one that is now, control on to the socket that carries control from now on, a release to the PC when control moves
+    // away from it, and the browser's new state. Control carries across a switch, with its audit row. It ends only when the
+    // helper that carried it went away while the PC is still paused, since nothing can take input then.
+    public SourceSwitch? TrySwitchSource(ScreenSocket? connectedHelper)
+    {
+        lock (_sync)
+        {
+            if (_isClosed)
+            {
+                return null;
+            }
+
+            var next = _pc is not null && _isPcPaused ? connectedHelper : null;
+            var state = StateForLocked(next);
+            var stateToSend = state == _lastState ? null : state;
+            _lastState = state;
+            var previous = _helper;
+            if (ReferenceEquals(previous, next))
+            {
+                return stateToSend is null ? null : new SourceSwitch(State: stateToSend);
+            }
+
+            _helper = next;
+            if (next is not null)
+            {
+                _helperRun++;
+            }
+
+            if (_control == ScreenControlState.Off || _pc is null || !ReferenceEquals(_controlPc, _pc))
+            {
+                return new SourceSwitch(previous, next, State: stateToSend);
+            }
+
+            if (next is null && _isPcPaused)
+            {
+                return new SourceSwitch(previous, next, EndedControl: EndControlLocked(), State: stateToSend);
+            }
+
+            var releasedPc = previous is null && _control == ScreenControlState.On ? _pc : null;
+            _controlSource = next ?? _pc;
+            _held.Clear();
+            return new SourceSwitch(previous, next, _controlSource, releasedPc, State: stateToSend);
         }
     }
 
@@ -140,32 +213,39 @@ public sealed class ScreenViewer : IDisposable
         }
     }
 
-    // Takes one frame credit for the attached PC only. False when the window is full, the view is closed, or the sender was replaced.
+    // Takes one frame credit for the current source only: the attached PC, or the helper while it streams in the PC's place.
+    // Each sender has its own window, so frames the other source still has in flight around a switch don't cost it a credit.
+    // False when the sender's window is full, the view is closed, or the sender is not the current source.
     public bool TryTakeFrameCredit(ScreenSocket sender)
     {
         lock (_sync)
         {
-            if (_isClosed || !ReferenceEquals(_pc, sender) || _framesInFlight >= ScreenProtocol.MaxFramesInFlight)
+            if (_isClosed
+                || !ReferenceEquals(_helper ?? _pc, sender)
+                || _framesInFlight.Count >= ScreenProtocol.MaxFramesInFlightAcrossSwitch
+                || _framesInFlight.Count(frame => ReferenceEquals(frame.Sender, sender) && IsCountedLocked(frame)) >= ScreenProtocol.MaxFramesInFlight)
             {
                 return false;
             }
 
-            _framesInFlight++;
+            _framesInFlight.Enqueue(new InFlightFrame(sender, _helper is null ? 0 : _helperRun));
             return true;
         }
     }
 
-    // Returns one credit. False when no credit was outstanding, so a stray or repeated ack isn't passed on.
-    public bool TryReturnFrameCredit()
+    // Returns one credit. False when no credit was outstanding, so a stray or repeated ack isn't passed on. The ack goes to the
+    // sender of the oldest frame, while that frame still counts: the PC's while it is attached, the helper's during the same run.
+    public bool TryReturnFrameCredit(out ScreenSocket? ackTarget)
     {
         lock (_sync)
         {
-            if (_framesInFlight == 0)
+            ackTarget = null;
+            if (!_framesInFlight.TryDequeue(out var frame))
             {
                 return false;
             }
 
-            _framesInFlight--;
+            ackTarget = IsCountedLocked(frame) ? frame.Sender : null;
             return true;
         }
     }
@@ -201,12 +281,13 @@ public sealed class ScreenViewer : IDisposable
 
             _control = ScreenControlState.Requesting;
             _controlPc = _pc;
+            _controlSource = _helper ?? _pc;
             _controlRequestId++;
-            return new ControlRequest(_controlRequestId, _pc);
+            return new ControlRequest(_controlRequestId, _controlSource);
         }
     }
 
-    // True while the PC is the one asked for control and the request is still waiting for its confirmation.
+    // True while the socket is the one asked for control and the request is still waiting for its confirmation.
     public bool IsAwaitingConfirmation(ScreenSocket pc)
     {
         lock (_sync)
@@ -231,12 +312,22 @@ public sealed class ScreenViewer : IDisposable
         }
     }
 
-    // Ends the request if it is still waiting for this PC. Null otherwise, so a request that moved on is left alone.
+    // Ends the request if it is still waiting for this socket. Null otherwise, so a request that moved on is left alone.
     public ControlPeriodEnd? TryEndRequestFrom(ScreenSocket pc)
     {
         lock (_sync)
         {
-            return _control == ScreenControlState.Requesting && ReferenceEquals(_controlPc, pc) ? EndControlLocked() : null;
+            return _control == ScreenControlState.Requesting && ReferenceEquals(_controlSource, pc) ? EndControlLocked() : null;
+        }
+    }
+
+    // Ends control when the socket that carries it says it has ended. Null when that socket doesn't carry control, so the paused
+    // PC can't end control that the helper carries.
+    public ControlPeriodEnd? TryEndControlFrom(ScreenSocket source)
+    {
+        lock (_sync)
+        {
+            return _control != ScreenControlState.Off && ReferenceEquals(_controlSource, source) ? EndControlLocked() : null;
         }
     }
 
@@ -258,9 +349,10 @@ public sealed class ScreenViewer : IDisposable
         }
     }
 
-    // The attached PC that the input is relayed to. Only while control is on, only for a key or button that is held when it must be,
-    // and only within the cap for its kind. Null otherwise. A relayed input updates what the server holds down on the PC.
-    public ScreenSocket? TakeControlInputTarget(BrowserControlMessage input, DateTimeOffset now)
+    // The socket the input is relayed to: the one that carries control, or for Ctrl+Alt+Del the connected helper when there is one.
+    // Only while control is on, only for a key or button that is held when it must be, and only within the cap for its kind.
+    // Null otherwise. A relayed input updates what the server holds down on the PC.
+    public ScreenSocket? TakeControlInputTarget(BrowserControlMessage input, DateTimeOffset now, ScreenSocket? connectedHelper = null)
     {
         lock (_sync)
         {
@@ -275,7 +367,7 @@ public sealed class ScreenViewer : IDisposable
             }
 
             ApplyHeldLocked(input);
-            return _pc;
+            return input.Rate == InputRate.Sas && connectedHelper is not null ? connectedHelper : _controlSource;
         }
     }
 
@@ -288,26 +380,43 @@ public sealed class ScreenViewer : IDisposable
         }
     }
 
-    // True for the first close only. The PC socket that was attached is handed back so it can be closed too.
-    public bool TryClose(out ScreenSocket? pc)
+    // True for the first close only. The PC socket that was attached is handed back so it can be closed too, and the helper that
+    // was streaming so it can be told to stop.
+    public bool TryClose(out ScreenSocket? pc, out ScreenSocket? helper)
     {
         lock (_sync)
         {
+            pc = null;
+            helper = null;
             if (_isClosed)
             {
-                pc = null;
                 return false;
             }
 
             _isClosed = true;
             pc = _pc;
+            helper = _helper;
             _pc = null;
+            _helper = null;
             return true;
         }
     }
 
     private bool IsAwaitingConfirmationLocked(ScreenSocket pc) =>
-        !_isClosed && _control == ScreenControlState.Requesting && ReferenceEquals(_pc, pc) && ReferenceEquals(_controlPc, pc);
+        !_isClosed
+        && _control == ScreenControlState.Requesting
+        && _pc is not null
+        && ReferenceEquals(_controlPc, _pc)
+        && ReferenceEquals(_controlSource, pc);
+
+    private bool IsCountedLocked(InFlightFrame frame) =>
+        ReferenceEquals(frame.Sender, _pc) || (ReferenceEquals(frame.Sender, _helper) && frame.HelperRun == _helperRun);
+
+    private string StateForLocked(ScreenSocket? source) =>
+        _pc is null ? ScreenProtocol.WaitingState
+        : source is not null ? ScreenProtocol.SecureState
+        : _isPcPaused ? ScreenProtocol.PausedState
+        : ScreenProtocol.LiveState;
 
     // An up or release needs something held. A press needs room to be held, unless the same key is already held.
     private bool HeldAllowsLocked(BrowserControlMessage input) => input.Held switch
@@ -342,12 +451,14 @@ public sealed class ScreenViewer : IDisposable
         _ => _exemptInput.TryTake(now),
     };
 
-    // The caller holds the lock.
+    // The caller holds the lock. The PC and the streaming helper are handed back only while the period belongs to the attached PC.
     private ControlPeriodEnd EndControlLocked()
     {
-        var ended = new ControlPeriodEnd(_controlAuditId, ReferenceEquals(_controlPc, _pc) ? _pc : null);
+        var holdsPc = _pc is not null && ReferenceEquals(_controlPc, _pc);
+        var ended = new ControlPeriodEnd(_controlAuditId, holdsPc ? _pc : null, holdsPc ? _helper : null);
         _control = ScreenControlState.Off;
         _controlPc = null;
+        _controlSource = null;
         _controlAuditId = null;
         _held.Clear();
         return ended;
@@ -361,11 +472,26 @@ public enum ScreenControlState
     On,
 }
 
-// A request for control that has started: its id, which a timer uses to tell it apart from a later request, and the PC asked.
+// A request for control that has started: its id, which a timer uses to tell it apart from a later request, and the socket asked,
+// which is the PC or the helper streaming in its place.
 public readonly record struct ControlRequest(long Id, ScreenSocket Pc);
 
-// What a control period leaves behind when it ends: its audit row, and the PC to tell, which is null when the PC is no longer attached.
-public readonly record struct ControlPeriodEnd(int? AuditId, ScreenSocket? AttachedPc);
+// What a control period leaves behind when it ends: its audit row, and the sockets to tell. AttachedPc is null when the PC is no
+// longer attached, and Helper is null unless a helper was streaming in the PC's place.
+public readonly record struct ControlPeriodEnd(int? AuditId, ScreenSocket? AttachedPc, ScreenSocket? Helper = null);
+
+// A frame relayed to the browser and not acknowledged yet: who sent it, and in which of the helper's runs (0 for the PC).
+public readonly record struct InFlightFrame(ScreenSocket Sender, long HelperRun);
+
+// What a change of source asks the hub to send, in this order: stop, release, start, control on. EndedControl is set when the
+// change ended control. State is the browser's new state, or null when it didn't change.
+public readonly record struct SourceSwitch(
+    ScreenSocket? StoppedHelper = null,
+    ScreenSocket? StartedHelper = null,
+    ScreenSocket? ControlSource = null,
+    ScreenSocket? ReleasedPc = null,
+    ControlPeriodEnd? EndedControl = null,
+    string? State = null);
 
 // Who opened a view, and the session they opened it under. The session version is what the monitor checks while the view is open.
 public readonly record struct ScreenViewOwner(int AdminId, int SessionVersion, string AdminUserName);

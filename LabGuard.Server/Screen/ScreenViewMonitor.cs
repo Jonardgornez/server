@@ -36,10 +36,40 @@ public sealed class ScreenViewMonitor(
     {
         // Runs before the web server stops, so its sockets are closed and it doesn't wait for them.
         await hub.CloseAllAsync(WebSocketCloseStatus.EndpointUnavailable, "The server is stopping.");
+        await hub.CloseAllHelpersAsync(WebSocketCloseStatus.EndpointUnavailable, "The server is stopping.");
         await base.StopAsync(cancellationToken);
     }
 
     public async Task CheckOnceAsync(CancellationToken cancellationToken)
+    {
+        await CheckHelpersAsync(cancellationToken);
+        await CheckViewsAsync(cancellationToken);
+    }
+
+    // A helper is closed once its PC is removed or its token is replaced, so a revoked token can't keep a helper connected.
+    private async Task CheckHelpersAsync(CancellationToken cancellationToken)
+    {
+        var helpers = hub.HelperSnapshot();
+        if (helpers.Count == 0)
+        {
+            return;
+        }
+
+        var pcIds = helpers.Select(helper => helper.PcId).Distinct().ToArray();
+        await using var scope = scopes.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var tokenHashByPc = await db.Pcs
+            .AsNoTracking()
+            .Where(p => pcIds.Contains(p.Id))
+            .Select(p => new { p.Id, p.TokenHash })
+            .ToDictionaryAsync(p => p.Id, p => p.TokenHash, cancellationToken);
+        var revoked = helpers.Where(helper =>
+            !tokenHashByPc.TryGetValue(helper.PcId, out var tokenHash) || tokenHash != helper.TokenHash);
+        await Task.WhenAll(revoked.Select(helper =>
+            hub.CloseHelperAsync(helper, ScreenProtocol.PcOfflineCloseStatus, "The PC was removed or its token was replaced.")));
+    }
+
+    private async Task CheckViewsAsync(CancellationToken cancellationToken)
     {
         var now = clock.GetUtcNow();
         var viewers = hub.Snapshot();

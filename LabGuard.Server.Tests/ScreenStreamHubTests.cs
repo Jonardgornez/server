@@ -153,7 +153,7 @@ public class ScreenStreamHubTests
         await hub.AttachPcAsync(viewer, NewPc());
 
         await hub.RelayFrameAsync(viewer, replaced, LiveViewClient.Frame("stale"));
-        await hub.RelayPcStateAsync(viewer, replaced, ScreenProtocol.PausedState);
+        await hub.SetPcPausedAsync(viewer, replaced, isPaused: true);
 
         Assert.Empty(FramesSentTo(browser));
         Assert.DoesNotContain("{\"state\":\"paused\"}", StatesSentTo(browser));
@@ -277,7 +277,7 @@ public class ScreenStreamHubTests
     }
 
     [Fact]
-    public async Task RelayPcStateAsync_SendsOnlyAChangedState()
+    public async Task SetPcPausedAsync_SendsOnlyAChangedState()
     {
         using var app = new TestApp();
         var hub = NewHub(app);
@@ -285,8 +285,8 @@ public class ScreenStreamHubTests
         var pc = NewPc();
         await hub.AttachPcAsync(viewer, pc);
 
-        await hub.RelayPcStateAsync(viewer, pc, ScreenProtocol.PausedState);
-        await hub.RelayPcStateAsync(viewer, pc, ScreenProtocol.PausedState);
+        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
 
         Assert.Equal(1, StatesSentTo(browser).Count(state => state == "{\"state\":\"paused\"}"));
     }
