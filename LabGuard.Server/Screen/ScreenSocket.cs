@@ -89,6 +89,35 @@ public sealed class ScreenSocket(WebSocket socket, TimeSpan sendTimeout, TimeSpa
         }
     }
 
+    // Once this side has sent a close, reads and discards what the peer still sends until its close arrives or the time is up.
+    // Without it, ending the connection right away can reset it before the peer reads the close code. Only call it once no
+    // other receive is running on the socket.
+    public async Task DrainUntilPeerClosesAsync(TimeSpan timeout)
+    {
+        if (socket.State != WebSocketState.CloseSent)
+        {
+            return;
+        }
+
+        using var linked = _abort.Link(CancellationToken.None);
+        if (linked is null)
+        {
+            return;
+        }
+
+        linked.CancelAfter(timeout);
+        try
+        {
+            while ((await socket.ReceiveAsync(_receiveChunk.AsMemory(), linked.Token)).MessageType != WebSocketMessageType.Close)
+            {
+            }
+        }
+        catch (Exception exception) when (IsSocketGone(exception))
+        {
+            // The peer didn't answer in time or is gone, so the socket is ended anyway.
+        }
+    }
+
     // Stops the socket now, with no close handshake. Used for a connection that was replaced, and to end any receive on it.
     public void Abort()
     {

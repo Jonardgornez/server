@@ -19,6 +19,7 @@ public static class ScreenControlMessages
     // Sent to the PC.
     public static readonly byte[] PcOnMessage = "{\"t\":\"control\",\"on\":true}"u8.ToArray();
     public static readonly byte[] PcOffMessage = "{\"t\":\"control\",\"on\":false}"u8.ToArray();
+    public static readonly byte[] PcReleaseMessage = "{\"t\":\"release\"}"u8.ToArray();
 
     // Sent to the browser.
     public static readonly byte[] RequestingMessage = "{\"control\":\"requesting\"}"u8.ToArray();

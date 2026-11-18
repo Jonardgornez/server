@@ -4,6 +4,7 @@ using LabGuard.Server.Clients;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
 using LabGuard.Server.Requests;
+using LabGuard.Server.Screen;
 using LabGuard.Server.Sessions;
 using LabGuard.Server.Wallpapers;
 using Microsoft.EntityFrameworkCore;
@@ -166,7 +167,7 @@ public static partial class PcEndpoints
     private static PcSessionSummary ToSummary(PcSession session, DateTimeOffset now) =>
         new(session.IsAdminUnlock ? null : session.Username, session.StartedAtUtc, SessionLifecycle.ToTime(session.DefaultTimeMinutes), SessionLifecycle.SecondsRemaining(session, now));
 
-    private static async Task<IResult> DeleteAsync(int id, AppDbContext db, TimeProvider clock, CancellationToken cancellationToken)
+    private static async Task<IResult> DeleteAsync(int id, AppDbContext db, TimeProvider clock, ScreenStreamHub screens, CancellationToken cancellationToken)
     {
         // Deletes only while the PC is offline, in one statement, so a heartbeat arriving
         // between a check and the delete can't get an online PC removed.
@@ -190,6 +191,8 @@ public static partial class PcEndpoints
             await LoginRequestLifecycle.CancelPendingForPcAsync(db, id, LoginRequestLifecycle.PcRemoved, now, cancellationToken);
             await WallpaperCleanup.RemoveUnusedAsync(db, wallpaperId is { } removedWallpaperId ? [removedWallpaperId] : [], cancellationToken);
             await transaction.CommitAsync(cancellationToken);
+            // The token went with the PC, so its secure-desktop helper is closed at once.
+            await screens.CloseHelperForPcAsync(id, ScreenProtocol.PcOfflineCloseStatus, "The PC was removed.");
             return Results.NoContent();
         }
 

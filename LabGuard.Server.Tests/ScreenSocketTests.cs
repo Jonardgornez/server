@@ -37,6 +37,40 @@ public class ScreenSocketTests
     }
 
     [Fact]
+    public async Task DrainUntilPeerClosesAsync_AfterOurClose_ReadsPastMessagesUntilThePeersClose()
+    {
+        var socket = new FakeWebSocket();
+        var screen = new ScreenSocket(socket, ShortTimeout);
+        await screen.CloseAsync(WebSocketCloseStatus.PolicyViolation, "bad");
+        socket.EnqueueMessage(WebSocketMessageType.Binary, new byte[100]);
+        socket.EnqueueClose();
+
+        await screen.DrainUntilPeerClosesAsync(TimeSpan.FromSeconds(30)).WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task DrainUntilPeerClosesAsync_APeerThatNeverAnswers_EndsAtTheTimeout()
+    {
+        var socket = new FakeWebSocket();
+        var screen = new ScreenSocket(socket, ShortTimeout);
+        await screen.CloseAsync(WebSocketCloseStatus.PolicyViolation, "bad");
+
+        await screen.DrainUntilPeerClosesAsync(ShortTimeout).WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task DrainUntilPeerClosesAsync_WithoutOurClose_ReadsNothing()
+    {
+        var socket = new FakeWebSocket();
+        var screen = new ScreenSocket(socket, ShortTimeout);
+        socket.EnqueueMessage(WebSocketMessageType.Text, "ack"u8.ToArray());
+
+        await screen.DrainUntilPeerClosesAsync(TimeSpan.FromSeconds(30)).WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.NotNull(await screen.ReceiveAsync(Generous, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task WaitForPeerCloseAsync_APeerThatNeverAnswers_EndsAtTheTimeoutWithoutThrowing()
     {
         var screen = new ScreenSocket(new FakeWebSocket(), ShortTimeout);

@@ -174,6 +174,20 @@ internal static class LiveViewClient
         return socket.ConnectAsync(new Uri($"ws://localhost/api/client/screen/stream?viewId={viewId}"), CancellationToken.None);
     }
 
+    /// <summary>The PC's secure-desktop helper connecting with the PC's token.</summary>
+    public static Task<WebSocket> OpenHelperAsync(TestApp app, string token, string remoteIp = "192.168.1.50")
+    {
+        var clientPort = app.Services.GetRequiredService<ServerPorts>().ClientPort.ToString();
+        var socket = app.Server.CreateWebSocketClient();
+        socket.ConfigureRequest = request =>
+        {
+            request.Headers["Authorization"] = $"Bearer {token}";
+            request.Headers[SimulatedConnectionFilter.LocalPortHeader] = clientPort;
+            request.Headers[SimulatedConnectionFilter.RemoteIpHeader] = remoteIp;
+        };
+        return socket.ConnectAsync(new Uri("ws://localhost/api/client/screen/secure-stream"), CancellationToken.None);
+    }
+
     /// <summary>Runs a connect that the server refuses, and returns the HTTP status the refusal carried.</summary>
     public static async Task<int> RefusedStatusAsync(Func<Task<WebSocket>> connect)
     {
