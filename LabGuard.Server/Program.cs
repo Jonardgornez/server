@@ -114,6 +114,7 @@ using (var scope = app.Services.CreateScope())
     await SharedFileCleanup.RunAsync(
         db,
         services.GetRequiredService<SharedFileStorage>(),
+        services.GetRequiredService<FileTransferProgress>(),
         services.GetRequiredService<TimeProvider>().GetUtcNow(),
         CancellationToken.None);
 }

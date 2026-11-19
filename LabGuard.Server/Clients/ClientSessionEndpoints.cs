@@ -12,6 +12,7 @@ using LabGuard.Server.Requests;
 using LabGuard.Server.Screen;
 using LabGuard.Server.Sessions;
 using LabGuard.Server.Settings;
+using LabGuard.Server.SharedFiles;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
@@ -454,7 +455,8 @@ public static partial class ClientEndpoints
         AppDbContext db,
         TimeProvider clock,
         ILocalAddressSource localAddresses,
-        ScreenStreamHub screens)
+        ScreenStreamHub screens,
+        FileTransferProgress fileTransferProgress)
     {
         if (ReadBearerToken(http.Request) is not { } token)
         {
@@ -565,7 +567,7 @@ public static partial class ClientEndpoints
         // An unreadable body says nothing about the client, so nothing is handed out or failed on it.
         FileTransferDelivery[] fileTransfers = request is null
             ? []
-            : await HandOverFileTransfersAsync(db, pcId, ClientUpdateHeartbeat.ReadVersion(request.ClientVersion), now, ct);
+            : await HandOverFileTransfersAsync(db, fileTransferProgress, pcId, ClientUpdateHeartbeat.ReadVersion(request.ClientVersion), now, ct);
         var loginRequest = await HeartbeatLoginRequestAsync(db, pcId, now, ct);
 
         var settings = await ServerSettingsStore.GetAsync(db, ct);

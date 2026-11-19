@@ -236,7 +236,12 @@ public class SharedFileCleanupTests
 
         await app.WithDbAsync(async db =>
         {
-            await SharedFileCleanup.RunAsync(db, app.Services.GetRequiredService<SharedFileStorage>(), now, CancellationToken.None);
+            await SharedFileCleanup.RunAsync(
+                db,
+                app.Services.GetRequiredService<SharedFileStorage>(),
+                app.Services.GetRequiredService<FileTransferProgress>(),
+                now,
+                CancellationToken.None);
             return 0;
         });
 
@@ -246,5 +251,56 @@ public class SharedFileCleanupTests
         Assert.False(await TransferExistsAsync(app, oldCancelled));
         Assert.False(await SharedFileExistsAsync(app, fileId));
         Assert.Empty(StoredFilesIn(app));
+    }
+
+    // Progress
+
+    [Fact]
+    public async Task PruneProgress_KeepsOnlyTransfersStillDownloadingOrApplying()
+    {
+        using var app = new TestApp();
+        var pc = await AddPcAsync(app);
+        var downloading = await SeedTransferAsync(app, pc.Id, "downloading");
+        var applying = await SeedTransferAsync(app, pc.Id, "applying", decision: "overwrite");
+        var saved = await SeedTransferAsync(app, pc.Id, "saved");
+        var failed = await SeedTransferAsync(app, pc.Id, "failed");
+        const long removed = 99999;
+        var progress = app.Services.GetRequiredService<FileTransferProgress>();
+        foreach (var id in new[] { downloading, applying, saved, failed, removed })
+        {
+            progress.Record(id, 1);
+        }
+
+        var pruned = await app.WithDbAsync(db => SharedFileCleanup.PruneProgressAsync(db, progress, CancellationToken.None));
+
+        Assert.Equal(3, pruned);
+        Assert.Equal([downloading, applying], progress.TransferIds().Order());
+    }
+
+    // A transfer the cleanup fails or removes is no longer downloading, so its progress goes with it.
+    [Fact]
+    public async Task Run_ForgetsTheProgressOfStuckAndRemovedTransfers()
+    {
+        using var app = new TestApp();
+        var pc = await AddPcAsync(app);
+        var now = app.Time.GetUtcNow();
+        var stuck = await SeedTransferAsync(app, pc.Id, "downloading", createdUtc: now - TimeSpan.FromHours(3), updatedUtc: now - TimeSpan.FromHours(2));
+        var old = await SeedTransferAsync(app, pc.Id, "applying", createdUtc: now - TimeSpan.FromDays(2), updatedUtc: now - TimeSpan.FromDays(2));
+        var active = await SeedTransferAsync(app, pc.Id, "downloading", createdUtc: now - TimeSpan.FromMinutes(5), updatedUtc: now);
+        var progress = app.Services.GetRequiredService<FileTransferProgress>();
+        foreach (var id in new[] { stuck, old, active })
+        {
+            progress.Record(id, 1);
+        }
+
+        await app.WithDbAsync(async db =>
+        {
+            await SharedFileCleanup.RunAsync(db, app.Services.GetRequiredService<SharedFileStorage>(), progress, now, CancellationToken.None);
+            return 0;
+        });
+
+        Assert.Null(progress.BytesSent(stuck));
+        Assert.Null(progress.BytesSent(old));
+        Assert.Equal(1, progress.BytesSent(active));
     }
 }

@@ -17,7 +17,8 @@ public record PcFileCancelRequest(long[]? TransferIds);
 // One transfer as the administrator sees it. Status is a SharedFileRules status, and a transfer never handed over in time shows as expired.
 // WaitingReason says why a waiting transfer hasn't been handed over: the PC is offline, its client is too old, or it is busy with
 // another transfer (BusyWith is that transfer's file name). Null for any other status, or when the PC will get it on its next heartbeat.
-// PcClientVersion is the client version the PC last reported.
+// PcClientVersion is the client version the PC last reported. BytesSent is how much of the file has reached the PC, only while
+// it is downloading or applying the file and its download has been seen. It never exceeds SizeBytes.
 public record FileTransferResponse(
     long Id,
     int PcId,
@@ -34,7 +35,8 @@ public record FileTransferResponse(
     DateTimeOffset UpdatedUtc,
     string? WaitingReason,
     string? BusyWith,
-    string? PcClientVersion);
+    string? PcClientVersion,
+    long? BytesSent);
 public record FileTransfersResponse(FileTransferResponse[] Transfers);
 
 public static partial class PcEndpoints
@@ -54,7 +56,7 @@ public static partial class PcEndpoints
     }
 
     // Creates one waiting transfer per PC. Each PC picks it up on its next heartbeat, so an offline PC gets it when it comes back within the hour.
-    private static async Task<IResult> SendFileAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    private static async Task<IResult> SendFileAsync(HttpContext http, AppDbContext db, FileTransferProgress progress, TimeProvider clock)
     {
         var request = await AuthEndpoints.ReadBodyAsync<PcFileSendRequest>(http.Request);
         if (request?.Ids is not { Length: > 0 and <= SharedFileRules.MaxPcsPerSend } ids || request.SharedFileId is not { } sharedFileId)
@@ -116,23 +118,23 @@ public static partial class PcEndpoints
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
 
-        return Results.Ok(new FileTransfersResponse(await ToTransferResponsesAsync(db, transfers, now, ct)));
+        return Results.Ok(new FileTransfersResponse(await ToTransferResponsesAsync(db, progress, transfers, now, ct)));
     }
 
     // The transfers named by "ids", a comma-separated list. Ids that match no transfer are left out of the answer.
-    private static async Task<IResult> TransfersAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    private static async Task<IResult> TransfersAsync(HttpContext http, AppDbContext db, FileTransferProgress progress, TimeProvider clock)
     {
         if (ParseTransferIds(http.Request.Query["ids"].ToString()) is not { } ids)
         {
             return AuthEndpoints.InvalidRequest();
         }
 
-        return Results.Ok(new FileTransfersResponse(await ReadTransfersAsync(db, ids, clock.GetUtcNow(), http.RequestAborted)));
+        return Results.Ok(new FileTransfersResponse(await ReadTransfersAsync(db, progress, ids, clock.GetUtcNow(), http.RequestAborted)));
     }
 
     // Records the administrator's answer on each listed transfer still waiting for one. The PC applies it on its next heartbeat.
     // Transfers in any other status are returned as they are.
-    private static async Task<IResult> DecideTransfersAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    private static async Task<IResult> DecideTransfersAsync(HttpContext http, AppDbContext db, FileTransferProgress progress, TimeProvider clock)
     {
         var request = await AuthEndpoints.ReadBodyAsync<PcFileDecisionRequest>(http.Request);
         if (request?.TransferIds is not { Length: > 0 and <= SharedFileRules.MaxTransfersPerRequest } ids || request.Decision is not { } decision)
@@ -154,12 +156,13 @@ public static partial class PcEndpoints
                 .SetProperty(t => t.Decision, decision)
                 .SetProperty(t => t.UpdatedUtc, now), ct);
 
-        return Results.Ok(new FileTransfersResponse(await ReadTransfersAsync(db, transferIds, now, ct)));
+        return Results.Ok(new FileTransfersResponse(await ReadTransfersAsync(db, progress, transferIds, now, ct)));
     }
 
     // Cancels each listed transfer the PC may still be working on. The PC can no longer download it or report on it, and a
-    // client that already started it gives up quietly. Transfers in any other status are returned as they are.
-    private static async Task<IResult> CancelTransfersAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    // client that already started it gives up quietly. Transfers in any other status are returned as they are. None of the listed
+    // transfers is downloading any more, so their progress is forgotten.
+    private static async Task<IResult> CancelTransfersAsync(HttpContext http, AppDbContext db, FileTransferProgress progress, TimeProvider clock)
     {
         var request = await AuthEndpoints.ReadBodyAsync<PcFileCancelRequest>(http.Request);
         if (request?.TransferIds is not { Length: > 0 and <= SharedFileRules.MaxTransfersPerRequest } ids || ids.Any(id => id <= 0))
@@ -175,8 +178,9 @@ public static partial class PcEndpoints
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(t => t.Status, SharedFileRules.Cancelled)
                 .SetProperty(t => t.UpdatedUtc, now), ct);
+        progress.Clear(transferIds);
 
-        return Results.Ok(new FileTransfersResponse(await ReadTransfersAsync(db, transferIds, now, ct)));
+        return Results.Ok(new FileTransfersResponse(await ReadTransfersAsync(db, progress, transferIds, now, ct)));
     }
 
     // Null unless the text is 1 to the limit of positive whole numbers separated by commas.
@@ -207,14 +211,19 @@ public static partial class PcEndpoints
         return ids.Distinct().ToArray();
     }
 
-    private static async Task<FileTransferResponse[]> ReadTransfersAsync(AppDbContext db, long[] ids, DateTimeOffset now, CancellationToken ct)
+    private static async Task<FileTransferResponse[]> ReadTransfersAsync(
+        AppDbContext db,
+        FileTransferProgress progress,
+        long[] ids,
+        DateTimeOffset now,
+        CancellationToken ct)
     {
         var transfers = await db.PcFileTransfers
             .AsNoTracking()
             .Where(t => ids.Contains(t.Id))
             .OrderBy(t => t.Id)
             .ToListAsync(ct);
-        return await ToTransferResponsesAsync(db, transfers, now, ct);
+        return await ToTransferResponsesAsync(db, progress, transfers, now, ct);
     }
 
     // Reads, for the transfers' PCs, what the waiting reason needs: whether each PC is online, its client version, and the
@@ -222,6 +231,7 @@ public static partial class PcEndpoints
     // it abandoned that its next heartbeat hands over again.
     private static async Task<FileTransferResponse[]> ToTransferResponsesAsync(
         AppDbContext db,
+        FileTransferProgress progress,
         IReadOnlyCollection<PcFileTransfer> transfers,
         DateTimeOffset now,
         CancellationToken ct)
@@ -265,8 +275,19 @@ public static partial class PcEndpoints
                 transfer.UpdatedUtc,
                 waitingReason,
                 waitingReason == SharedFileRules.BusyReason ? busyWith[transfer.PcId] : null,
-                pc?.ClientVersion);
+                pc?.ClientVersion,
+                BytesSentOf(progress, transfer, status));
         }).ToArray();
+    }
+
+    private static long? BytesSentOf(FileTransferProgress progress, PcFileTransfer transfer, string status)
+    {
+        if (status != SharedFileRules.Downloading && status != SharedFileRules.Applying)
+        {
+            return null;
+        }
+
+        return progress.BytesSent(transfer.Id) is { } bytes ? Math.Min(bytes, transfer.SizeBytes) : null;
     }
 
     // Offline first, then a client too old to receive files, then busy with another transfer.

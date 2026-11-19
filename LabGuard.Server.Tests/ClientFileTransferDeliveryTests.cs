@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using LabGuard.Server.SharedFiles;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using static LabGuard.Server.Tests.PcShutdownEndpointTests;
 using static LabGuard.Server.Tests.SharedFileTestSupport;
 
@@ -124,6 +125,23 @@ public class ClientFileTransferDeliveryTests
         Assert.Equal(1, stored.HandOverCount);
         // Handed over again, it counts as busy again, so the next heartbeat hands nothing.
         Assert.Empty(await HandedTransfersAsync(client, pc));
+    }
+
+    // Handed over again, the PC downloads from the start, so the progress recorded before starts again too.
+    [Fact]
+    public async Task Heartbeat_HandingOverAgain_ForgetsTheProgress()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var now = app.Time.GetUtcNow();
+        var id = await SeedTransferAsync(app, pc.Id, "downloading", createdUtc: now - TimeSpan.FromMinutes(10), updatedUtc: now - TimeSpan.FromMinutes(3));
+        var progress = ProgressOf(app);
+        progress.Record(id, 2);
+
+        Assert.Single(await HandedTransfersAsync(client, pc));
+
+        Assert.Null(progress.BytesSent(id));
     }
 
     // Activity within the last two minutes means the PC is still at work, so the next transfer still waits.
@@ -478,6 +496,43 @@ public class ClientFileTransferDeliveryTests
         Assert.Equal("nosniff", response.Headers.GetValues("X-Content-Type-Options").Single());
     }
 
+    private static FileTransferProgress ProgressOf(TestApp app) => app.Services.GetRequiredService<FileTransferProgress>();
+
+    [Fact]
+    public async Task Download_RecordsHowFarThePcHasGot()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var bytes = Bytes("the file bytes");
+        var id = await DownloadingTransferAsync(app, admin, client, pc, bytes);
+
+        await (await PcDownloadAsync(client, id, pc.Token)).Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(bytes.Length, ProgressOf(app).BytesSent(id));
+    }
+
+    // A resumed download asks for a range, so the position counts from where the range starts.
+    [Fact]
+    public async Task Download_ARange_RecordsTheAbsolutePosition()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await DownloadingTransferAsync(app, admin, client, pc, Bytes("the file bytes"));
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/client/files/{id}");
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {pc.Token}");
+        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(4, 7);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal(Bytes("file"), await response.Content.ReadAsByteArrayAsync());
+        Assert.Equal(8, ProgressOf(app).BytesSent(id));
+    }
+
     [Fact]
     public async Task Download_AnotherPcsTransfer_LooksMissing()
     {
@@ -643,6 +698,41 @@ public class ClientFileTransferDeliveryTests
 
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Equal(from, (await StoredTransferAsync(app, id)).Status);
+    }
+
+    [Theory]
+    [InlineData("downloading", "saved")]
+    [InlineData("downloading", "exists")]
+    [InlineData("downloading", "failed")]
+    [InlineData("applying", "skipped")]
+    public async Task Report_Stored_ForgetsTheProgress(string from, string to)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, from);
+        var progress = ProgressOf(app);
+        progress.Record(id, 2);
+
+        await ReportAsync(client, id, pc.Token, new { status = to });
+
+        Assert.Null(progress.BytesSent(id));
+    }
+
+    [Fact]
+    public async Task Report_Refused_KeepsTheProgress()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, "downloading");
+        var progress = ProgressOf(app);
+        progress.Record(id, 2);
+
+        var response = await ReportAsync(client, id, pc.Token, new { status = "skipped" });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(2, progress.BytesSent(id));
     }
 
     [Fact]
