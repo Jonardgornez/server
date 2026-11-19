@@ -16,6 +16,7 @@ public sealed class ScreenViewer : IDisposable
     private readonly ScreenInputRateLimiter _sasInput = new(ScreenProtocol.MaxSasPerSecond);
     private readonly ScreenInputRateLimiter _textInput = new(ScreenProtocol.MaxTextPerSecond);
     private readonly ScreenInputRateLimiter _controlRequests = new(ScreenProtocol.ControlRequestsPerSecond);
+    private readonly ScreenInputRateLimiter _cursors = new(ScreenProtocol.MaxCursorsPerSecond);
 
     // The keys and buttons the server has relayed as down. An up or release is relayed only for one of these, and the set is cleared when control ends.
     private readonly HashSet<string> _held = [];
@@ -45,6 +46,9 @@ public sealed class ScreenViewer : IDisposable
     private ScreenSocket? _controlSource;
     private long _controlRequestId;
     private int? _controlAuditId;
+    // True once a pointer shape has been relayed to the browser since control turned on or last moved to the PC. The browser is
+    // then told the default shape when control ends or moves to the helper.
+    private bool _hasRelayedCursor;
 
     public ScreenViewer(
         string viewId,
@@ -220,7 +224,8 @@ public sealed class ScreenViewer : IDisposable
             var releasedPc = previous is null && _control == ScreenControlState.On ? _pc : null;
             _controlSource = next ?? _pc;
             _held.Clear();
-            return new SourceSwitch(previous, next, _controlSource, releasedPc, State: stateToSend);
+            var resetCursor = TakeCursorResetLocked();
+            return new SourceSwitch(previous, next, _controlSource, releasedPc, State: stateToSend, ResetCursor: resetCursor);
         }
     }
 
@@ -397,6 +402,28 @@ public sealed class ScreenViewer : IDisposable
         }
     }
 
+    // Takes one of the pointer shapes this viewer may relay per second. Only while control is on and carried by this PC socket,
+    // so a paused PC can't change the pointer while the helper carries control. False otherwise.
+    public bool TryTakeCursorSlot(ScreenSocket pc, DateTimeOffset now)
+    {
+        lock (_sync)
+        {
+            if (_isClosed
+                || _control != ScreenControlState.On
+                || _pc is null
+                || !ReferenceEquals(_pc, pc)
+                || !ReferenceEquals(_controlPc, pc)
+                || !ReferenceEquals(_controlSource, pc)
+                || !_cursors.TryTake(now))
+            {
+                return false;
+            }
+
+            _hasRelayedCursor = true;
+            return true;
+        }
+    }
+
     // Control ends with the view. The audit row it had is handed back, so the caller can end it.
     public int? EndControlOnClose()
     {
@@ -426,6 +453,13 @@ public sealed class ScreenViewer : IDisposable
             _helper = null;
             return true;
         }
+    }
+
+    private bool TakeCursorResetLocked()
+    {
+        var hadCursor = _hasRelayedCursor;
+        _hasRelayedCursor = false;
+        return hadCursor;
     }
 
     private bool IsAwaitingConfirmationLocked(ScreenSocket pc) =>
@@ -482,7 +516,7 @@ public sealed class ScreenViewer : IDisposable
     private ControlPeriodEnd EndControlLocked()
     {
         var holdsPc = _pc is not null && ReferenceEquals(_controlPc, _pc);
-        var ended = new ControlPeriodEnd(_controlAuditId, holdsPc ? _pc : null, holdsPc ? _helper : null);
+        var ended = new ControlPeriodEnd(_controlAuditId, holdsPc ? _pc : null, holdsPc ? _helper : null, TakeCursorResetLocked());
         _control = ScreenControlState.Off;
         _controlPc = null;
         _controlSource = null;
@@ -504,21 +538,24 @@ public enum ScreenControlState
 public readonly record struct ControlRequest(long Id, ScreenSocket Pc);
 
 // What a control period leaves behind when it ends: its audit row, and the sockets to tell. AttachedPc is null when the PC is no
-// longer attached, and Helper is null unless a helper was streaming in the PC's place.
-public readonly record struct ControlPeriodEnd(int? AuditId, ScreenSocket? AttachedPc, ScreenSocket? Helper = null);
+// longer attached, and Helper is null unless a helper was streaming in the PC's place. ResetCursor is true when the browser was
+// shown the PC's pointer shape, so it must be told the default one.
+public readonly record struct ControlPeriodEnd(int? AuditId, ScreenSocket? AttachedPc, ScreenSocket? Helper = null, bool ResetCursor = false);
 
 // A frame relayed to the browser and not acknowledged yet: who sent it, and in which of the helper's runs (0 for the PC).
 public readonly record struct InFlightFrame(ScreenSocket Sender, long HelperRun);
 
 // What a change of source asks the hub to send, in this order: stop, release, start, control on. EndedControl is set when the
-// change ended control. State is the browser's new state, or null when it didn't change.
+// change ended control. State is the browser's new state, or null when it didn't change. ResetCursor is true when control moved
+// away from the PC after its pointer shape was shown, so the browser must be told the default one.
 public readonly record struct SourceSwitch(
     ScreenSocket? StoppedHelper = null,
     ScreenSocket? StartedHelper = null,
     ScreenSocket? ControlSource = null,
     ScreenSocket? ReleasedPc = null,
     ControlPeriodEnd? EndedControl = null,
-    string? State = null);
+    string? State = null,
+    bool ResetCursor = false);
 
 // Who opened a view, and the session they opened it under. The session version is what the monitor checks while the view is open.
 public readonly record struct ScreenViewOwner(int AdminId, int SessionVersion, string AdminUserName);

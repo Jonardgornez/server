@@ -169,16 +169,42 @@ public class ScreenSocketTests
     }
 
     [Fact]
-    public async Task ReceiveAsync_ATextMessageOver16Bytes_IsClosedWith1009_OnItsFirstChunk()
+    public async Task ReceiveAsync_AHelperTextMessageOver16Bytes_IsClosedWith1009_OnItsFirstChunk()
     {
         var socket = new FakeWebSocket();
         socket.EnqueueMessage(WebSocketMessageType.Text, new byte[17]);
+        var screen = new ScreenSocket(socket, ShortTimeout);
+
+        var message = await screen.ReceiveAsync(ScreenProtocol.HelperLimits, CancellationToken.None);
+
+        Assert.Null(message);
+        Assert.Equal(WebSocketCloseStatus.MessageTooBig, socket.CloseSent!.Value.Status);
+    }
+
+    [Fact]
+    public async Task ReceiveAsync_APcTextMessageOver24576Bytes_IsClosedWith1009()
+    {
+        var socket = new FakeWebSocket();
+        socket.EnqueueMessage(WebSocketMessageType.Text, new byte[24_577]);
         var screen = new ScreenSocket(socket, ShortTimeout);
 
         var message = await screen.ReceiveAsync(ScreenProtocol.PcLimits, CancellationToken.None);
 
         Assert.Null(message);
         Assert.Equal(WebSocketCloseStatus.MessageTooBig, socket.CloseSent!.Value.Status);
+    }
+
+    [Fact]
+    public async Task ReceiveAsync_APcTextMessageOf24576Bytes_IsReceived()
+    {
+        var socket = new FakeWebSocket();
+        socket.EnqueueMessage(WebSocketMessageType.Text, new byte[24_576]);
+        var screen = new ScreenSocket(socket, ShortTimeout);
+
+        var message = await screen.ReceiveAsync(ScreenProtocol.PcLimits, CancellationToken.None);
+
+        Assert.NotNull(message);
+        Assert.Null(socket.CloseSent);
     }
 
     [Fact]

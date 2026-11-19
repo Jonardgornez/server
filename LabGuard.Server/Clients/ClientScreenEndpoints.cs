@@ -76,7 +76,8 @@ public static partial class ClientEndpoints
                 return;
             }
 
-            switch (ScreenProtocol.ClassifyPcMessage(message.Type, message.Payload.Span))
+            var read = ScreenProtocol.ReadPcMessage(message.Type, message.Payload.Span);
+            switch (read.Kind)
             {
                 case PcMessageKind.Frame:
                     await hub.RelayFrameAsync(viewer, pc, message.Payload);
@@ -93,6 +94,12 @@ public static partial class ClientEndpoints
                 case PcMessageKind.ControlOff:
                     await hub.EndControlFromAsync(viewer, pc);
                     break;
+                case PcMessageKind.Cursor when read.BrowserCursor is { } cursor:
+                    await hub.RelayCursorAsync(viewer, pc, cursor);
+                    break;
+                case PcMessageKind.TooLarge:
+                    await pc.CloseAsync(WebSocketCloseStatus.MessageTooBig, "Message too large.");
+                    return;
             }
         }
     }
@@ -150,7 +157,7 @@ public static partial class ClientEndpoints
     // Strict: anything but a relayable frame or a known text closes the helper. A replaced helper stops here.
     private static async Task ReceiveHelperMessagesAsync(ScreenStreamHub hub, SecureHelperConnection helper, CancellationToken cancellationToken)
     {
-        while (await helper.Socket.ReceiveAsync(ScreenProtocol.PcLimits, cancellationToken) is { } message)
+        while (await helper.Socket.ReceiveAsync(ScreenProtocol.HelperLimits, cancellationToken) is { } message)
         {
             if (!hub.IsCurrentHelper(helper))
             {

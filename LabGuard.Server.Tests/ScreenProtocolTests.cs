@@ -103,10 +103,57 @@ public class ScreenProtocolTests
         Assert.False(ScreenProtocol.IsBrowserAck(WebSocketMessageType.Binary, "ack"u8));
     }
 
+    [Theory]
+    [InlineData("paused", PcMessageKind.Paused)]
+    [InlineData("resumed", PcMessageKind.Resumed)]
+    [InlineData("control-on", PcMessageKind.ControlOn)]
+    [InlineData("control-off", PcMessageKind.ControlOff)]
+    [InlineData("xxxxxxxxxxxxxxxx", PcMessageKind.Ignored)]
+    public void ReadPcMessage_ShortTexts_AreReadAsBefore(string text, PcMessageKind expected)
+    {
+        var read = ScreenProtocol.ReadPcMessage(WebSocketMessageType.Text, Encoding.UTF8.GetBytes(text));
+
+        Assert.Equal(expected, read.Kind);
+        Assert.Null(read.BrowserCursor);
+    }
+
+    [Fact]
+    public void ReadPcMessage_A17ByteTextThatIsNotACursor_IsTooLarge()
+    {
+        var read = ScreenProtocol.ReadPcMessage(WebSocketMessageType.Text, Encoding.UTF8.GetBytes(new string('x', 17)));
+
+        Assert.Equal(PcMessageKind.TooLarge, read.Kind);
+    }
+
+    [Fact]
+    public void ReadPcMessage_AValidCursor_IsACursorWithTheBrowserMessage()
+    {
+        var read = ScreenProtocol.ReadPcMessage(WebSocketMessageType.Text, "{\"t\":\"cursor\",\"k\":\"move\"}"u8);
+
+        Assert.Equal(PcMessageKind.Cursor, read.Kind);
+        Assert.Equal("{\"cursor\":\"move\"}", Encoding.UTF8.GetString(read.BrowserCursor!));
+    }
+
+    [Fact]
+    public void ReadPcMessage_AnInvalidCursor_IsIgnored_NotTooLarge()
+    {
+        var read = ScreenProtocol.ReadPcMessage(WebSocketMessageType.Text, "{\"t\":\"cursor\",\"k\":\"grab\"}"u8);
+
+        Assert.Equal(PcMessageKind.Ignored, read.Kind);
+        Assert.Null(read.BrowserCursor);
+    }
+
+    [Fact]
+    public void ReadPcMessage_ABinaryFrame_IsStillAFrame()
+    {
+        Assert.Equal(PcMessageKind.Frame, ScreenProtocol.ReadPcMessage(WebSocketMessageType.Binary, LiveViewClient.Frame("ok")).Kind);
+    }
+
     [Fact]
     public void Limits_MatchTheContract()
     {
-        Assert.Equal(new MessageLimits(16, 2 * 1024 * 1024), ScreenProtocol.PcLimits);
+        Assert.Equal(new MessageLimits(24_576, 2 * 1024 * 1024), ScreenProtocol.PcLimits);
+        Assert.Equal(new MessageLimits(16, 2 * 1024 * 1024), ScreenProtocol.HelperLimits);
         Assert.Equal(new MessageLimits(256, 256), ScreenProtocol.BrowserLimits);
     }
 
