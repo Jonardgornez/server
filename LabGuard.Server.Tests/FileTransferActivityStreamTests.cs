@@ -10,7 +10,7 @@ public class FileTransferActivityStreamTests
 {
     private static readonly TimeSpan Interval = TimeSpan.FromMinutes(1);
 
-    private static ActivityReportingStream StreamOver(byte[] bytes, FakeTimeProvider clock, Func<Task> report) =>
+    private static ActivityReportingStream StreamOver(byte[] bytes, FakeTimeProvider clock, Func<Task<bool>> report) =>
         new(new MemoryStream(bytes), clock, Interval, report, NullLogger.Instance);
 
     [Fact]
@@ -18,7 +18,7 @@ public class FileTransferActivityStreamTests
     {
         var clock = new FakeTimeProvider();
         var reports = 0;
-        await using var stream = StreamOver(new byte[10], clock, () => { reports++; return Task.CompletedTask; });
+        await using var stream = StreamOver(new byte[10], clock, () => { reports++; return Task.FromResult(true); });
 
         await stream.ReadExactlyAsync(new byte[4]);
         clock.Advance(TimeSpan.FromSeconds(59));
@@ -32,7 +32,7 @@ public class FileTransferActivityStreamTests
     {
         var clock = new FakeTimeProvider();
         var reports = 0;
-        await using var stream = StreamOver(new byte[100], clock, () => { reports++; return Task.CompletedTask; });
+        await using var stream = StreamOver(new byte[100], clock, () => { reports++; return Task.FromResult(true); });
 
         clock.Advance(Interval);
         await stream.ReadExactlyAsync(new byte[10]);
@@ -59,11 +59,25 @@ public class FileTransferActivityStreamTests
         Assert.Equal(bytes, copy.ToArray());
     }
 
+    // The transfer was cancelled or failed while the bytes streamed, so the download stops.
+    [Fact]
+    public async Task Read_WhenTheTransferIsNoLongerInProgress_StopsTheDownload()
+    {
+        var clock = new FakeTimeProvider();
+        await using var stream = StreamOver(new byte[100], clock, () => Task.FromResult(false));
+
+        await stream.ReadExactlyAsync(new byte[10]);
+        clock.Advance(Interval);
+
+        await Assert.ThrowsAsync<IOException>(() => stream.ReadExactlyAsync(new byte[10]).AsTask());
+        await Assert.ThrowsAsync<IOException>(() => stream.CopyToAsync(new MemoryStream()));
+    }
+
     [Fact]
     public async Task Stream_PassesSeekingThrough_ForRangeRequests()
     {
         var clock = new FakeTimeProvider();
-        await using var stream = StreamOver([10, 20, 30, 40], clock, () => Task.CompletedTask);
+        await using var stream = StreamOver([10, 20, 30, 40], clock, () => Task.FromResult(true));
 
         Assert.True(stream.CanSeek);
         Assert.Equal(4, stream.Length);
@@ -79,7 +93,7 @@ public class FileTransferActivityStreamTests
     [Fact]
     public void Stream_IsReadOnly()
     {
-        using var stream = StreamOver([1], new FakeTimeProvider(), () => Task.CompletedTask);
+        using var stream = StreamOver([1], new FakeTimeProvider(), () => Task.FromResult(true));
 
         Assert.False(stream.CanWrite);
         Assert.Throws<NotSupportedException>(() => stream.Write([1], 0, 1));

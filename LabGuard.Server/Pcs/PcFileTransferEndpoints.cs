@@ -11,8 +11,13 @@ namespace LabGuard.Server.Pcs;
 public record PcFileSendRequest(int[]? Ids, int? SharedFileId, string? Folder, string? Subfolder);
 // The administrator's answer for transfers whose file already exists on the PC.
 public record PcFileDecisionRequest(long[]? TransferIds, string? Decision);
+// The transfers the administrator stops.
+public record PcFileCancelRequest(long[]? TransferIds);
 
 // One transfer as the administrator sees it. Status is a SharedFileRules status, and a transfer never handed over in time shows as expired.
+// WaitingReason says why a waiting transfer hasn't been handed over: the PC is offline, its client is too old, or it is busy with
+// another transfer (BusyWith is that transfer's file name). Null for any other status, or when the PC will get it on its next heartbeat.
+// PcClientVersion is the client version the PC last reported.
 public record FileTransferResponse(
     long Id,
     int PcId,
@@ -26,7 +31,10 @@ public record FileTransferResponse(
     string? SavedAs,
     string? Error,
     DateTimeOffset CreatedUtc,
-    DateTimeOffset UpdatedUtc);
+    DateTimeOffset UpdatedUtc,
+    string? WaitingReason,
+    string? BusyWith,
+    string? PcClientVersion);
 public record FileTransfersResponse(FileTransferResponse[] Transfers);
 
 public static partial class PcEndpoints
@@ -41,6 +49,7 @@ public static partial class PcEndpoints
         group.MapPost("/files", SendFileAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapGet("/files/transfers", TransfersAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/files/transfers/decision", DecideTransfersAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/files/transfers/cancel", CancelTransfersAsync).AddEndpointFilter<PcStorageErrorFilter>();
         return group;
     }
 
@@ -107,7 +116,7 @@ public static partial class PcEndpoints
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
 
-        return Results.Ok(new FileTransfersResponse(transfers.Select(t => ToTransferResponse(t, now)).ToArray()));
+        return Results.Ok(new FileTransfersResponse(await ToTransferResponsesAsync(db, transfers, now, ct)));
     }
 
     // The transfers named by "ids", a comma-separated list. Ids that match no transfer are left out of the answer.
@@ -148,6 +157,28 @@ public static partial class PcEndpoints
         return Results.Ok(new FileTransfersResponse(await ReadTransfersAsync(db, transferIds, now, ct)));
     }
 
+    // Cancels each listed transfer the PC may still be working on. The PC can no longer download it or report on it, and a
+    // client that already started it gives up quietly. Transfers in any other status are returned as they are.
+    private static async Task<IResult> CancelTransfersAsync(HttpContext http, AppDbContext db, TimeProvider clock)
+    {
+        var request = await AuthEndpoints.ReadBodyAsync<PcFileCancelRequest>(http.Request);
+        if (request?.TransferIds is not { Length: > 0 and <= SharedFileRules.MaxTransfersPerRequest } ids || ids.Any(id => id <= 0))
+        {
+            return AuthEndpoints.InvalidRequest();
+        }
+
+        var ct = http.RequestAborted;
+        var now = clock.GetUtcNow();
+        var transferIds = ids.Distinct().ToArray();
+        await db.PcFileTransfers
+            .Where(t => transferIds.Contains(t.Id) && SharedFileRules.OpenStatuses.Contains(t.Status))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(t => t.Status, SharedFileRules.Cancelled)
+                .SetProperty(t => t.UpdatedUtc, now), ct);
+
+        return Results.Ok(new FileTransfersResponse(await ReadTransfersAsync(db, transferIds, now, ct)));
+    }
+
     // Null unless the text is 1 to the limit of positive whole numbers separated by commas.
     internal static long[]? ParseTransferIds(string? raw)
     {
@@ -176,28 +207,88 @@ public static partial class PcEndpoints
         return ids.Distinct().ToArray();
     }
 
-    private static async Task<FileTransferResponse[]> ReadTransfersAsync(AppDbContext db, long[] ids, DateTimeOffset now, CancellationToken ct) =>
-        (await db.PcFileTransfers
+    private static async Task<FileTransferResponse[]> ReadTransfersAsync(AppDbContext db, long[] ids, DateTimeOffset now, CancellationToken ct)
+    {
+        var transfers = await db.PcFileTransfers
             .AsNoTracking()
             .Where(t => ids.Contains(t.Id))
             .OrderBy(t => t.Id)
-            .ToListAsync(ct))
-            .Select(t => ToTransferResponse(t, now))
-            .ToArray();
+            .ToListAsync(ct);
+        return await ToTransferResponsesAsync(db, transfers, now, ct);
+    }
 
-    private static FileTransferResponse ToTransferResponse(PcFileTransfer transfer, DateTimeOffset now) =>
-        new(
-            transfer.Id,
-            transfer.PcId,
-            transfer.PcName,
-            transfer.FileName,
-            transfer.SizeBytes,
-            transfer.Folder,
-            transfer.Subfolder,
-            SharedFileRules.EffectiveStatus(transfer.Status, transfer.CreatedUtc, now),
-            transfer.Decision,
-            transfer.SavedAs,
-            transfer.Error,
-            transfer.CreatedUtc,
-            transfer.UpdatedUtc);
+    // Reads, for the transfers' PCs, what the waiting reason needs: whether each PC is online, its client version, and the
+    // transfer it is working on, by the same rules the heartbeat hand-over uses. That is one it is actively working on, or one
+    // it abandoned that its next heartbeat hands over again.
+    private static async Task<FileTransferResponse[]> ToTransferResponsesAsync(
+        AppDbContext db,
+        IReadOnlyCollection<PcFileTransfer> transfers,
+        DateTimeOffset now,
+        CancellationToken ct)
+    {
+        var pcIds = transfers.Select(t => t.PcId).Distinct().ToArray();
+        var pcs = await db.Pcs
+            .AsNoTracking()
+            .Where(p => pcIds.Contains(p.Id))
+            .Select(p => new TransferPc(p.Id, p.LastSeenUtc, p.ClientVersion))
+            .ToDictionaryAsync(p => p.Id, ct);
+
+        var pcTransfers = db.PcFileTransfers.AsNoTracking().Where(t => pcIds.Contains(t.PcId));
+        var busyTransfers = await pcTransfers.Active(now)
+            .Concat(pcTransfers.ToHandOverAgain(now))
+            .OrderBy(t => t.CreatedUtc)
+            .ThenBy(t => t.Id)
+            .Select(t => new { t.PcId, t.FileName })
+            .ToListAsync(ct);
+        var busyWith = busyTransfers
+            .GroupBy(t => t.PcId)
+            .ToDictionary(group => group.Key, group => group.First().FileName);
+
+        return transfers.Select(transfer =>
+        {
+            var status = SharedFileRules.EffectiveStatus(transfer.Status, transfer.CreatedUtc, now);
+            var pc = pcs.GetValueOrDefault(transfer.PcId);
+            var waitingReason = status == SharedFileRules.Waiting ? WaitingReasonOf(pc, busyWith.ContainsKey(transfer.PcId), now) : null;
+            return new FileTransferResponse(
+                transfer.Id,
+                transfer.PcId,
+                transfer.PcName,
+                transfer.FileName,
+                transfer.SizeBytes,
+                transfer.Folder,
+                transfer.Subfolder,
+                status,
+                transfer.Decision,
+                transfer.SavedAs,
+                transfer.Error,
+                transfer.CreatedUtc,
+                transfer.UpdatedUtc,
+                waitingReason,
+                waitingReason == SharedFileRules.BusyReason ? busyWith[transfer.PcId] : null,
+                pc?.ClientVersion);
+        }).ToArray();
+    }
+
+    // Offline first, then a client too old to receive files, then busy with another transfer.
+    private static string? WaitingReasonOf(TransferPc? pc, bool isBusy, DateTimeOffset now)
+    {
+        if (pc is null)
+        {
+            return null;
+        }
+
+        if (!IsOnline(pc.LastSeenUtc, now))
+        {
+            return SharedFileRules.OfflineReason;
+        }
+
+        if (!SharedFileRules.IsFileClient(pc.ClientVersion))
+        {
+            return SharedFileRules.ClientTooOldReason;
+        }
+
+        return isBusy ? SharedFileRules.BusyReason : null;
+    }
+
+    private sealed record TransferPc(int Id, DateTimeOffset LastSeenUtc, string? ClientVersion);
 }

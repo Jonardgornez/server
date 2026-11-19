@@ -62,6 +62,7 @@ internal static class SharedFileTestSupport
     internal const string SendRoute = "/api/pcs/files";
     internal const string TransfersRoute = "/api/pcs/files/transfers";
     internal const string DecisionRoute = "/api/pcs/files/transfers/decision";
+    internal const string CancelRoute = "/api/pcs/files/transfers/cancel";
     internal const string InvalidFileNameMessage = "Choose a file with a valid Windows file name.";
     internal const string NoDiskSpaceMessage = "The server does not have enough free disk space for this file.";
 
@@ -109,13 +110,23 @@ internal static class SharedFileTestSupport
         return (await JsonOf(response)).GetProperty("transfers").EnumerateArray().ToArray();
     }
 
+    internal static Task<HttpResponseMessage> CancelAsync(HttpClient admin, params long[] transferIds) =>
+        admin.PostAsJsonAsync(CancelRoute, new { transferIds });
+
     internal static Task<HttpResponseMessage> DecideAsync(HttpClient admin, string decision, params long[] transferIds) =>
         admin.PostAsJsonAsync(DecisionRoute, new { transferIds, decision });
 
+    // The first client version that is handed sent files.
+    internal const string FileClientVersion = "0.26.0";
+
+    // A heartbeat from a client reporting the given version. Null reports none, as a client older than 0.20.0 does.
+    internal static Task<HttpResponseMessage> VersionedHeartbeatAsync(HttpClient client, TestPc pc, string? clientVersion = FileClientVersion) =>
+        PostAsync(client, "/api/client/heartbeat", pc.Token, JsonContent.Create(new { clientVersion }));
+
     // The file transfers a heartbeat hands over, or none when the field is left out.
-    internal static async Task<JsonElement[]> HandedTransfersAsync(HttpClient client, TestPc pc)
+    internal static async Task<JsonElement[]> HandedTransfersAsync(HttpClient client, TestPc pc, string? clientVersion = FileClientVersion)
     {
-        var body = await HeartbeatBodyAsync(client, pc);
+        var body = await JsonOf(await VersionedHeartbeatAsync(client, pc, clientVersion));
         return body.TryGetProperty("fileTransfers", out var transfers) ? transfers.EnumerateArray().ToArray() : [];
     }
 
@@ -143,7 +154,8 @@ internal static class SharedFileTestSupport
         DateTimeOffset? updatedUtc = null,
         int? sharedFileId = null,
         string fileName = "notes.pdf",
-        string? sha256 = null) =>
+        string? sha256 = null,
+        int handOverCount = 0) =>
         app.WithDbAsync(async db =>
         {
             var now = app.Time.GetUtcNow();
@@ -161,6 +173,7 @@ internal static class SharedFileTestSupport
                 Decision = decision,
                 CreatedUtc = createdUtc ?? now,
                 UpdatedUtc = updatedUtc ?? createdUtc ?? now,
+                HandOverCount = handOverCount,
             };
             db.PcFileTransfers.Add(transfer);
             await db.SaveChangesAsync();
@@ -179,6 +192,10 @@ internal static class SharedFileTestSupport
             await db.SaveChangesAsync();
             return file.Id;
         });
+
+    // Stores the client version the PC last reported, as its heartbeat would. Null means it reported none.
+    internal static Task SetClientVersionAsync(TestApp app, int pcId, string? clientVersion) =>
+        app.WithDbAsync(db => db.Pcs.Where(p => p.Id == pcId).ExecuteUpdateAsync(setters => setters.SetProperty(p => p.ClientVersion, clientVersion)));
 
     internal static Task<PcFileTransfer> StoredTransferAsync(TestApp app, long id) =>
         app.WithDbAsync(db => db.PcFileTransfers.AsNoTracking().SingleAsync(t => t.Id == id));

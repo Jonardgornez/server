@@ -1,18 +1,21 @@
 namespace LabGuard.Server.Clients;
 
 // Wraps a file being sent to a PC and reports activity at most once per interval while it is read, so a long download keeps
-// its transfer alive. A failed report is logged and never breaks the download. Seeking passes through, so range requests work.
+// its transfer alive. A report that fails is logged and never breaks the download, but one that finds the transfer no longer
+// in progress (cancelled or failed) stops it. Seeking passes through, so range requests work.
 internal sealed class ActivityReportingStream(
     Stream inner,
     TimeProvider clock,
     TimeSpan interval,
-    Func<Task> reportActivity,
+    Func<Task<bool>> reportActivity,
     ILogger logger) : Stream
 {
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromMinutes(1);
 
     // The download start has just reported, so the first report while streaming is one interval later.
     private DateTimeOffset _lastReport = clock.GetUtcNow();
+    // Set once a report finds the transfer no longer in progress. Every read after that fails too.
+    private bool _isStopped;
 
     public override bool CanRead => inner.CanRead;
     public override bool CanSeek => inner.CanSeek;
@@ -63,6 +66,11 @@ internal sealed class ActivityReportingStream(
 
     private async Task ReportIfDueAsync()
     {
+        if (_isStopped)
+        {
+            throw NoLongerTransferred();
+        }
+
         var now = clock.GetUtcNow();
         if (now - _lastReport < interval)
         {
@@ -70,17 +78,28 @@ internal sealed class ActivityReportingStream(
         }
 
         _lastReport = now;
+        bool isInProgress;
         try
         {
-            await reportActivity();
+            isInProgress = await reportActivity();
         }
         catch (OperationCanceledException)
         {
             // The PC hung up mid-download; nothing to record.
+            return;
         }
         catch (Exception exception)
         {
             logger.LogWarning("Couldn't record download activity on a sent file: {ExceptionType}.", exception.GetType().Name);
+            return;
+        }
+
+        if (!isInProgress)
+        {
+            _isStopped = true;
+            throw NoLongerTransferred();
         }
     }
+
+    private static IOException NoLongerTransferred() => new("The sent file is no longer being transferred.");
 }

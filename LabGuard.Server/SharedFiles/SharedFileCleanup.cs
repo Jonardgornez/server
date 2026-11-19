@@ -29,7 +29,8 @@ public static class SharedFileCleanup
     }
 
     // A transfer a PC has been downloading or applying for too long fails. The status is matched again in the update, so a
-    // report the PC sends at the same moment is never overwritten.
+    // report the PC sends at the same moment is never overwritten. Handing an abandoned transfer over again refreshes its
+    // activity, but that stops SharedFileRules.HandOverAgainLifetime after it was created, so one that never finishes fails here.
     public static Task<int> FailStuckAsync(AppDbContext db, DateTimeOffset now, CancellationToken ct)
     {
         var cutoff = now - SharedFileRules.ActiveLifetime;

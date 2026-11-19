@@ -33,7 +33,12 @@ public static class ClientUpdateHeartbeat
     {
         // The stored version always describes the client sending this heartbeat. A client older than 0.20.0 sends none, so a heartbeat
         // without a readable version makes it unknown: otherwise a PC moved to an older client would keep showing the newer version.
-        await StoreVersionAsync(db, pcId, ReadVersion(request?.ClientVersion)?.ToString(), cancellationToken);
+        // A missing or unreadable body says nothing about the client, so it leaves the stored version alone.
+        if (request is not null)
+        {
+            await StoreVersionAsync(db, pcId, ReadVersion(request.ClientVersion)?.ToString(), cancellationToken);
+        }
+
         return await OfferAsync(db, pcId, ReadReport(request?.ClientUpdate), now, cancellationToken);
     }
 
