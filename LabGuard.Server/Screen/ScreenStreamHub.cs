@@ -36,7 +36,21 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
         ScreenSocket browser,
         long epoch,
         ScreenViewOwner owner,
-        string pcName)
+        string pcName) =>
+        (await OpenAsync(pcId, mode, sessionDeadline, auditId, browser, epoch, owner, pcName, isPassive: false)).Viewer;
+
+    // As above. A passive open never replaces a view that is still open: it gives Busy instead, decided under the same lock that
+    // publishes the viewer, so a passive open racing a full one can't take its place. The audit row is ended as for any refusal.
+    public async Task<ScreenOpenResult> OpenAsync(
+        int pcId,
+        string mode,
+        DateTimeOffset sessionDeadline,
+        int auditId,
+        ScreenSocket browser,
+        long epoch,
+        ScreenViewOwner owner,
+        string pcName,
+        bool isPassive)
     {
         var viewer = new ScreenViewer(NewViewId(), pcId, mode, auditId, sessionDeadline, browser, owner, pcName);
         var published = false;
@@ -46,7 +60,7 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
             viewer.TrySetState(ScreenProtocol.WaitingState);
             if (!await browser.SendAsync(ScreenProtocol.StateMessage(ScreenProtocol.WaitingState), WebSocketMessageType.Text))
             {
-                return null;
+                return ScreenOpenResult.Refused;
             }
 
             ScreenViewer? replaced;
@@ -54,7 +68,13 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
             {
                 if (epoch != _epoch)
                 {
-                    return null;
+                    return ScreenOpenResult.Refused;
+                }
+
+                // A viewer that is already closing is about to leave, so it doesn't count as someone viewing.
+                if (isPassive && _viewersByPc.GetValueOrDefault(pcId) is { IsClosed: false })
+                {
+                    return ScreenOpenResult.Busy;
                 }
 
                 _viewersByPc.Remove(pcId, out replaced);
@@ -67,7 +87,7 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
                 await CloseAsync(replaced, ScreenProtocol.ReplacedCloseStatus, "Replaced by another viewer.");
             }
 
-            return viewer;
+            return new ScreenOpenResult(ScreenOpenStatus.Opened, viewer);
         }
         catch when (published)
         {
@@ -519,4 +539,20 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
         CloseAsync(viewer, WebSocketCloseStatus.PolicyViolation, "The viewer stopped reading.");
 
     private static string NewViewId() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
+}
+
+public enum ScreenOpenStatus
+{
+    Opened,
+    // The epoch moved on or the browser is gone.
+    Refused,
+    // A passive open found someone else's view of the PC, and left it alone.
+    Busy,
+}
+
+// What an open did. Viewer is set only when it opened.
+public readonly record struct ScreenOpenResult(ScreenOpenStatus Status, ScreenViewer? Viewer = null)
+{
+    public static readonly ScreenOpenResult Refused = new(ScreenOpenStatus.Refused);
+    public static readonly ScreenOpenResult Busy = new(ScreenOpenStatus.Busy);
 }

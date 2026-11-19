@@ -92,6 +92,69 @@ public class ScreenStreamHubTests
         Assert.Same(first, hub.CurrentFor(1));
     }
 
+    private static Task<ScreenOpenResult> OpenPassiveAsync(ScreenStreamHub hub, TestApp app, FakeWebSocket browser, int auditId = 0) =>
+        hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), auditId, new ScreenSocket(browser, ShortTimeout), hub.Epoch, new ScreenViewOwner(2, 1, "other"), "PC-01", isPassive: true);
+
+    [Fact]
+    public async Task OpenAsync_Passive_WhileAViewIsOpen_IsBusy_LeavesItAlone_AndEndsTheAuditRow()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (full, fullBrowser) = await OpenAsync(hub, app);
+        var auditId = await InsertAuditRowAsync(app);
+
+        var result = await OpenPassiveAsync(hub, app, new FakeWebSocket(), auditId);
+
+        Assert.Equal(ScreenOpenStatus.Busy, result.Status);
+        Assert.Null(result.Viewer);
+        Assert.Null(fullBrowser.CloseSent);
+        Assert.Same(full, hub.CurrentFor(1));
+        Assert.NotNull((await StoredAuditAsync(app, auditId)).EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task OpenAsync_Passive_WithNoView_Opens()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+
+        var result = await OpenPassiveAsync(hub, app, new FakeWebSocket());
+
+        Assert.Equal(ScreenOpenStatus.Opened, result.Status);
+        Assert.Same(result.Viewer, hub.CurrentFor(1));
+    }
+
+    [Fact]
+    public async Task OpenAsync_Passive_ReplacesAViewThatIsAlreadyClosing()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (full, _) = await OpenAsync(hub, app);
+        Assert.True(full.TryClose(out _, out _));
+
+        var result = await OpenPassiveAsync(hub, app, new FakeWebSocket());
+
+        Assert.Equal(ScreenOpenStatus.Opened, result.Status);
+    }
+
+    [Fact]
+    public async Task OpenAsync_PassiveAndFullRacing_NeverReplaceTheFullView()
+    {
+        using var app = new TestApp();
+        for (var round = 0; round < 50; round++)
+        {
+            var hub = NewHub(app);
+            var fullBrowser = new FakeWebSocket();
+            var full = hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), 0, new ScreenSocket(fullBrowser, ShortTimeout), hub.Epoch, new ScreenViewOwner(1, 1, "tester"), "PC-01");
+            var passive = OpenPassiveAsync(hub, app, new FakeWebSocket());
+
+            await Task.WhenAll(full, passive);
+
+            Assert.Same(await full, hub.CurrentFor(1));
+            Assert.Null(fullBrowser.CloseSent);
+        }
+    }
+
     [Fact]
     public async Task OpenAsync_UnderAnEpochThatMovedOn_IsRefused_AndEndsTheAuditRow()
     {

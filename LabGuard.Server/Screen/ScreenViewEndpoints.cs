@@ -41,6 +41,7 @@ public static class ScreenViewEndpoints
     private static async Task<IResult> LiveAsync(
         int id,
         string? mode,
+        string? passive,
         HttpContext http,
         AppDbContext db,
         TimeProvider clock,
@@ -70,6 +71,12 @@ public static class ScreenViewEndpoints
             return AuthEndpoints.BadRequest("Mode must be notified or anonymous.");
         }
 
+        // A passive view (a grid tile) never takes the place of a view that is already open.
+        if (ScreenProtocol.ParsePassive(passive) is not { } isPassive)
+        {
+            return AuthEndpoints.BadRequest("Passive must be 0 or 1.");
+        }
+
         var ct = http.RequestAborted;
         var now = clock.GetUtcNow();
         var pc = await db.Pcs
@@ -95,6 +102,12 @@ public static class ScreenViewEndpoints
             return AuthEndpoints.SignInRequired();
         }
 
+        // Checked before the audit row starts and before the upgrade. The hub checks again, atomically, in case one opens meanwhile.
+        if (isPassive && hub.CurrentFor(id) is { IsClosed: false })
+        {
+            return PcEndpoints.ConflictResponse(ScreenProtocol.BusyReason);
+        }
+
         var auditId = await audit.StartAsync(http.User.Identity?.Name ?? "", pc.Name, viewMode, now, ct);
         WebSocket socket;
         try
@@ -111,8 +124,14 @@ public static class ScreenViewEndpoints
         try
         {
             var owner = new ScreenViewOwner(adminId, sessionVersion, http.User.Identity?.Name ?? "");
-            var viewer = await hub.OpenAsync(id, viewMode, sessionDeadline, auditId, browser, epoch, owner, pc.Name);
-            if (viewer is null)
+            var opened = await hub.OpenAsync(id, viewMode, sessionDeadline, auditId, browser, epoch, owner, pc.Name, isPassive);
+            if (opened.Status == ScreenOpenStatus.Busy)
+            {
+                await browser.CloseAsync(ScreenProtocol.BusyCloseStatus, ScreenProtocol.BusyReason);
+                return Results.Empty;
+            }
+
+            if (opened.Viewer is not { } viewer)
             {
                 await browser.CloseAsync(ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
                 return Results.Empty;
