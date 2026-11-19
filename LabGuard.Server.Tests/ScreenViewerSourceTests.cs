@@ -32,6 +32,60 @@ public class ScreenViewerSourceTests
     }
 
     [Fact]
+    public void TryTakeCursorSlot_OnlyForThePcThatCarriesControl_WhileOn()
+    {
+        var (viewer, pc) = LiveViewer();
+
+        Assert.False(viewer.TryTakeCursorSlot(pc, Now));
+        viewer.TryBeginControlRequest();
+        Assert.False(viewer.TryTakeCursorSlot(pc, Now));
+        Assert.True(viewer.TryConfirmControl(pc, 5));
+        Assert.True(viewer.TryTakeCursorSlot(pc, Now));
+        Assert.False(viewer.TryTakeCursorSlot(NewSocket(), Now));
+    }
+
+    [Fact]
+    public void TryTakeCursorSlot_FromThePausedPc_WhileTheHelperCarriesControl_IsRefused()
+    {
+        var (viewer, pc) = LiveViewer();
+        var helper = NewSocket();
+        TurnControlOn(viewer);
+        viewer.TrySetPcPaused(pc, isPaused: true);
+        viewer.TrySwitchSource(helper);
+
+        Assert.False(viewer.TryTakeCursorSlot(pc, Now));
+        Assert.False(viewer.TryTakeCursorSlot(helper, Now));
+    }
+
+    [Fact]
+    public void TrySwitchSource_ToTheHelper_ResetsTheCursorOnlyOnceOneWasShown()
+    {
+        var (viewer, pc) = LiveViewer();
+        var helper = NewSocket();
+        TurnControlOn(viewer);
+        viewer.TrySetPcPaused(pc, isPaused: true);
+        Assert.False(viewer.TrySwitchSource(helper)!.Value.ResetCursor);
+        viewer.TrySetPcPaused(pc, isPaused: false);
+        viewer.TrySwitchSource(helper);
+        Assert.True(viewer.TryTakeCursorSlot(pc, Now));
+        viewer.TrySetPcPaused(pc, isPaused: true);
+
+        Assert.True(viewer.TrySwitchSource(helper)!.Value.ResetCursor);
+    }
+
+    [Fact]
+    public void TryEndControl_ResetsTheCursorOnlyOnceOneWasShown()
+    {
+        var (viewer, pc) = LiveViewer();
+        TurnControlOn(viewer);
+        Assert.False(viewer.TryEndControl()!.Value.ResetCursor);
+        TurnControlOn(viewer);
+        viewer.TryTakeCursorSlot(pc, Now);
+
+        Assert.True(viewer.TryEndControl()!.Value.ResetCursor);
+    }
+
+    [Fact]
     public void TrySwitchSource_AfterAttach_ReportsLiveOnce()
     {
         var viewer = NewViewer();

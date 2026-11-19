@@ -343,6 +343,55 @@ public class ScreenControlEndpointTests
         await FinishAsync(app, view);
     }
 
+    // The PC's pointer shape
+
+    [Fact]
+    public async Task PcCursor_WhileOn_ReachesTheBrowserInItsCanonicalForm_AndControlOffResetsIt()
+    {
+        using var app = new TestApp();
+        var view = await OpenViewAsync(app);
+        using var pc = await ConnectPcAsync(app, view);
+        await ControlOnAsync(view, pc);
+        var png = Convert.ToBase64String(PcCursorMessageTests.Png(32, 32));
+
+        await LiveViewClient.SendTextAsync(pc, $"{{\"png\":\"{png}\",\"y\":2,\"x\":1,\"k\":\"image\",\"t\":\"cursor\"}}");
+        Assert.Equal($"{{\"cursor\":\"image\",\"x\":1,\"y\":2,\"png\":\"{png}\"}}", await TextAsync(view.Browser));
+        await LiveViewClient.SendTextAsync(view.Browser, BrowserOff);
+
+        Assert.Equal("{\"cursor\":\"default\"}", await TextAsync(view.Browser));
+        Assert.Equal(OffMessage("stopped"), await TextAsync(view.Browser));
+        await FinishAsync(app, view);
+    }
+
+    [Fact]
+    public async Task PcCursor_ThatBreaksARule_IsDropped_AndThePcStaysConnected()
+    {
+        using var app = new TestApp();
+        var view = await OpenViewAsync(app);
+        using var pc = await ConnectPcAsync(app, view);
+        await ControlOnAsync(view, pc);
+
+        await LiveViewClient.SendTextAsync(pc, "{\"t\":\"cursor\",\"k\":\"grab\"}");
+        await LiveViewClient.SendTextAsync(pc, "{\"t\":\"cursor\",\"k\":\"text\"}");
+
+        Assert.Equal("{\"cursor\":\"text\"}", await TextAsync(view.Browser));
+        await FinishAsync(app, view);
+    }
+
+    [Fact]
+    public async Task PcCursor_BeforeControl_IsDropped()
+    {
+        using var app = new TestApp();
+        var view = await OpenViewAsync(app);
+        using var pc = await ConnectPcAsync(app, view);
+
+        await LiveViewClient.SendTextAsync(pc, "{\"t\":\"cursor\",\"k\":\"text\"}");
+        await LiveViewClient.SendAsync(pc, LiveViewClient.Frame("after"));
+
+        Assert.Equal("after", LiveViewClient.LabelOf((await LiveViewClient.ReceiveAsync(view.Browser)).Payload, 5));
+        await FinishAsync(app, view);
+    }
+
     // Ending control
 
     [Fact]

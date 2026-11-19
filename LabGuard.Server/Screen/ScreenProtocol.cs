@@ -28,13 +28,15 @@ public static class ScreenProtocol
     // frames unacknowledged. Never more than this.
     public const int MaxFramesInFlightAcrossSwitch = 2 * MaxFramesInFlight;
 
-    // Per message type. A PC frame is at most 2 MiB, and the PC sends nothing as text but "paused" or "resumed".
+    // Per message type. A PC frame is at most 2 MiB. The PC's short texts ("paused", "resumed", control) fit in 16 bytes, and a
+    // longer text must be a cursor message, up to its own cap. The helper sends no cursor, so it keeps the short-text limit.
     public const int MaxPcBinaryBytes = 2 * 1024 * 1024;
     public const int MaxPcTextBytes = 16;
     // The browser sends "ack" and control messages. The largest is a text chunk of 64 units as JSON.stringify writes it, at most
     // 211 bytes, so anything larger is not a legitimate message.
     public const int MaxBrowserMessageBytes = 256;
-    public static readonly MessageLimits PcLimits = new(MaxPcTextBytes, MaxPcBinaryBytes);
+    public static readonly MessageLimits PcLimits = new(PcCursorMessage.MaxMessageBytes, MaxPcBinaryBytes);
+    public static readonly MessageLimits HelperLimits = new(MaxPcTextBytes, MaxPcBinaryBytes);
     public static readonly MessageLimits BrowserLimits = new(MaxBrowserMessageBytes, MaxBrowserMessageBytes);
 
     // Frame size limits. Checked from the JPEG header before a frame is relayed.
@@ -66,6 +68,8 @@ public static class ScreenProtocol
     public const int MaxTextPerSecond = 40;
     // The keys and buttons the server has relayed as held at once. A press beyond this is dropped.
     public const int MaxHeldInputs = 256;
+    // The PC's pointer shapes relayed to one viewer per second. More are dropped, since the PC resends on its next change.
+    public const int MaxCursorsPerSecond = 20;
     // A viewer may ask for control this often. Requests beyond it are ignored.
     public const int ControlRequestsPerSecond = 1;
     // Input that doesn't reach the PC within this time is dropped, and the PC connection is then aborted.
@@ -139,11 +143,32 @@ public static class ScreenProtocol
         return PcMessageKind.Ignored;
     }
 
+    // Reads a PC message. A text over the short-text limit is a cursor message: relayed when valid, dropped when it breaks a rule.
+    // Any other text that long is too large, as it always was.
+    public static PcMessage ReadPcMessage(WebSocketMessageType type, ReadOnlySpan<byte> payload)
+    {
+        if (type != WebSocketMessageType.Text || payload.Length <= MaxPcTextBytes)
+        {
+            return new PcMessage(ClassifyPcMessage(type, payload));
+        }
+
+        var cursor = PcCursorMessage.Parse(payload);
+        return cursor.Status switch
+        {
+            PcCursorStatus.Valid => new PcMessage(PcMessageKind.Cursor, cursor.BrowserMessage),
+            PcCursorStatus.Invalid => new PcMessage(PcMessageKind.Ignored),
+            _ => new PcMessage(PcMessageKind.TooLarge),
+        };
+    }
+
     public static bool IsBrowserAck(WebSocketMessageType type, ReadOnlySpan<byte> payload) =>
         type == WebSocketMessageType.Text && payload.SequenceEqual("ack"u8);
 }
 
 public readonly record struct MessageLimits(int Text, int Binary);
+
+// A PC message's kind, and for a valid cursor message the canonical message for the browser.
+public readonly record struct PcMessage(PcMessageKind Kind, byte[]? BrowserCursor = null);
 
 public enum PcMessageKind
 {
@@ -153,4 +178,7 @@ public enum PcMessageKind
     Resumed,
     ControlOn,
     ControlOff,
+    Cursor,
+    // A text over the short-text limit that is not a cursor message. The PC is closed with 1009, as for any message over its limit.
+    TooLarge,
 }

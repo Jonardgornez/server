@@ -192,9 +192,15 @@ public sealed partial class ScreenStreamHub
                 viewer.InputGate.Release();
             }
 
+            if (change.ResetCursor)
+            {
+                await SendControlMessageAsync(viewer, PcCursorMessage.BrowserDefaultMessage);
+            }
+
             ended = change.EndedControl;
             if (ended is not null)
             {
+                await SendCursorResetAsync(viewer, ended);
                 await SendControlMessageAsync(viewer, ScreenControlMessages.OffMessage(ControlReasons.Connection));
                 await SendPcControlOffAsync(ended);
             }

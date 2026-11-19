@@ -337,6 +337,30 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
         }
     }
 
+    // The PC's pointer shape, already in the browser's canonical form. Relayed only while control is on and carried by this PC
+    // socket, within the cursor cap. Sent under the state gate, so it can't arrive after the default sent when control ends.
+    public async Task RelayCursorAsync(ScreenViewer viewer, ScreenSocket pc, ReadOnlyMemory<byte> browserCursor)
+    {
+        // A cheap first look, so a PC sending cursors while control is off never waits on the gate. The full check is under it.
+        if (viewer.ControlState != ScreenControlState.On)
+        {
+            return;
+        }
+
+        await viewer.StateGate.WaitAsync();
+        try
+        {
+            if (viewer.TryTakeCursorSlot(pc, clock.GetUtcNow()))
+            {
+                await SendControlMessageAsync(viewer, browserCursor);
+            }
+        }
+        finally
+        {
+            viewer.StateGate.Release();
+        }
+    }
+
     // Closes the view and its sockets with the same code, then ends the audit rows. Only the first call does anything.
     // The sockets close first, so the administrator sees the close without waiting for the database. A helper that was streaming
     // is told to stop, and stays connected for the next view.
@@ -410,6 +434,7 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
                 return;
             }
 
+            await SendCursorResetAsync(viewer, ended);
             await SendControlMessageAsync(viewer, ScreenControlMessages.OffMessage(reason));
             await SendPcControlOffAsync(ended);
         }
@@ -430,6 +455,15 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
         if (!await viewer.Browser.SendAsync(message, WebSocketMessageType.Text))
         {
             await CloseStalledAsync(viewer);
+        }
+    }
+
+    // Called with the state gate held. The default pointer goes out before control off, while the browser still shows control.
+    private async Task SendCursorResetAsync(ScreenViewer viewer, ControlPeriodEnd? ended)
+    {
+        if (ended is { ResetCursor: true })
+        {
+            await SendControlMessageAsync(viewer, PcCursorMessage.BrowserDefaultMessage);
         }
     }
 
