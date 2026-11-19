@@ -6,6 +6,7 @@ using LabGuard.Server.Network;
 using LabGuard.Server.Requests;
 using LabGuard.Server.Screen;
 using LabGuard.Server.Sessions;
+using LabGuard.Server.SharedFiles;
 using LabGuard.Server.Wallpapers;
 using Microsoft.EntityFrameworkCore;
 
@@ -168,7 +169,13 @@ public static partial class PcEndpoints
     private static PcSessionSummary ToSummary(PcSession session, DateTimeOffset now) =>
         new(session.IsAdminUnlock ? null : session.Username, session.StartedAtUtc, SessionLifecycle.ToTime(session.DefaultTimeMinutes), SessionLifecycle.SecondsRemaining(session, now));
 
-    private static async Task<IResult> DeleteAsync(int id, AppDbContext db, TimeProvider clock, ScreenStreamHub screens, CancellationToken cancellationToken)
+    private static async Task<IResult> DeleteAsync(
+        int id,
+        AppDbContext db,
+        TimeProvider clock,
+        ScreenStreamHub screens,
+        FileTransferProgress fileTransferProgress,
+        CancellationToken cancellationToken)
     {
         // Deletes only while the PC is offline, in one statement, so a heartbeat arriving
         // between a check and the delete can't get an online PC removed.
@@ -183,6 +190,8 @@ public static partial class PcEndpoints
             .Where(p => p.Id == id)
             .Select(p => p.WallpaperId)
             .FirstOrDefaultAsync(cancellationToken);
+        // Also read before: the transfers go with the PC, and their progress is forgotten once they are gone.
+        var transferIds = await db.PcFileTransfers.Where(t => t.PcId == id).Select(t => t.Id).ToListAsync(cancellationToken);
         var deleted = await db.Pcs
             .Where(p => p.Id == id && (p.LastSeenUtc <= offlineSince || p.LastSeenUtc > now))
             .ExecuteDeleteAsync(cancellationToken);
@@ -191,9 +200,11 @@ public static partial class PcEndpoints
             await SessionLifecycle.EndForPcAsync(db, id, SessionLifecycle.PcRemoved, now, cancellationToken);
             await LoginRequestLifecycle.CancelPendingForPcAsync(db, id, LoginRequestLifecycle.PcRemoved, now, cancellationToken);
             await WallpaperCleanup.RemoveUnusedAsync(db, wallpaperId is { } removedWallpaperId ? [removedWallpaperId] : [], cancellationToken);
-            // The files sent to the PC go with it. Their shared files are removed by the cleanup once nothing else needs them.
+            // The files sent to the PC go with it, with their progress. Their shared files are removed by the cleanup once
+            // nothing else needs them.
             await db.PcFileTransfers.Where(t => t.PcId == id).ExecuteDeleteAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
+            fileTransferProgress.Clear(transferIds);
             // The token went with the PC, so its secure-desktop helper is closed at once.
             await screens.CloseHelperForPcAsync(id, ScreenProtocol.PcOfflineCloseStatus, "The PC was removed.");
             return Results.NoContent();

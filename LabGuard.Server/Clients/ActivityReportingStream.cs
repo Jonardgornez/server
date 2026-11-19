@@ -3,19 +3,25 @@ namespace LabGuard.Server.Clients;
 // Wraps a file being sent to a PC and reports activity at most once per interval while it is read, so a long download keeps
 // its transfer alive. A report that fails is logged and never breaks the download, but one that finds the transfer no longer
 // in progress (cancelled or failed) stops it. Seeking passes through, so range requests work.
+// After each read it also records how far into the file the download has got, at most once per ProgressInterval and always on
+// the last read. The position is the stream's own, so a range request counts from where it started. A failed record is ignored.
 internal sealed class ActivityReportingStream(
     Stream inner,
     TimeProvider clock,
     TimeSpan interval,
     Func<Task<bool>> reportActivity,
+    Action<long> recordPosition,
     ILogger logger) : Stream
 {
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromMinutes(1);
+    public static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(500);
 
     // The download start has just reported, so the first report while streaming is one interval later.
     private DateTimeOffset _lastReport = clock.GetUtcNow();
     // Set once a report finds the transfer no longer in progress. Every read after that fails too.
     private bool _isStopped;
+    // Null until the first read, so the first position is recorded at once.
+    private DateTimeOffset? _lastRecord;
 
     public override bool CanRead => inner.CanRead;
     public override bool CanSeek => inner.CanSeek;
@@ -30,7 +36,9 @@ internal sealed class ActivityReportingStream(
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
         await ReportIfDueAsync();
-        return await inner.ReadAsync(buffer, cancellationToken);
+        var read = await inner.ReadAsync(buffer, cancellationToken);
+        RecordPositionIfDue(isLastRead: read == 0 && buffer.Length > 0);
+        return read;
     }
 
     public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
@@ -98,6 +106,27 @@ internal sealed class ActivityReportingStream(
         {
             _isStopped = true;
             throw NoLongerTransferred();
+        }
+    }
+
+    private void RecordPositionIfDue(bool isLastRead)
+    {
+        try
+        {
+            var position = inner.Position;
+            var now = clock.GetUtcNow();
+            var isLast = isLastRead || position >= inner.Length;
+            if (!isLast && _lastRecord is { } last && now - last < ProgressInterval)
+            {
+                return;
+            }
+
+            _lastRecord = now;
+            recordPosition(position);
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning("Couldn't record download progress on a sent file: {ExceptionType}.", exception.GetType().Name);
         }
     }
 

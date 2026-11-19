@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using LabGuard.Server.Pcs;
+using LabGuard.Server.SharedFiles;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using static LabGuard.Server.Tests.PcShutdownEndpointTests;
 using static LabGuard.Server.Tests.SharedFileTestSupport;
 
@@ -75,6 +77,7 @@ public class PcFileTransferEndpointTests
             Assert.True(transfer.TryGetProperty("updatedUtc", out _));
             Assert.Equal(System.Text.Json.JsonValueKind.Null, transfer.GetProperty("busyWith").ValueKind);
             Assert.Equal(System.Text.Json.JsonValueKind.Null, transfer.GetProperty("pcClientVersion").ValueKind);
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, transfer.GetProperty("bytesSent").ValueKind);
         }
 
         // The first PC is online but has reported no client version; the second has been offline for an hour.
@@ -582,6 +585,102 @@ public class PcFileTransferEndpointTests
         Assert.Equal("waiting", (await StoredTransferAsync(app, id)).Status);
     }
 
+    [Fact]
+    public async Task Cancel_ForgetsTheProgressOfTheCancelledTransfer()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, "downloading");
+        var progress = ProgressOf(app);
+        progress.Record(id, 2);
+
+        await CancelAsync(admin, id);
+
+        Assert.Null(progress.BytesSent(id));
+    }
+
+    // Progress
+
+    private static FileTransferProgress ProgressOf(TestApp app) => app.Services.GetRequiredService<FileTransferProgress>();
+
+    [Theory]
+    [InlineData("downloading")]
+    [InlineData("applying")]
+    public async Task Transfers_InProgress_ShowsTheBytesSent(string status)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, status);
+        ProgressOf(app).Record(id, 2);
+
+        var transfer = await TransferAsync(admin, id);
+
+        Assert.Equal(2, transfer.GetProperty("bytesSent").GetInt64());
+    }
+
+    [Theory]
+    [InlineData("waiting")]
+    [InlineData("exists")]
+    [InlineData("saved")]
+    [InlineData("skipped")]
+    [InlineData("failed")]
+    [InlineData("cancelled")]
+    public async Task Transfers_NotInProgress_HasNoBytesSent(string status)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, status);
+        ProgressOf(app).Record(id, 2);
+
+        var transfer = await TransferAsync(admin, id);
+
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, transfer.GetProperty("bytesSent").ValueKind);
+    }
+
+    [Fact]
+    public async Task Transfers_InProgressWithNoDownloadSeen_HasNoBytesSent()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, "downloading");
+
+        var transfer = await TransferAsync(admin, id);
+
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, transfer.GetProperty("bytesSent").ValueKind);
+    }
+
+    [Fact]
+    public async Task Transfers_BytesSent_NeverExceedsTheFileSize()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, "downloading");
+        ProgressOf(app).Record(id, 1000);
+
+        var transfer = await TransferAsync(admin, id);
+
+        Assert.Equal(transfer.GetProperty("sizeBytes").GetInt64(), transfer.GetProperty("bytesSent").GetInt64());
+    }
+
+    [Fact]
+    public async Task Decision_ReturnsBytesSent_ForATransferStillApplying()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, "applying", decision: "overwrite");
+        ProgressOf(app).Record(id, 1);
+
+        var transfer = (await TransfersOfAsync(await DecideAsync(admin, "skip", id))).Single();
+
+        Assert.Equal(1, transfer.GetProperty("bytesSent").GetInt64());
+    }
+
     private static async Task<System.Text.Json.JsonElement> TransferAsync(HttpClient admin, long id) =>
         (await TransfersOfAsync(await admin.GetAsync($"{TransfersRoute}?ids={id}"))).Single();
 
@@ -602,5 +701,24 @@ public class PcFileTransferEndpointTests
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         Assert.False(await TransferExistsAsync(app, removedTransfer));
         Assert.True(await TransferExistsAsync(app, keptTransfer));
+    }
+
+    [Fact]
+    public async Task DeletingAPc_ForgetsTheProgressOfItsTransfers_Only()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var removed = await AddPcAsync(app, "PC-01", seenAgo: TimeSpan.FromMinutes(5));
+        var kept = await AddPcAsync(app, "PC-02");
+        var removedTransfer = await SeedTransferAsync(app, removed.Id, "downloading");
+        var keptTransfer = await SeedTransferAsync(app, kept.Id, "downloading");
+        var progress = ProgressOf(app);
+        progress.Record(removedTransfer, 1);
+        progress.Record(keptTransfer, 2);
+
+        await admin.DeleteAsync($"/api/pcs/{removed.Id}");
+
+        Assert.Null(progress.BytesSent(removedTransfer));
+        Assert.Equal(2, progress.BytesSent(keptTransfer));
     }
 }

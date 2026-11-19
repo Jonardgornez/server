@@ -29,6 +29,7 @@ public static class SharedFileEndpoints
     public static IServiceCollection AddSharedFiles(this IServiceCollection services)
     {
         services.AddSingleton<IDiskSpace, DriveDiskSpace>();
+        services.AddSingleton<FileTransferProgress>();
         services.AddSingleton(sp => new SharedFileStorage(
             SharedFileStorage.ResolveFolder(sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IHostEnvironment>()),
             sp.GetRequiredService<IDiskSpace>(),

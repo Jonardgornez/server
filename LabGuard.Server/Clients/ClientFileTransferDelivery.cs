@@ -44,8 +44,10 @@ public static partial class ClientEndpoints
     // two transfers at once. A transfer abandoned after its last hand-over fails first, so the next one can go out.
     // Only a client that reports a version new enough to receive sent files gets them. One that reports an older version
     // ignores them, so the transfers it was handed fail. A heartbeat without a readable version hands out and fails nothing.
+    // A transfer handed over starts its download again, so the progress recorded for it starts again too.
     private static async Task<FileTransferDelivery[]> HandOverFileTransfersAsync(
         AppDbContext db,
+        FileTransferProgress progress,
         int pcId,
         ReleaseVersion? clientVersion,
         DateTimeOffset now,
@@ -111,6 +113,7 @@ public static partial class ClientEndpoints
             return [];
         }
 
+        progress.Clear(candidate.Id);
         return
         [
             new FileTransferDelivery(
@@ -150,6 +153,7 @@ public static partial class ClientEndpoints
         HttpContext http,
         AppDbContext db,
         SharedFileStorage storage,
+        FileTransferProgress progress,
         TimeProvider clock,
         ILogger<ActivityReportingStream> logger)
     {
@@ -199,12 +203,14 @@ public static partial class ClientEndpoints
         }
 
         // While the bytes stream, the transfer's activity is refreshed about once a minute, so a long download is never
-        // taken for a stopped PC. The refresh runs on this request's own database context.
+        // taken for a stopped PC. The refresh runs on this request's own database context. How far the PC has got is recorded
+        // for the administrator as the bytes are read.
         var reporting = new ActivityReportingStream(
             stream,
             clock,
             ActivityReportingStream.DefaultInterval,
             () => RefreshTransferActivityAsync(db, transferId, pcId, clock.GetUtcNow(), ct),
+            position => progress.Record(transferId, position),
             logger);
 
         // Nothing may sniff or cache the file: the PC saves it as it is and never runs it.
@@ -214,8 +220,14 @@ public static partial class ClientEndpoints
     }
 
     // Records the PC's report. The move happens in one update that matches the statuses it may come from, so a report that
-    // races another change, or comes twice, is refused with 409 instead of overwriting it.
-    private static async Task<IResult> ReportFileTransferAsync(long transferId, HttpContext http, AppDbContext db, TimeProvider clock)
+    // races another change, or comes twice, is refused with 409 instead of overwriting it. A recorded report ends the download,
+    // so its progress is forgotten.
+    private static async Task<IResult> ReportFileTransferAsync(
+        long transferId,
+        HttpContext http,
+        AppDbContext db,
+        FileTransferProgress progress,
+        TimeProvider clock)
     {
         if (ReadBearerToken(http.Request) is not { } token)
         {
@@ -269,9 +281,13 @@ public static partial class ClientEndpoints
                 .SetProperty(t => t.SavedAs, savedAs)
                 .SetProperty(t => t.Error, error)
                 .SetProperty(t => t.UpdatedUtc, now), ct);
-        return changed > 0
-            ? Results.NoContent()
-            : Results.Json(new ErrorResponse(TransferConflictMessage), statusCode: StatusCodes.Status409Conflict);
+        if (changed == 0)
+        {
+            return Results.Json(new ErrorResponse(TransferConflictMessage), statusCode: StatusCodes.Status409Conflict);
+        }
+
+        progress.Clear(transferId);
+        return Results.NoContent();
     }
 
     private static IResult TransferNotFound() =>

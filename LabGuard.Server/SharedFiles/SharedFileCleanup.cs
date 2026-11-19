@@ -4,14 +4,21 @@ using Microsoft.EntityFrameworkCore;
 namespace LabGuard.Server.SharedFiles;
 
 // Applies the lifetimes of sent files: a transfer never handed over expires, one a PC stopped working on fails, old transfers
-// are removed, and a shared file no transfer still needs loses its bytes. Runs at startup and then every few minutes.
+// are removed, and a shared file no transfer still needs loses its bytes. Download progress is kept only for transfers still
+// being downloaded or applied. Runs at startup and then every few minutes.
 public static class SharedFileCleanup
 {
-    public static async Task RunAsync(AppDbContext db, SharedFileStorage storage, DateTimeOffset now, CancellationToken ct)
+    public static async Task RunAsync(
+        AppDbContext db,
+        SharedFileStorage storage,
+        FileTransferProgress progress,
+        DateTimeOffset now,
+        CancellationToken ct)
     {
         await ExpireWaitingAsync(db, now, ct);
         await FailStuckAsync(db, now, ct);
         await DeleteOldTransfersAsync(db, now, ct);
+        await PruneProgressAsync(db, progress, ct);
         await RemoveUnusedFilesAsync(db, storage, now, ct);
         await RemoveOrphanFilesAsync(db, storage, now, ct);
         storage.SweepStaleTemps(now);
@@ -40,6 +47,28 @@ public static class SharedFileCleanup
                 .SetProperty(t => t.Status, SharedFileRules.Failed)
                 .SetProperty(t => t.Error, SharedFileRules.StoppedRespondingError)
                 .SetProperty(t => t.UpdatedUtc, now), ct);
+    }
+
+    // Forgets the progress of every transfer that is no longer downloading or applying, or no longer exists: one that failed,
+    // expired, finished or was removed. Returns how many were forgotten.
+    public static async Task<int> PruneProgressAsync(AppDbContext db, FileTransferProgress progress, CancellationToken ct)
+    {
+        var tracked = progress.TransferIds();
+        if (tracked.Length == 0)
+        {
+            return 0;
+        }
+
+        var inProgress = (await db.PcFileTransfers
+            .AsNoTracking()
+            .Where(t => tracked.Contains(t.Id)
+                && (t.Status == SharedFileRules.Downloading || t.Status == SharedFileRules.Applying))
+            .Select(t => t.Id)
+            .ToListAsync(ct))
+            .ToHashSet();
+        var finished = tracked.Where(id => !inProgress.Contains(id)).ToArray();
+        progress.Clear(finished);
+        return finished.Length;
     }
 
     public static Task<int> DeleteOldTransfersAsync(AppDbContext db, DateTimeOffset now, CancellationToken ct)
@@ -106,6 +135,7 @@ public static class SharedFileCleanup
 public sealed class SharedFileCleanupService(
     IServiceScopeFactory scopes,
     SharedFileStorage storage,
+    FileTransferProgress progress,
     TimeProvider clock,
     ILogger<SharedFileCleanupService> logger) : BackgroundService
 {
@@ -121,7 +151,7 @@ public sealed class SharedFileCleanupService(
             {
                 await using var scope = scopes.CreateAsyncScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                await SharedFileCleanup.RunAsync(db, storage, clock.GetUtcNow(), stoppingToken);
+                await SharedFileCleanup.RunAsync(db, storage, progress, clock.GetUtcNow(), stoppingToken);
             }
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
             {
