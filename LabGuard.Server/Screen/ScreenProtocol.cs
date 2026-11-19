@@ -10,11 +10,13 @@ public static class ScreenProtocol
     public const string AnonymousMode = "anonymous";
 
     // Custom close codes. 4001: a newer viewer or PC connection took this one's place. 4002: the PC went offline or was removed.
-    // 4003: the administrator's session ended.
+    // 4003: the administrator's session ended. 4005: a passive view found someone else viewing the PC, so it left that view alone.
     public const WebSocketCloseStatus ReplacedCloseStatus = (WebSocketCloseStatus)4001;
     public const WebSocketCloseStatus PcOfflineCloseStatus = (WebSocketCloseStatus)4002;
     public const WebSocketCloseStatus SessionEndedCloseStatus = (WebSocketCloseStatus)4003;
     public const string SessionEndedReason = "The administrator session ended.";
+    public const WebSocketCloseStatus BusyCloseStatus = (WebSocketCloseStatus)4005;
+    public const string BusyReason = "Someone else is viewing this PC.";
 
     public const string WaitingState = "waiting";
     public const string LiveState = "live";
@@ -91,6 +93,14 @@ public static class ScreenProtocol
         null => NotifiedMode,
         NotifiedMode => NotifiedMode,
         AnonymousMode => AnonymousMode,
+        _ => null,
+    };
+
+    // Null when the value isn't one the view accepts. Missing means not passive.
+    public static bool? ParsePassive(string? text) => text switch
+    {
+        null or "0" => false,
+        "1" => true,
         _ => null,
     };
 

@@ -332,6 +332,62 @@ public class ScreenViewEndpointTests
     }
 
     [Fact]
+    public async Task Live_Passive_WhileAnotherViewIsOpen_IsRefused409_WithoutAnAuditRow()
+    {
+        using var app = new TestApp();
+        var (id, _) = await LiveViewClient.AddPcAsync(app);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        using var full = await OpenViewAsync(app, id, cookie);
+
+        var status = await LiveViewClient.RefusedStatusAsync(() => LiveViewClient.OpenAdminAsync(app, id, cookie, "?passive=1"));
+
+        Assert.Equal(409, status);
+        var row = Assert.Single(await AuditRowsAsync(app));
+        Assert.Null(row.EndedAtUtc);
+        Assert.Equal(WebSocketState.Open, full.State);
+    }
+
+    [Fact]
+    public async Task Live_Passive_WithNoOtherView_Opens()
+    {
+        using var app = new TestApp();
+        var (id, _) = await LiveViewClient.AddPcAsync(app);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+
+        using var socket = await OpenViewAsync(app, id, cookie, "?mode=anonymous&passive=1");
+
+        Assert.Equal(WebSocketState.Open, socket.State);
+    }
+
+    [Fact]
+    public async Task Live_AFullView_StillReplacesAPassiveOneWith4001()
+    {
+        using var app = new TestApp();
+        var (id, _) = await LiveViewClient.AddPcAsync(app);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        using var passive = await OpenViewAsync(app, id, cookie, "?passive=1");
+
+        using var full = await OpenViewAsync(app, id, cookie);
+
+        await AssertCloseAsync(passive, (WebSocketCloseStatus)4001, "Replaced by another viewer.");
+    }
+
+    [Theory]
+    [InlineData("?passive=true")]
+    [InlineData("?passive=")]
+    [InlineData("?passive=2")]
+    public async Task Live_WithAnInvalidPassive_IsRefused400(string query)
+    {
+        using var app = new TestApp();
+        var (id, _) = await LiveViewClient.AddPcAsync(app);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+
+        var status = await LiveViewClient.RefusedStatusAsync(() => LiveViewClient.OpenAdminAsync(app, id, cookie, query));
+
+        Assert.Equal(400, status);
+    }
+
+    [Fact]
     public async Task Live_PcGoesOffline_ClosesTheViewAndThePcSocketWith4002()
     {
         using var app = new TestApp();
