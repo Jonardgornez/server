@@ -5,6 +5,8 @@ using System.Text;
 using System.Text.Json;
 using LabGuard.Server.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace LabGuard.Server.Tests;
 
@@ -96,7 +98,7 @@ public class SettingsEndpointTests
         Assert.Equal(60, body.GetProperty("defaultApproval").GetProperty("minutes").GetInt32());
         Assert.True(body.GetProperty("notice").GetProperty("isEnabled").GetBoolean());
         Assert.Equal(DefaultNotice, body.GetProperty("notice").GetProperty("text").GetString());
-        Assert.Equal(30, body.GetProperty("idleTimeoutMinutes").GetInt32());
+        Assert.Equal(0, body.GetProperty("idleTimeoutMinutes").GetInt32());
         Assert.Equal("notified", body.GetProperty("defaultViewMode").GetString());
         Assert.Equal(30, body.GetProperty("powerCountdownSeconds").GetInt32());
         Assert.Equal(DefaultLockMessage, body.GetProperty("lockMessage").GetString());
@@ -223,8 +225,95 @@ public class SettingsEndpointTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.False(string.IsNullOrEmpty((await JsonOf(response)).GetProperty("error").GetString()));
         var read = await JsonOf(await GetSettingsAsync(admin));
-        Assert.Equal(30, read.GetProperty("idleTimeoutMinutes").GetInt32());
+        Assert.Equal(0, read.GetProperty("idleTimeoutMinutes").GetInt32());
         Assert.Equal(DefaultNotice, read.GetProperty("notice").GetProperty("text").GetString());
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(5.0)]
+    [InlineData(480.0)]
+    public async Task Put_AcceptsNeverAndTheIdleTimeoutBoundaries_AndGetReturnsThem(double idleMinutes)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        Assert.Equal(HttpStatusCode.OK, (await PutSettingsAsync(admin, Payload(idleTimeoutMinutes: 30))).StatusCode);
+
+        var response = await PutSettingsAsync(admin, Payload(idleTimeoutMinutes: idleMinutes));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal((int)idleMinutes, (await JsonOf(response)).GetProperty("idleTimeoutMinutes").GetInt32());
+        Assert.Equal((int)idleMinutes, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("idleTimeoutMinutes").GetInt32());
+    }
+
+    [Theory]
+    [InlineData(1.0)]
+    [InlineData(2.0)]
+    [InlineData(3.0)]
+    [InlineData(4.0)]
+    [InlineData(481.0)]
+    [InlineData(-1.0)]
+    [InlineData(0.5)]
+    public async Task Put_WithAnIdleTimeoutOutsideNeverOr5To480_Returns400WithTheLimits_AndChangesNothing(double idleMinutes)
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        Assert.Equal(HttpStatusCode.OK, (await PutSettingsAsync(admin, Payload(idleTimeoutMinutes: 30))).StatusCode);
+
+        var response = await PutSettingsAsync(admin, Payload(idleTimeoutMinutes: idleMinutes));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(
+            "Idle timeout must be 0 (never) or a whole number of minutes from 5 to 480.",
+            (await JsonOf(response)).GetProperty("error").GetString());
+        Assert.Equal(30, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("idleTimeoutMinutes").GetInt32());
+    }
+
+    [Fact]
+    public async Task Migration_AdminSessionNeverExpires_IsAppliedAndNewRowsDefaultToNever()
+    {
+        using var app = new TestApp();
+
+        var (applied, pending, columnDefault) = await app.WithDbAsync(async db => (
+            await db.Database.GetAppliedMigrationsAsync(),
+            await db.Database.GetPendingMigrationsAsync(),
+            await db.Database.SqlQueryRaw<string>("SELECT dflt_value AS \"Value\" FROM pragma_table_info('ServerSettings') WHERE name = 'IdleTimeoutMinutes'").SingleAsync()));
+
+        Assert.Contains(applied, id => id.EndsWith("_AdminSessionNeverExpires", StringComparison.Ordinal));
+        Assert.Empty(pending);
+        Assert.Equal("0", columnDefault);
+    }
+
+    [Fact]
+    public async Task Migration_AdminSessionNeverExpires_SwitchesAnExistingInstallToNever_AndBackTo30WhenReverted()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        Assert.Equal(0, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("idleTimeoutMinutes").GetInt32());
+
+        var (reverted, migrated, revertedAgain, migratedAgain) = await app.WithDbAsync(async db =>
+        {
+            var migrations = db.Database.GetMigrations().ToList();
+            var neverExpires = migrations.FindIndex(id => id.EndsWith("_AdminSessionNeverExpires", StringComparison.Ordinal));
+            var migrator = db.GetService<IMigrator>();
+            var idleMinutes = () => db.ServerSettingsRows.AsNoTracking().Select(s => s.IdleTimeoutMinutes).SingleAsync();
+
+            await migrator.MigrateAsync(migrations[neverExpires - 1]);
+            var afterDown = await idleMinutes();
+            await migrator.MigrateAsync();
+            var afterUp = await idleMinutes();
+
+            await db.ServerSettingsRows.ExecuteUpdateAsync(s => s.SetProperty(row => row.IdleTimeoutMinutes, 240));
+            await migrator.MigrateAsync(migrations[neverExpires - 1]);
+            var keptOnDown = await idleMinutes();
+            await migrator.MigrateAsync();
+            return (afterDown, afterUp, keptOnDown, await idleMinutes());
+        });
+
+        Assert.Equal(30, reverted);
+        Assert.Equal(0, migrated);
+        Assert.Equal(240, revertedAgain);
+        Assert.Equal(0, migratedAgain);
     }
 
     [Theory]
@@ -300,7 +389,7 @@ public class SettingsEndpointTests
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.False(string.IsNullOrEmpty((await JsonOf(response)).GetProperty("error").GetString()));
-        Assert.Equal(30, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("idleTimeoutMinutes").GetInt32());
+        Assert.Equal(0, (await JsonOf(await GetSettingsAsync(admin))).GetProperty("idleTimeoutMinutes").GetInt32());
     }
 
     [Theory]

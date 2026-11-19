@@ -8,6 +8,8 @@ public class ServerSettings
     public const int SingletonId = 1;
     public const int MaxNoticeLength = 300;
     public const int MaxLockMessageLength = 200;
+    // An idle timeout of 0 means the admin stays signed in until they sign out.
+    public const int NeverIdleTimeoutMinutes = 0;
     public const int MinIdleTimeoutMinutes = 5;
     public const int MaxIdleTimeoutMinutes = 480;
     public const int DefaultPowerCountdownSeconds = 30;
@@ -23,7 +25,7 @@ public class ServerSettings
     public int DefaultApprovalMinutes { get; set; } = 60;
     public bool NoticeEnabled { get; set; } = true;
     public string NoticeText { get; set; } = DefaultNoticeText;
-    public int IdleTimeoutMinutes { get; set; } = 30;
+    public int IdleTimeoutMinutes { get; set; } = NeverIdleTimeoutMinutes;
     public string DefaultViewMode { get; set; } = NotifiedViewMode;
     public int PowerCountdownSeconds { get; set; } = DefaultPowerCountdownSeconds;
     // Shown on a locked PC that has no message of its own.
