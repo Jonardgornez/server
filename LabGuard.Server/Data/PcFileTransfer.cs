@@ -21,4 +21,7 @@ public class PcFileTransfer
     public string? Error { get; set; }
     public DateTimeOffset CreatedUtc { get; set; }
     public DateTimeOffset UpdatedUtc { get; set; }
+    // How many times a heartbeat has handed the transfer to the PC, the first time included. Bounds handing an abandoned
+    // transfer over again.
+    public int HandOverCount { get; set; }
 }

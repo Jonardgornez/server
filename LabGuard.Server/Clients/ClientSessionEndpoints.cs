@@ -562,7 +562,10 @@ public static partial class ClientEndpoints
         }
 
         var messages = await HandOverMessagesAsync(db, pcId, now, ct);
-        var fileTransfers = await HandOverFileTransfersAsync(db, pcId, now, ct);
+        // An unreadable body says nothing about the client, so nothing is handed out or failed on it.
+        FileTransferDelivery[] fileTransfers = request is null
+            ? []
+            : await HandOverFileTransfersAsync(db, pcId, ClientUpdateHeartbeat.ReadVersion(request.ClientVersion), now, ct);
         var loginRequest = await HeartbeatLoginRequestAsync(db, pcId, now, ct);
 
         var settings = await ServerSettingsStore.GetAsync(db, ct);

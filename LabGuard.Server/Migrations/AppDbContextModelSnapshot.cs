@@ -262,6 +262,9 @@ namespace LabGuard.Server.Migrations
                         .HasMaxLength(16)
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("HandOverCount")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("PcId")
                         .HasColumnType("INTEGER");
 

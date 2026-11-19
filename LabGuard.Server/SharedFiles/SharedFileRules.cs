@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
+using LabGuard.Server.ClientUpdates;
 using LabGuard.Server.Common;
 
 namespace LabGuard.Server.SharedFiles;
@@ -17,8 +18,8 @@ public static partial class SharedFileRules
     public const int MaxErrorLength = 200;
     public const int MaxPcsPerSend = 200;
     public const int MaxTransfersPerRequest = 200;
-    // One at a time per PC: a PC is handed a transfer only when it is working on none (see the heartbeat hand-over).
-    public const int MaxHandOverPerHeartbeat = 1;
+    // A transfer is handed to the PC at most this many times, the first included. Abandoned again after that, it fails.
+    public const int MaxHandOvers = 3;
 
     public const string DefaultFolder = DesktopFolder;
     public const string DefaultSubfolder = "Lykantra Share";
@@ -34,6 +35,13 @@ public static partial class SharedFileRules
     public const string Skipped = "skipped";
     public const string Failed = "failed";
     public const string Expired = "expired";
+    // Stopped by the administrator. Final: the PC can no longer download or report on it.
+    public const string Cancelled = "cancelled";
+
+    // Why a waiting transfer has not been handed over yet, as the administrator sees it.
+    public const string OfflineReason = "offline";
+    public const string ClientTooOldReason = "clientTooOld";
+    public const string BusyReason = "busy";
 
     public const string Overwrite = "overwrite";
     public const string KeepBoth = "keepBoth";
@@ -44,17 +52,28 @@ public static partial class SharedFileRules
         "Enter a subfolder of up to 3 folder names, each 1 to 64 characters, without < > : \" / | ? * or a reserved Windows name.";
     public const string StoppedRespondingError = "PC stopped responding";
     public const string DefaultFailedError = "The PC couldn't save the file.";
+    public const string ClientTooOldError = "This PC needs client 0.26.0 or newer.";
+
+    // The first client version that receives sent files. An older client ignores them.
+    public static readonly ReleaseVersion MinimumClientVersion = new(0, 26, 0);
 
     // A transfer still waiting this long after it was sent is never handed over, and shows as expired.
     public static readonly TimeSpan WaitingLifetime = TimeSpan.FromHours(1);
     // A PC that has been downloading or applying a file this long has stopped, so the transfer fails.
     public static readonly TimeSpan ActiveLifetime = TimeSpan.FromHours(1);
+    // A transfer being downloaded or applied with no activity for this long was abandoned, as by a client that restarted
+    // mid-transfer. It no longer keeps the PC busy, and the PC's next heartbeat hands it over again.
+    public static readonly TimeSpan AbandonedAfter = TimeSpan.FromMinutes(2);
+    // A backstop to MaxHandOvers: an abandoned transfer is handed over again only this long after it was created. A transfer
+    // is first handed over within WaitingLifetime, so this leaves it at least ActiveLifetime of retries; after that the stuck
+    // cleanup fails it.
+    public static readonly TimeSpan HandOverAgainLifetime = WaitingLifetime + ActiveLifetime;
     // Transfers are kept this long after they were created, then removed.
     public static readonly TimeSpan TransferLifetime = TimeSpan.FromHours(24);
     // A shared file no transfer still needs is kept this long after its last upload or send, then its bytes are removed.
     public static readonly TimeSpan UnusedFileLifetime = TimeSpan.FromHours(1);
 
-    // The statuses in which the PC may still need the file's bytes.
+    // The statuses in which the PC may still need the file's bytes. These are also the ones the administrator can cancel.
     public static readonly string[] OpenStatuses = [Waiting, Downloading, Exists, Applying];
 
     private static readonly string[] Folders = [DesktopFolder, DocumentsFolder, DownloadsFolder];
@@ -82,6 +101,10 @@ public static partial class SharedFileRules
     public static bool IsKnownFolder(string folder) => Folders.Contains(folder, StringComparer.Ordinal);
 
     public static bool IsDecision(string decision) => Decisions.Contains(decision, StringComparer.Ordinal);
+
+    // Whether the PC's last reported client version receives sent files. A missing or unreadable version doesn't.
+    public static bool IsFileClient(string? clientVersion) =>
+        ReleaseVersion.TryParse(clientVersion, out var version) && version >= MinimumClientVersion;
 
     // One folder or file name: 1 to maxLength characters, not "." or "..", none of the characters Windows refuses, no control
     // characters (C0, DEL and C1) or invisible format characters (such as direction marks, checked per code point), no leading

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using LabGuard.Server.SharedFiles;
 using Microsoft.EntityFrameworkCore;
 using static LabGuard.Server.Tests.PcShutdownEndpointTests;
 using static LabGuard.Server.Tests.SharedFileTestSupport;
@@ -81,6 +82,257 @@ public class ClientFileTransferDeliveryTests
         Assert.Equal([older], first.Select(t => t.GetProperty("id").GetInt64()));
         Assert.Empty(whileBusy);
         Assert.Equal([newer], afterwards.Select(t => t.GetProperty("id").GetInt64()));
+    }
+
+    // The client restarted mid-transfer (an update or a reboot), so it will never finish it. The next heartbeat hands it over
+    // again, and once it is done the waiting transfer behind it follows, instead of waiting until it expires.
+    [Theory]
+    [InlineData("downloading", null)]
+    [InlineData("applying", "overwrite")]
+    public async Task Heartbeat_AbandonedTransfer_IsHandedOverAgain_AndTheNextOneFollows(string status, string? decision)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var now = app.Time.GetUtcNow();
+        var abandoned = await SeedTransferAsync(app, pc.Id, status, decision: decision, createdUtc: now - TimeSpan.FromMinutes(10), updatedUtc: now - TimeSpan.FromMinutes(3));
+        var waiting = await SeedTransferAsync(app, pc.Id, "waiting", createdUtc: now - TimeSpan.FromMinutes(5));
+
+        var again = Assert.Single(await HandedTransfersAsync(client, pc));
+        await ReportAsync(client, abandoned, pc.Token, new { status = "saved" });
+        var next = Assert.Single(await HandedTransfersAsync(client, pc));
+
+        Assert.Equal(abandoned, again.GetProperty("id").GetInt64());
+        Assert.Equal(decision, again.GetProperty("decision").GetString());
+        Assert.Equal(waiting, next.GetProperty("id").GetInt64());
+    }
+
+    [Fact]
+    public async Task Heartbeat_HandingOverAgain_KeepsTheStatus_AndRecordsActivity()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var now = app.Time.GetUtcNow();
+        var id = await SeedTransferAsync(app, pc.Id, "downloading", createdUtc: now - TimeSpan.FromMinutes(10), updatedUtc: now - TimeSpan.FromMinutes(2));
+
+        Assert.Single(await HandedTransfersAsync(client, pc));
+
+        var stored = await StoredTransferAsync(app, id);
+        Assert.Equal("downloading", stored.Status);
+        Assert.Equal(now.ToUnixTimeMilliseconds(), stored.UpdatedUtc.ToUnixTimeMilliseconds());
+        Assert.Equal(1, stored.HandOverCount);
+        // Handed over again, it counts as busy again, so the next heartbeat hands nothing.
+        Assert.Empty(await HandedTransfersAsync(client, pc));
+    }
+
+    // Activity within the last two minutes means the PC is still at work, so the next transfer still waits.
+    [Theory]
+    [InlineData("downloading")]
+    [InlineData("applying")]
+    public async Task Heartbeat_TransferActiveUnderTwoMinutesAgo_StillBlocks(string status)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var now = app.Time.GetUtcNow();
+        var lastActivity = now - TimeSpan.FromSeconds(119);
+        var active = await SeedTransferAsync(app, pc.Id, status, createdUtc: now - TimeSpan.FromMinutes(10), updatedUtc: lastActivity);
+        var waiting = await SeedTransferAsync(app, pc.Id, "waiting");
+
+        Assert.Empty(await HandedTransfersAsync(client, pc));
+        Assert.Equal(lastActivity.ToUnixTimeMilliseconds(), (await StoredTransferAsync(app, active)).UpdatedUtc.ToUnixTimeMilliseconds());
+        Assert.Equal("waiting", (await StoredTransferAsync(app, waiting)).Status);
+    }
+
+    // Past its retries an abandoned transfer is left for the stuck cleanup, and it no longer holds the PC back.
+    [Fact]
+    public async Task Heartbeat_AbandonedTransferPastItsRetries_IsNotHandedOver_AndDoesNotBlock()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var now = app.Time.GetUtcNow();
+        var lastActivity = now - TimeSpan.FromMinutes(10);
+        var abandoned = await SeedTransferAsync(app, pc.Id, "downloading", createdUtc: now - TimeSpan.FromHours(2), updatedUtc: lastActivity);
+        var waiting = await SeedTransferAsync(app, pc.Id, "waiting");
+
+        var handed = Assert.Single(await HandedTransfersAsync(client, pc));
+
+        Assert.Equal(waiting, handed.GetProperty("id").GetInt64());
+        Assert.Equal(lastActivity.ToUnixTimeMilliseconds(), (await StoredTransferAsync(app, abandoned)).UpdatedUtc.ToUnixTimeMilliseconds());
+    }
+
+    // A transfer abandoned again after its third hand-over fails, and the next waiting transfer goes out on that heartbeat.
+    // Seeded as a row from before hand-overs were counted, so it gets three hand-overs again.
+    [Fact]
+    public async Task Heartbeat_AfterThreeHandOversAgain_FailsTheAbandonedTransfer_AndHandsOverTheNext()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var abandoned = await SeedTransferAsync(app, pc.Id, "downloading");
+        var waiting = await SeedTransferAsync(app, pc.Id, "waiting");
+
+        for (var handOver = 1; handOver <= 3; handOver++)
+        {
+            app.Time.Advance(TimeSpan.FromMinutes(3));
+            var again = Assert.Single(await HandedTransfersAsync(client, pc));
+            Assert.Equal(abandoned, again.GetProperty("id").GetInt64());
+            Assert.Equal(handOver, (await StoredTransferAsync(app, abandoned)).HandOverCount);
+        }
+
+        app.Time.Advance(TimeSpan.FromMinutes(3));
+        var next = Assert.Single(await HandedTransfersAsync(client, pc));
+
+        Assert.Equal(waiting, next.GetProperty("id").GetInt64());
+        var failed = await StoredTransferAsync(app, abandoned);
+        Assert.Equal("failed", failed.Status);
+        Assert.Equal("PC stopped responding", failed.Error);
+        Assert.Equal("downloading", (await StoredTransferAsync(app, waiting)).Status);
+    }
+
+    // The first hand-over counts too: a sent file goes out at most three times in all.
+    [Fact]
+    public async Task Heartbeat_CountsEveryHandOver_AndStopsAfterThree()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, "waiting");
+
+        var handOvers = 0;
+        for (var step = 0; step < 5; step++)
+        {
+            handOvers += (await HandedTransfersAsync(client, pc)).Length;
+            app.Time.Advance(TimeSpan.FromMinutes(3));
+        }
+
+        Assert.Equal(3, handOvers);
+        var stored = await StoredTransferAsync(app, id);
+        Assert.Equal(3, stored.HandOverCount);
+        Assert.Equal("failed", stored.Status);
+    }
+
+    // Activity after the last hand-over means the PC is working on it, so it isn't failed.
+    [Fact]
+    public async Task Heartbeat_LastHandOverStillActive_IsNotFailed()
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var now = app.Time.GetUtcNow();
+        var id = await SeedTransferAsync(app, pc.Id, "downloading", updatedUtc: now - TimeSpan.FromSeconds(119), handOverCount: 3);
+
+        Assert.Empty(await HandedTransfersAsync(client, pc));
+        Assert.Equal("downloading", (await StoredTransferAsync(app, id)).Status);
+    }
+
+    [Fact]
+    public async Task Heartbeat_ConcurrentHeartbeats_HandOverAnAbandonedTransferOnlyOnce()
+    {
+        using var app = new TestApp();
+        var pc = await AddPcAsync(app);
+        await SetClientVersionAsync(app, pc.Id, FileClientVersion);
+        var now = app.Time.GetUtcNow();
+        var abandoned = await SeedTransferAsync(app, pc.Id, "downloading", createdUtc: now - TimeSpan.FromMinutes(20), updatedUtc: now - TimeSpan.FromMinutes(5));
+        var waiting = await SeedTransferAsync(app, pc.Id, "waiting", createdUtc: now - TimeSpan.FromMinutes(10));
+
+        var clients = Enumerable.Range(0, 4).Select(i => app.CreatePcClient($"192.168.1.{70 + i}")).ToArray();
+        var handed = await Task.WhenAll(clients.Select(client => HandedTransfersAsync(client, pc)));
+
+        Assert.Equal([abandoned], handed.SelectMany(transfers => transfers).Select(t => t.GetProperty("id").GetInt64()));
+        Assert.Equal(1, (await StoredTransferAsync(app, abandoned)).HandOverCount);
+        Assert.Equal("waiting", (await StoredTransferAsync(app, waiting)).Status);
+        foreach (var client in clients)
+        {
+            client.Dispose();
+        }
+    }
+
+    // Version gate: only a client that receives sent files is handed them.
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("garbage", false)]
+    [InlineData("0.25.9", false)]
+    [InlineData("0.26.0", true)]
+    [InlineData("0.27.0", true)]
+    public async Task Heartbeat_HandsOverOnlyToAClientAtLeast0_26_0(string? clientVersion, bool handsOver)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var id = await SeedTransferAsync(app, pc.Id, "waiting");
+
+        var handed = await HandedTransfersAsync(client, pc, clientVersion);
+
+        Assert.Equal(handsOver ? 1 : 0, handed.Length);
+        Assert.Equal(handsOver ? "downloading" : "waiting", (await StoredTransferAsync(app, id)).Status);
+    }
+
+    [Theory]
+    [InlineData("downloading", "0.25.0")]
+    [InlineData("applying", "0.25.0")]
+    [InlineData("downloading", "0.9.9")]
+    public async Task Heartbeat_FromAClientTooOld_FailsTransfersItWasHanded(string status, string clientVersion)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var inProgress = await SeedTransferAsync(app, pc.Id, status);
+        var waiting = await SeedTransferAsync(app, pc.Id, "waiting");
+        var other = await AddPcAsync(app, "PC-02");
+        var otherInProgress = await SeedTransferAsync(app, other.Id, status);
+
+        Assert.Empty(await HandedTransfersAsync(client, pc, clientVersion));
+
+        var failed = await StoredTransferAsync(app, inProgress);
+        Assert.Equal("failed", failed.Status);
+        Assert.Equal("This PC needs client 0.26.0 or newer.", failed.Error);
+        Assert.Equal("waiting", (await StoredTransferAsync(app, waiting)).Status);
+        Assert.Equal(status, (await StoredTransferAsync(app, otherInProgress)).Status);
+    }
+
+    // Without a readable version nothing says the client is too old, so nothing is failed either.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("garbage")]
+    public async Task Heartbeat_WithoutAReadableVersion_HandsOverNothing_AndFailsNothing(string? clientVersion)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        var now = app.Time.GetUtcNow();
+        var abandoned = await SeedTransferAsync(app, pc.Id, "downloading", updatedUtc: now - TimeSpan.FromMinutes(5), handOverCount: 3);
+        var waiting = await SeedTransferAsync(app, pc.Id, "waiting");
+
+        Assert.Empty(await HandedTransfersAsync(client, pc, clientVersion));
+
+        Assert.Equal("downloading", (await StoredTransferAsync(app, abandoned)).Status);
+        Assert.Equal("waiting", (await StoredTransferAsync(app, waiting)).Status);
+    }
+
+    // A heartbeat with no body, or one that can't be read, skips the hand-over and leaves the stored version alone.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("{not json")]
+    public async Task Heartbeat_WithAnUnreadableBody_SkipsTheHandOver_AndKeepsTheVersion(string? rawBody)
+    {
+        using var app = new TestApp();
+        using var client = app.CreatePcClient();
+        var pc = await AddPcAsync(app);
+        await SetClientVersionAsync(app, pc.Id, "0.25.0");
+        var inProgress = await SeedTransferAsync(app, pc.Id, "downloading");
+        var waiting = await SeedTransferAsync(app, pc.Id, "waiting");
+
+        var content = rawBody is null ? null : new StringContent(rawBody, System.Text.Encoding.UTF8, "application/json");
+        var response = await PostAsync(client, "/api/client/heartbeat", pc.Token, content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False((await JsonOf(response)).TryGetProperty("fileTransfers", out _));
+        Assert.Equal("downloading", (await StoredTransferAsync(app, inProgress)).Status);
+        Assert.Equal("waiting", (await StoredTransferAsync(app, waiting)).Status);
+        Assert.Equal("0.25.0", (await app.WithDbAsync(db => db.Pcs.AsNoTracking().SingleAsync(p => p.Id == pc.Id))).ClientVersion);
     }
 
     [Theory]
@@ -174,6 +426,7 @@ public class ClientFileTransferDeliveryTests
     [InlineData("skipped")]
     [InlineData("failed")]
     [InlineData("expired")]
+    [InlineData("cancelled")]
     public async Task Heartbeat_DoesNotHandOverOtherStatuses(string status)
     {
         using var app = new TestApp();
@@ -258,6 +511,7 @@ public class ClientFileTransferDeliveryTests
     [InlineData("skipped")]
     [InlineData("failed")]
     [InlineData("expired")]
+    [InlineData("cancelled")]
     public async Task Download_TransferNotInProgress_Returns404(string status)
     {
         using var app = new TestApp();
@@ -374,6 +628,10 @@ public class ClientFileTransferDeliveryTests
     [InlineData("downloading", "skipped")]
     [InlineData("failed", "saved")]
     [InlineData("expired", "saved")]
+    [InlineData("cancelled", "saved")]
+    [InlineData("cancelled", "exists")]
+    [InlineData("cancelled", "skipped")]
+    [InlineData("cancelled", "failed")]
     public async Task Report_DisallowedTransition_Returns409AndChangesNothing(string from, string to)
     {
         using var app = new TestApp();

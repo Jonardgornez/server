@@ -61,12 +61,27 @@ public class SharedFileCleanupTests
         var old = app.Time.GetUtcNow() - TimeSpan.FromHours(3);
         var exists = await SeedTransferAsync(app, pc.Id, "exists", createdUtc: old);
         var saved = await SeedTransferAsync(app, pc.Id, "saved", createdUtc: old);
+        var cancelled = await SeedTransferAsync(app, pc.Id, "cancelled", createdUtc: old);
 
         var changed = await RunAsync(app, (db, _, at) => SharedFileCleanup.FailStuckAsync(db, at, CancellationToken.None));
 
         Assert.Equal(0, changed);
         Assert.Equal("exists", (await StoredTransferAsync(app, exists)).Status);
         Assert.Equal("saved", (await StoredTransferAsync(app, saved)).Status);
+        Assert.Equal("cancelled", (await StoredTransferAsync(app, cancelled)).Status);
+    }
+
+    [Fact]
+    public async Task ExpireWaiting_LeavesACancelledTransferCancelled()
+    {
+        using var app = new TestApp();
+        var pc = await AddPcAsync(app);
+        var cancelled = await SeedTransferAsync(app, pc.Id, "cancelled", createdUtc: app.Time.GetUtcNow() - TimeSpan.FromHours(2));
+
+        var changed = await RunAsync(app, (db, _, at) => SharedFileCleanup.ExpireWaitingAsync(db, at, CancellationToken.None));
+
+        Assert.Equal(0, changed);
+        Assert.Equal("cancelled", (await StoredTransferAsync(app, cancelled)).Status);
     }
 
     [Fact]
@@ -84,15 +99,17 @@ public class SharedFileCleanupTests
         Assert.True(await TransferExistsAsync(app, recent));
     }
 
-    [Fact]
-    public async Task RemoveUnusedFiles_RemovesAnOldFileWithOnlyFinishedTransfers_RowAndBytes()
+    [Theory]
+    [InlineData("saved")]
+    [InlineData("cancelled")]
+    public async Task RemoveUnusedFiles_RemovesAnOldFileWithOnlyFinishedTransfers_RowAndBytes(string finalStatus)
     {
         using var app = new TestApp();
         var pc = await AddPcAsync(app);
         var now = app.Time.GetUtcNow();
         var bytes = Bytes("finished");
         var fileId = await SeedSharedFileAsync(app, bytes, now - TimeSpan.FromHours(1));
-        var transfer = await SeedTransferAsync(app, pc.Id, "saved", sharedFileId: fileId);
+        var transfer = await SeedTransferAsync(app, pc.Id, finalStatus, sharedFileId: fileId);
 
         var removed = await RunAsync(app, (db, storage, at) => SharedFileCleanup.RemoveUnusedFilesAsync(db, storage, at, CancellationToken.None));
 
@@ -215,6 +232,7 @@ public class SharedFileCleanupTests
         var waiting = await SeedTransferAsync(app, pc.Id, "waiting", createdUtc: now - TimeSpan.FromHours(2), sharedFileId: fileId);
         var stuck = await SeedTransferAsync(app, pc.Id, "applying", createdUtc: now - TimeSpan.FromHours(3), updatedUtc: now - TimeSpan.FromHours(2));
         var old = await SeedTransferAsync(app, pc.Id, "saved", createdUtc: now - TimeSpan.FromDays(2));
+        var oldCancelled = await SeedTransferAsync(app, pc.Id, "cancelled", createdUtc: now - TimeSpan.FromDays(2));
 
         await app.WithDbAsync(async db =>
         {
@@ -225,6 +243,7 @@ public class SharedFileCleanupTests
         Assert.Equal("expired", (await StoredTransferAsync(app, waiting)).Status);
         Assert.Equal("failed", (await StoredTransferAsync(app, stuck)).Status);
         Assert.False(await TransferExistsAsync(app, old));
+        Assert.False(await TransferExistsAsync(app, oldCancelled));
         Assert.False(await SharedFileExistsAsync(app, fileId));
         Assert.Empty(StoredFilesIn(app));
     }

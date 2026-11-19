@@ -1,4 +1,5 @@
 using LabGuard.Server.Auth;
+using LabGuard.Server.ClientUpdates;
 using LabGuard.Server.Data;
 using LabGuard.Server.SharedFiles;
 using Microsoft.EntityFrameworkCore;
@@ -35,61 +36,99 @@ public static partial class ClientEndpoints
     private const string TransferNotFoundMessage = "File transfer not found.";
     private const string TransferConflictMessage = "This file transfer can't move to that status now.";
 
-    // Hands over this PC's oldest new transfer that is still within its lifetime, or one whose existing file has a decision.
-    // One at a time: only while the PC is downloading or applying none. The update matches the status and decision that were
-    // read and checks again that the PC is working on nothing, all in one statement, so two heartbeats at the same time can't
-    // hand out the same transfer twice or two transfers at once.
-    private static async Task<FileTransferDelivery[]> HandOverFileTransfersAsync(AppDbContext db, int pcId, DateTimeOffset now, CancellationToken ct)
+    // Hands this PC one transfer: first one it abandoned mid-way (no activity for SharedFileRules.AbandonedAfter, as after a
+    // client restart), handed over again as it is; otherwise its oldest new transfer that is still within its lifetime, or one
+    // whose existing file has a decision. One at a time: only while the PC is actively downloading or applying none. The update
+    // matches the status, decision, UpdatedUtc and hand-over count that were read and checks again that the PC is actively
+    // working on nothing, all in one statement, so two heartbeats at the same time can't hand out the same transfer twice or
+    // two transfers at once. A transfer abandoned after its last hand-over fails first, so the next one can go out.
+    // Only a client that reports a version new enough to receive sent files gets them. One that reports an older version
+    // ignores them, so the transfers it was handed fail. A heartbeat without a readable version hands out and fails nothing.
+    private static async Task<FileTransferDelivery[]> HandOverFileTransfersAsync(
+        AppDbContext db,
+        int pcId,
+        ReleaseVersion? clientVersion,
+        DateTimeOffset now,
+        CancellationToken ct)
     {
-        var waitingSince = now - SharedFileRules.WaitingLifetime;
-        if (await IsWorkingOnATransferAsync(db, pcId, ct))
+        if (clientVersion is not { } version)
         {
             return [];
         }
 
-        var candidates = await db.PcFileTransfers
-            .AsNoTracking()
-            .Where(t => t.PcId == pcId
-                && ((t.Status == SharedFileRules.Waiting && t.Decision == null && t.CreatedUtc > waitingSince)
-                    || (t.Status == SharedFileRules.Exists && t.Decision != null)))
-            .OrderBy(t => t.CreatedUtc)
-            .ThenBy(t => t.Id)
-            .Take(SharedFileRules.MaxHandOverPerHeartbeat)
-            .ToListAsync(ct);
-
-        var handedOver = new List<FileTransferDelivery>();
-        foreach (var candidate in candidates)
+        var pcTransfers = db.PcFileTransfers.Where(t => t.PcId == pcId);
+        if (version < SharedFileRules.MinimumClientVersion)
         {
-            var next = candidate.Status == SharedFileRules.Waiting ? SharedFileRules.Downloading : SharedFileRules.Applying;
-            var changed = await db.PcFileTransfers
-                .Where(t => t.Id == candidate.Id
-                    && t.Status == candidate.Status
-                    && t.Decision == candidate.Decision
-                    && !db.PcFileTransfers.Any(other => other.PcId == pcId
-                        && (other.Status == SharedFileRules.Downloading || other.Status == SharedFileRules.Applying)))
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(t => t.Status, next)
-                    .SetProperty(t => t.UpdatedUtc, now), ct);
-            if (changed > 0)
-            {
-                handedOver.Add(new FileTransferDelivery(
-                    candidate.Id,
-                    candidate.FileName,
-                    candidate.SizeBytes,
-                    candidate.Sha256,
-                    candidate.Folder,
-                    candidate.Subfolder,
-                    candidate.Decision));
-            }
+            var inProgress = pcTransfers.Where(t => t.Status == SharedFileRules.Downloading || t.Status == SharedFileRules.Applying);
+            await FailAsync(inProgress, SharedFileRules.ClientTooOldError, now, ct);
+            return [];
         }
 
-        return handedOver.ToArray();
+        // The update matches the abandoned state again, so a report or download the PC sends at the same moment is never overwritten.
+        await FailAsync(pcTransfers.OutOfHandOvers(now), SharedFileRules.StoppedRespondingError, now, ct);
+
+        var active = pcTransfers.Active(now);
+        if (await active.AnyAsync(ct))
+        {
+            return [];
+        }
+
+        var waitingSince = now - SharedFileRules.WaitingLifetime;
+        var handOverAgain = pcTransfers.ToHandOverAgain(now);
+        var candidate = await pcTransfers
+            .AsNoTracking()
+            .Where(t => (t.Status == SharedFileRules.Waiting && t.Decision == null && t.CreatedUtc > waitingSince)
+                || (t.Status == SharedFileRules.Exists && t.Decision != null)
+                || handOverAgain.Any(again => again.Id == t.Id))
+            .OrderBy(t => t.Status == SharedFileRules.Waiting || t.Status == SharedFileRules.Exists)
+            .ThenBy(t => t.CreatedUtc)
+            .ThenBy(t => t.Id)
+            .FirstOrDefaultAsync(ct);
+        if (candidate is null)
+        {
+            return [];
+        }
+
+        var next = candidate.Status switch
+        {
+            SharedFileRules.Waiting => SharedFileRules.Downloading,
+            SharedFileRules.Exists => SharedFileRules.Applying,
+            _ => candidate.Status,
+        };
+        var changed = await db.PcFileTransfers
+            .Where(t => t.Id == candidate.Id
+                && t.Status == candidate.Status
+                && t.Decision == candidate.Decision
+                && t.UpdatedUtc == candidate.UpdatedUtc
+                && t.HandOverCount == candidate.HandOverCount
+                && !active.Any())
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(t => t.Status, next)
+                .SetProperty(t => t.UpdatedUtc, now)
+                .SetProperty(t => t.HandOverCount, t => t.HandOverCount + 1), ct);
+        if (changed == 0)
+        {
+            return [];
+        }
+
+        return
+        [
+            new FileTransferDelivery(
+                candidate.Id,
+                candidate.FileName,
+                candidate.SizeBytes,
+                candidate.Sha256,
+                candidate.Folder,
+                candidate.Subfolder,
+                candidate.Decision),
+        ];
     }
 
-    private static Task<bool> IsWorkingOnATransferAsync(AppDbContext db, int pcId, CancellationToken ct) =>
-        db.PcFileTransfers.AnyAsync(
-            t => t.PcId == pcId && (t.Status == SharedFileRules.Downloading || t.Status == SharedFileRules.Applying),
-            ct);
+    private static Task<int> FailAsync(IQueryable<PcFileTransfer> transfers, string error, DateTimeOffset now, CancellationToken ct) =>
+        transfers.ExecuteUpdateAsync(setters => setters
+            .SetProperty(t => t.Status, SharedFileRules.Failed)
+            .SetProperty(t => t.Error, error)
+            .SetProperty(t => t.UpdatedUtc, now), ct);
 
     // Records activity on a transfer the PC is still downloading or applying. Returns whether it matched.
     private static async Task<bool> RefreshTransferActivityAsync(

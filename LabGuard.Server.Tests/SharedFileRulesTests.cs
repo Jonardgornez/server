@@ -298,6 +298,48 @@ public class SharedFileRulesTests
     public void CleanError_CutsToTheLimit() =>
         Assert.Equal(200, SharedFileRules.CleanError(new string('x', 500)).Length);
 
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("garbage", false)]
+    [InlineData("0.26", false)]
+    [InlineData("v0.26.0", false)]
+    [InlineData("0.25.9", false)]
+    [InlineData("0.9.0", false)]
+    [InlineData("0.26.0", true)]
+    [InlineData("0.26.1", true)]
+    [InlineData("0.27.0", true)]
+    [InlineData("0.100.0", true)]
+    [InlineData("1.0.0", true)]
+    public void IsFileClient_NeedsAReadableVersionOfAtLeast0_26_0(string? clientVersion, bool expected) =>
+        Assert.Equal(expected, SharedFileRules.IsFileClient(clientVersion));
+
+    [Fact]
+    public void AbandonedAfter_IsTwoMinutes_AndHandingOverAgainStopsTwoHoursAfterCreation()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(2), SharedFileRules.AbandonedAfter);
+        Assert.Equal(TimeSpan.FromHours(2), SharedFileRules.HandOverAgainLifetime);
+    }
+
+    [Fact]
+    public void EffectiveStatus_Cancelled_StaysCancelled()
+    {
+        var created = DateTimeOffset.UnixEpoch;
+        Assert.Equal("cancelled", SharedFileRules.EffectiveStatus("cancelled", created, created + TimeSpan.FromHours(5)));
+    }
+
+    [Theory]
+    [InlineData("saved")]
+    [InlineData("exists")]
+    [InlineData("skipped")]
+    [InlineData("failed")]
+    public void AllowedFrom_NeverLeavesCancelled(string reported) =>
+        Assert.DoesNotContain("cancelled", SharedFileRules.AllowedFrom(reported));
+
+    [Fact]
+    public void OpenStatuses_DoNotIncludeCancelled() =>
+        Assert.DoesNotContain("cancelled", SharedFileRules.OpenStatuses);
+
     [Fact]
     public void EffectiveStatus_WaitingPastItsLifetime_IsExpired()
     {
