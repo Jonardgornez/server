@@ -12,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using SetCookieHeaderValue = Microsoft.Net.Http.Headers.SetCookieHeaderValue;
 
 namespace LabGuard.Server.Tests;
 
@@ -58,6 +59,37 @@ public class AuthEndpointTests
             powerCountdownSeconds = 30,
             lockMessage = "This computer has been locked by the administrator.",
         });
+
+    // Saves the idle limit, then signs in a new session that carries it.
+    private static async Task<HttpClient> SignedInWithIdleLimitAsync(TestApp app, double minutes)
+    {
+        using (var admin = await SignedInAsync(app))
+        {
+            Assert.Equal(HttpStatusCode.OK, (await SetIdleTimeoutAsync(admin, minutes)).StatusCode);
+        }
+
+        return await SignedInAsync(app);
+    }
+
+    private static string? AdminSetCookie(HttpResponseMessage response) =>
+        response.Headers.TryGetValues("Set-Cookie", out var values)
+            ? values.SingleOrDefault(value => value.StartsWith(AuthServiceExtensions.CookieName + "=", StringComparison.Ordinal))
+            : null;
+
+    // The Expires attribute has whole seconds, so it is compared to the second.
+    private static void AssertExpiresAbout(DateTimeOffset expected, string setCookie)
+    {
+        var expires = SetCookieHeaderValue.Parse(setCookie).Expires;
+        Assert.NotNull(expires);
+        Assert.InRange(expires.Value, expected.AddSeconds(-1), expected.AddSeconds(1));
+    }
+
+    private static async Task<HttpResponseMessage> BackgroundRefreshAsync(HttpClient client)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/auth/me");
+        request.Headers.Add(AuthServiceExtensions.BackgroundRefreshHeader, "1");
+        return await client.SendAsync(request);
+    }
 
     // Seeding
 
@@ -309,26 +341,176 @@ public class AuthEndpointTests
     }
 
     [Fact]
-    public async Task Logout_EndsAccessAndRequiresAuthentication()
+    public async Task Logout_EndsAccess()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+
+        var logout = await client.PostAsJsonAsync("/api/auth/logout", new { });
+        var me = await client.GetAsync("/api/auth/me");
+
+        Assert.Equal(HttpStatusCode.NoContent, logout.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, me.StatusCode);
+    }
+
+    [Fact]
+    public async Task Logout_Anonymous_SucceedsWithoutEndingAnySession()
     {
         using var app = new TestApp();
         using var anonymous = app.CreateBrowser();
         using var client = await SignedInAsync(app);
+        var versionBefore = await app.WithDbAsync(db => db.AdminAccounts.Select(a => a.SessionVersion).SingleAsync());
 
-        var anonymousLogout = await anonymous.PostAsync("/api/auth/logout", null);
-        var logout = await client.PostAsync("/api/auth/logout", null);
-        var me = await client.GetAsync("/api/auth/me");
+        var anonymousLogout = await anonymous.PostAsJsonAsync("/api/auth/logout", new { });
 
-        Assert.Equal(HttpStatusCode.Unauthorized, anonymousLogout.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, anonymousLogout.StatusCode);
+        Assert.Equal(versionBefore, await app.WithDbAsync(db => db.AdminAccounts.Select(a => a.SessionVersion).SingleAsync()));
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Logout_RevokesTheSessionOnTheServer_SoAReplayedCookieGets401()
+    {
+        using var app = new TestApp();
+        using var client = app.CreateBrowser();
+        var login = await LoginAsync(client, TestApp.Username, TestApp.Password);
+        var cookie = AdminSetCookie(login)!.Split(';')[0];
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsJsonAsync("/api/auth/logout", new { })).StatusCode);
+
+        using var replay = app.CreateClient(new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions { HandleCookies = false });
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/auth/me");
+        request.Headers.Add("Cookie", cookie);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await replay.SendAsync(request)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Logout_SignsOutTheAdminsOtherBrowsersToo()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        using var otherBrowser = await SignedInAsync(app);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsJsonAsync("/api/auth/logout", new { })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await otherBrowser.GetAsync("/api/auth/me")).StatusCode);
+        using var fresh = await SignedInAsync(app);
+        Assert.Equal(HttpStatusCode.OK, (await fresh.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Logout_WithASessionThatIsAlreadyInvalid_SucceedsAndClearsTheCookie()
+    {
+        using var app = new TestApp();
+        using var stale = await SignedInAsync(app);
+        using var admin = await SignedInAsync(app);
+        Assert.Equal(HttpStatusCode.NoContent, (await ChangePasswordAsync(admin, TestApp.Password, "a brand new password")).StatusCode);
+        using var current = app.CreateBrowser();
+        Assert.Equal(HttpStatusCode.OK, (await LoginAsync(current, TestApp.Username, "a brand new password")).StatusCode);
+
+        var logout = await stale.PostAsJsonAsync("/api/auth/logout", new { });
+
         Assert.Equal(HttpStatusCode.NoContent, logout.StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, me.StatusCode);
+        var cleared = AdminSetCookie(logout);
+        Assert.NotNull(cleared);
+        Assert.True(SetCookieHeaderValue.Parse(cleared).Expires < app.Time.GetUtcNow());
+        Assert.Equal(HttpStatusCode.OK, (await current.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("application/x-www-form-urlencoded", "a=1")]
+    [InlineData("text/plain", "{}")]
+    [InlineData(null, "")]
+    public async Task Logout_WithoutAJsonContentType_Returns400AndRevokesNothing(string? contentType, string body)
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        using var otherBrowser = await SignedInAsync(app);
+        using var content = new StringContent(body);
+        content.Headers.ContentType = contentType is null ? null : new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+
+        var logout = await client.PostAsync("/api/auth/logout", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, logout.StatusCode);
+        Assert.Null(AdminSetCookie(logout));
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await otherBrowser.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Logout_WithoutABody_Returns400AndRevokesNothing()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+
+        var logout = await client.PostAsync("/api/auth/logout", null);
+
+        Assert.Equal(HttpStatusCode.BadRequest, logout.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    // Changing the idle timeout
+
+    [Fact]
+    public async Task IdleTimeout_FromNeverToMinutes_SignsOutTheOtherBrowsers()
+    {
+        using var app = new TestApp();
+        using var saver = await SignedInAsync(app);
+        using var otherBrowser = await SignedInAsync(app);
+        using var copied = app.CreateBrowser();
+        var oldCookie = AdminSetCookie(await LoginAsync(copied, TestApp.Username, TestApp.Password))!.Split(';')[0];
+
+        Assert.Equal(HttpStatusCode.OK, (await SetIdleTimeoutAsync(saver, 5)).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await otherBrowser.GetAsync("/api/auth/me")).StatusCode);
+        using var replay = app.CreateClient(new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions { HandleCookies = false });
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/auth/me");
+        request.Headers.Add("Cookie", oldCookie);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await replay.SendAsync(request)).StatusCode);
+    }
+
+    [Fact]
+    public async Task IdleTimeout_FromNeverToMinutes_KeepsTheSavingBrowserSignedInUnderTheNewRule()
+    {
+        using var app = new TestApp();
+        using var saver = await SignedInAsync(app);
+
+        var saved = await SetIdleTimeoutAsync(saver, 5);
+
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        var cookie = AdminSetCookie(saved);
+        Assert.NotNull(cookie);
+        Assert.Null(SetCookieHeaderValue.Parse(cookie).Expires);
+        app.Time.Advance(TimeSpan.FromMinutes(4));
+        Assert.Equal(HttpStatusCode.OK, (await saver.GetAsync("/api/auth/me")).StatusCode);
+        app.Time.Advance(TimeSpan.FromMinutes(6));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await saver.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Theory]
+    [InlineData(30.0, 0.0)]
+    [InlineData(30.0, 5.0)]
+    [InlineData(0.0, 0.0)]
+    public async Task IdleTimeout_OtherChanges_SignNoOneOutAndApplyFromTheNextSignIn(double from, double to)
+    {
+        using var app = new TestApp();
+        using var saver = await SignedInWithIdleLimitAsync(app, from);
+        using var otherBrowser = await SignedInAsync(app);
+        var versionBefore = await app.WithDbAsync(db => db.AdminAccounts.Select(a => a.SessionVersion).SingleAsync());
+
+        var saved = await SetIdleTimeoutAsync(saver, to);
+
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        Assert.Equal(versionBefore, await app.WithDbAsync(db => db.AdminAccounts.Select(a => a.SessionVersion).SingleAsync()));
+        app.Time.Advance(TimeSpan.FromMinutes(10));
+        Assert.Equal(HttpStatusCode.OK, (await otherBrowser.GetAsync("/api/auth/me")).StatusCode);
     }
 
     [Fact]
     public async Task Session_ExpiresAfter30IdleMinutes_AndSlidesWhenActive()
     {
         using var app = new TestApp();
-        using var client = await SignedInAsync(app);
+        using var client = await SignedInWithIdleLimitAsync(app, 30);
 
         app.Time.Advance(TimeSpan.FromMinutes(20));
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
@@ -549,7 +731,7 @@ public class AuthEndpointTests
     public async Task Session_ActiveAtMinute14_StillValidAtMinute40()
     {
         using var app = new TestApp();
-        using var client = await SignedInAsync(app);
+        using var client = await SignedInWithIdleLimitAsync(app, 30);
 
         app.Time.Advance(TimeSpan.FromMinutes(14));
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
@@ -562,7 +744,7 @@ public class AuthEndpointTests
     public async Task Session_ActiveAtMinute14_ExpiresAfter31IdleMinutes()
     {
         using var app = new TestApp();
-        using var client = await SignedInAsync(app);
+        using var client = await SignedInWithIdleLimitAsync(app, 30);
 
         app.Time.Advance(TimeSpan.FromMinutes(14));
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
@@ -588,7 +770,7 @@ public class AuthEndpointTests
     public async Task Session_SignedInBeforeTheChange_KeepsItsOwnLimit()
     {
         using var app = new TestApp();
-        using var admin = await SignedInAsync(app);
+        using var admin = await SignedInWithIdleLimitAsync(app, 30);
 
         Assert.Equal(HttpStatusCode.OK, (await SetIdleTimeoutAsync(admin, 5)).StatusCode);
         app.Time.Advance(TimeSpan.FromMinutes(6));
@@ -645,6 +827,209 @@ public class AuthEndpointTests
         app.Time.Advance(TimeSpan.FromMinutes(481));
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await session.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Session_WithAMinuteLimit_HasABrowserSessionCookie()
+    {
+        using var app = new TestApp();
+        using (var admin = await SignedInAsync(app))
+        {
+            await SetIdleTimeoutAsync(admin, 30);
+        }
+
+        using var client = app.CreateBrowser();
+
+        var login = await LoginAsync(client, TestApp.Username, TestApp.Password);
+
+        var cookie = AdminSetCookie(login);
+        Assert.NotNull(cookie);
+        Assert.Null(SetCookieHeaderValue.Parse(cookie).Expires);
+    }
+
+    [Fact]
+    public async Task Session_WithAMinuteLimit_IsRenewedOnEveryRealRequestButNotOnABackgroundRefresh()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInWithIdleLimitAsync(app, 30);
+
+        app.Time.Advance(TimeSpan.FromMinutes(1));
+
+        Assert.NotNull(AdminSetCookie(await client.GetAsync("/api/auth/me")));
+        Assert.Null(AdminSetCookie(await BackgroundRefreshAsync(client)));
+    }
+
+    // Never idles out (idle timeout 0)
+
+    [Fact]
+    public async Task NeverSession_IsTheDefault_AndHasAPersistentCookieThatExpiresIn400Days()
+    {
+        using var app = new TestApp();
+        using var client = app.CreateBrowser();
+        var signedInAt = app.Time.GetUtcNow();
+
+        var login = await LoginAsync(client, TestApp.Username, TestApp.Password);
+
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        Assert.Equal(TimeSpan.FromDays(400), AuthServiceExtensions.NeverIdleCookieLifetime);
+        var cookie = AdminSetCookie(login);
+        Assert.NotNull(cookie);
+        AssertExpiresAbout(signedInAt + AuthServiceExtensions.NeverIdleCookieLifetime, cookie);
+    }
+
+    [Fact]
+    public async Task NeverSession_SavedAfterAMinuteLimit_AppliesFromTheNextSignIn()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInWithIdleLimitAsync(app, 5);
+        Assert.Equal(HttpStatusCode.OK, (await SetIdleTimeoutAsync(admin, 0)).StatusCode);
+        using var session = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromDays(30));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await admin.GetAsync("/api/auth/me")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await session.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task NeverSession_DoesNotIdleOutAfter30Days()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromDays(30));
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task NeverSession_StaysSignedInPast400DaysWhileItIsRenewed()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromDays(399));
+        var renewed = await client.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.OK, renewed.StatusCode);
+        var cookie = AdminSetCookie(renewed);
+        Assert.NotNull(cookie);
+        AssertExpiresAbout(app.Time.GetUtcNow() + AuthServiceExtensions.NeverIdleCookieLifetime, cookie);
+
+        app.Time.Advance(TimeSpan.FromDays(399));
+
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task NeverSession_EndsWhenItsCookieExpiresWithoutARenewal()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromDays(400) + TimeSpan.FromMinutes(1));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task NeverSession_IsRenewedAtMostOnceADay()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromHours(23));
+        var early = await client.GetAsync("/api/auth/me");
+        app.Time.Advance(TimeSpan.FromHours(2));
+        var renewedAt = app.Time.GetUtcNow();
+        var dayLater = await client.GetAsync("/api/auth/me");
+        app.Time.Advance(TimeSpan.FromHours(1));
+        var soonAfter = await client.GetAsync("/api/auth/me");
+
+        Assert.Equal(HttpStatusCode.OK, early.StatusCode);
+        Assert.Null(AdminSetCookie(early));
+        var renewal = AdminSetCookie(dayLater);
+        Assert.NotNull(renewal);
+        AssertExpiresAbout(renewedAt + AuthServiceExtensions.NeverIdleCookieLifetime, renewal);
+        Assert.Equal(HttpStatusCode.OK, soonAfter.StatusCode);
+        Assert.Null(AdminSetCookie(soonAfter));
+    }
+
+    [Fact]
+    public async Task NeverSession_IsNotRenewedByABackgroundRefresh()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+
+        app.Time.Advance(TimeSpan.FromDays(2));
+        var background = await BackgroundRefreshAsync(client);
+        var real = await client.GetAsync("/api/auth/me");
+
+        Assert.Equal(HttpStatusCode.OK, background.StatusCode);
+        Assert.Null(AdminSetCookie(background));
+        Assert.NotNull(AdminSetCookie(real));
+    }
+
+    [Fact]
+    public async Task NeverSession_KeptOnlyByBackgroundRefreshes_EndsWhenItsCookieExpires()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+
+        for (var day = 50; day < 400; day += 50)
+        {
+            app.Time.Advance(TimeSpan.FromDays(50));
+            Assert.Equal(HttpStatusCode.OK, (await BackgroundRefreshAsync(client)).StatusCode);
+        }
+
+        app.Time.Advance(TimeSpan.FromDays(49));
+        Assert.Equal(HttpStatusCode.OK, (await BackgroundRefreshAsync(client)).StatusCode);
+        app.Time.Advance(TimeSpan.FromDays(2));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await BackgroundRefreshAsync(client)).StatusCode);
+    }
+
+    [Fact]
+    public async Task NeverSession_EndsOnSignOut()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        app.Time.Advance(TimeSpan.FromDays(30));
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsJsonAsync("/api/auth/logout", new { })).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/auth/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task NeverSession_EndsOnPasswordChange_EvenIfTheCookieIsReplayed()
+    {
+        using var app = new TestApp();
+        using var client = app.CreateBrowser();
+        var login = await LoginAsync(client, TestApp.Username, TestApp.Password);
+        var cookie = AdminSetCookie(login)!.Split(';')[0];
+        using var otherSession = await SignedInAsync(app);
+        app.Time.Advance(TimeSpan.FromDays(30));
+
+        var changed = await ChangePasswordAsync(otherSession, TestApp.Password, "a brand new password");
+
+        Assert.Equal(HttpStatusCode.NoContent, changed.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/auth/me")).StatusCode);
+        using var replay = app.CreateClient(new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions { HandleCookies = false });
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/auth/me");
+        request.Headers.Add("Cookie", cookie);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await replay.SendAsync(request)).StatusCode);
+    }
+
+    [Fact]
+    public async Task NeverSession_EndsWhenTheAccountIsDeleted()
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+        app.Time.Advance(TimeSpan.FromDays(30));
+
+        await app.WithDbAsync(db => db.AdminAccounts.ExecuteDeleteAsync());
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/auth/me")).StatusCode);
     }
 
     // Request hardening

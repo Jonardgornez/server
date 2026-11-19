@@ -36,7 +36,7 @@ public static class AuthEndpoints
     {
         var group = app.MapGroup("/api/auth");
         group.MapPost("/login", LoginAsync).AllowAnonymous();
-        group.MapPost("/logout", (Delegate)LogoutAsync);
+        group.MapPost("/logout", (Delegate)LogoutAsync).AllowAnonymous();
         group.MapGet("/me", Me);
         group.MapPost("/change-password", ChangePasswordAsync);
         return app;
@@ -97,7 +97,7 @@ public static class AuthEndpoints
 
             // The idle limit is read at sign-in, so a change in settings applies from the next sign-in.
             var settings = await ServerSettingsStore.GetAsync(db, http.RequestAborted);
-            await http.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, BuildPrincipal(admin, settings.IdleTimeoutMinutes));
+            await SignInAdminAsync(http, admin, settings.IdleTimeoutMinutes, now);
             return Results.Ok(new UserResponse(admin.Username));
         }
         finally
@@ -106,13 +106,48 @@ public static class AuthEndpoints
         }
     }
 
-    private static async Task<IResult> LogoutAsync(HttpContext http, ScreenStreamHub screens)
+    // Anonymous, so a browser whose session is already invalid can still clear its cookie.
+    // A valid session is revoked on the server: every cookie of the account stops working, including copies and other browsers.
+    // Only a JSON request is accepted, which a cross-site form can't send without a CORS preflight.
+    private static async Task<IResult> LogoutAsync(HttpContext http, ClaimsPrincipal user, AppDbContext db, ScreenStreamHub screens)
     {
+        if (!http.Request.HasJsonContentType())
+        {
+            return InvalidRequest();
+        }
+
+        int? signedOutAdminId = user.Identity?.IsAuthenticated == true
+            && int.TryParse(user.FindFirstValue(ClaimTypes.NameIdentifier), CultureInfo.InvariantCulture, out var id)
+            && await EndAllSessionsAsync(db, id, http.RequestAborted)
+                ? id
+                : null;
+
         await http.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-        // A live view belongs to the session that opened it, so it ends with the session.
-        await screens.CloseAllAsync(ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
+        if (signedOutAdminId is { } adminId)
+        {
+            await CloseViewsOfAsync(screens, adminId);
+        }
+
         return Results.NoContent();
     }
+
+    // A new session version invalidates every cookie that carries the old one, which ValidateSessionVersionAsync checks on each request.
+    // Returns false when the account no longer exists.
+    internal static async Task<bool> EndAllSessionsAsync(AppDbContext db, int adminId, CancellationToken cancellationToken) =>
+        await db.AdminAccounts
+            .Where(a => a.Id == adminId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(a => a.SessionVersion, a => a.SessionVersion + 1), cancellationToken) > 0;
+
+    // A live view belongs to a session of the account, so it ends with the account's sessions.
+    internal static Task CloseViewsOfAsync(ScreenStreamHub screens, int adminId) =>
+        screens.CloseAllOfAdminAsync(adminId, ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
+
+    // Issues this browser's cookie with the account's current session version and the given idle rule.
+    internal static Task SignInAdminAsync(HttpContext http, AdminAccount admin, int idleTimeoutMinutes, DateTimeOffset now) =>
+        http.SignInAsync(
+            CookieAuthenticationDefaults.AuthenticationScheme,
+            BuildPrincipal(admin, idleTimeoutMinutes),
+            BuildSessionProperties(idleTimeoutMinutes, now));
 
     private static IResult Me(ClaimsPrincipal user) =>
         Results.Ok(new UserResponse(user.Identity?.Name ?? ""));
@@ -183,9 +218,12 @@ public static class AuthEndpoints
                 return BadRequest("New password must be different from your current password.");
             }
 
+            // The new password and the end of every session are saved together, or not at all.
             admin.PasswordHash = hasher.HashPassword(admin, request.NewPassword);
-            admin.SessionVersion++;
+            await using var transaction = await db.Database.BeginTransactionAsync(http.RequestAborted);
             await db.SaveChangesAsync(http.RequestAborted);
+            await EndAllSessionsAsync(db, admin.Id, http.RequestAborted);
+            await transaction.CommitAsync(http.RequestAborted);
         }
         finally
         {
@@ -193,8 +231,8 @@ public static class AuthEndpoints
         }
 
         await http.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-        // The new password invalidates every session, so every live view has to end too.
-        await screens.CloseAllAsync(ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
+        // The new password invalidates every session, so the account's live views have to end too.
+        await CloseViewsOfAsync(screens, id);
         return Results.NoContent();
     }
 
@@ -273,6 +311,13 @@ public static class AuthEndpoints
             CookieAuthenticationDefaults.AuthenticationScheme);
         return new ClaimsPrincipal(identity);
     }
+
+    // A session that never idles out keeps a persistent cookie, so it survives a browser restart until the admin signs out.
+    // A session with an idle limit keeps a browser-session cookie whose expiry comes from the cookie options.
+    private static AuthenticationProperties? BuildSessionProperties(int idleTimeoutMinutes, DateTimeOffset now) =>
+        idleTimeoutMinutes == ServerSettings.NeverIdleTimeoutMinutes
+            ? new AuthenticationProperties { IsPersistent = true, IssuedUtc = now, ExpiresUtc = now + AuthServiceExtensions.NeverIdleCookieLifetime }
+            : null;
 
     internal static IResult BadRequest(string message) =>
         Results.Json(new ErrorResponse(message), statusCode: StatusCodes.Status400BadRequest);

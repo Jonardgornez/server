@@ -326,6 +326,24 @@ public class ScreenStreamHubTests
     }
 
     [Fact]
+    public async Task CloseAllOfAdminAsync_ClosesOnlyThatAdminsViewers_AndMovesTheEpochOn()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var (_, mine) = await OpenAsync(hub, app, pcId: 1);
+        var otherBrowser = new FakeWebSocket();
+        var other = await hub.OpenAsync(2, ScreenProtocol.NotifiedMode, Deadline(app), 0, new ScreenSocket(otherBrowser, ShortTimeout), hub.Epoch, new ScreenViewOwner(2, 1, "other"), "PC-02");
+        var before = hub.Epoch;
+
+        await hub.CloseAllOfAdminAsync(1, ScreenProtocol.SessionEndedCloseStatus, ScreenProtocol.SessionEndedReason);
+
+        Assert.Equal(ScreenProtocol.SessionEndedCloseStatus, mine.CloseSent!.Value.Status);
+        Assert.Null(otherBrowser.CloseSent);
+        Assert.Same(other, Assert.Single(hub.Snapshot()));
+        Assert.NotEqual(before, hub.Epoch);
+    }
+
+    [Fact]
     public async Task CloseAllAsync_ClosesEveryViewerAndMovesTheEpochOn()
     {
         using var app = new TestApp();

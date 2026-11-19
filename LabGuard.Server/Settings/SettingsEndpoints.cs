@@ -1,7 +1,10 @@
+using System.Globalization;
+using System.Security.Claims;
 using LabGuard.Server.Accounts;
 using LabGuard.Server.Auth;
 using LabGuard.Server.Common;
 using LabGuard.Server.Data;
+using LabGuard.Server.Screen;
 using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Settings;
@@ -45,7 +48,7 @@ public static class SettingsEndpoints
         return Results.Ok(ToResponse(settings));
     }
 
-    private static async Task<IResult> SaveAsync(HttpContext http, AppDbContext db)
+    private static async Task<IResult> SaveAsync(HttpContext http, ClaimsPrincipal user, AppDbContext db, TimeProvider clock, ScreenStreamHub screens)
     {
         var request = await AuthEndpoints.ReadBodyAsync<SettingsRequest>(http.Request);
         if (request is null)
@@ -62,8 +65,42 @@ public static class SettingsEndpoints
         var settings = await ServerSettingsStore.GetAsync(db, ct);
         // The uninstall password has its own route, so this save carries the stored one over unchanged.
         UninstallPassword.Store(validated, UninstallPassword.StoredIn(settings));
+        var endsNeverIdleSessions = settings.IdleTimeoutMinutes == ServerSettings.NeverIdleTimeoutMinutes
+            && validated.IdleTimeoutMinutes != ServerSettings.NeverIdleTimeoutMinutes;
         db.Entry(settings).CurrentValues.SetValues(validated);
-        await db.SaveChangesAsync(ct);
+
+        if (!endsNeverIdleSessions)
+        {
+            // Any other change to the idle timeout applies from the next sign-in.
+            await db.SaveChangesAsync(ct);
+            return Results.Ok(ToResponse(settings));
+        }
+
+        if (!int.TryParse(user.FindFirstValue(ClaimTypes.NameIdentifier), CultureInfo.InvariantCulture, out var adminId))
+        {
+            return AuthEndpoints.SignInRequired();
+        }
+
+        // Turning on an idle timeout ends the sessions that never idle out, so none outlives the new rule.
+        // The settings and the end of the sessions are saved together, or not at all.
+        AdminAccount admin;
+        await using (var transaction = await db.Database.BeginTransactionAsync(ct))
+        {
+            await db.SaveChangesAsync(ct);
+            if (!await AuthEndpoints.EndAllSessionsAsync(db, adminId, ct))
+            {
+                return AuthEndpoints.SignInRequired();
+            }
+
+            // Read inside the transaction, which holds the write lock, so the version is exactly the one just set. A sign-out
+            // or password change elsewhere can't slip in between and leave this browser with a version it should not have.
+            admin = await db.AdminAccounts.AsNoTracking().SingleAsync(a => a.Id == adminId, ct);
+            await transaction.CommitAsync(ct);
+        }
+
+        // The administrator who saved stays signed in, under the new idle timeout.
+        await AuthEndpoints.SignInAdminAsync(http, admin, settings.IdleTimeoutMinutes, clock.GetUtcNow());
+        await AuthEndpoints.CloseViewsOfAsync(screens, adminId);
         return Results.Ok(ToResponse(settings));
     }
 
@@ -124,9 +161,9 @@ public static class SettingsEndpoints
             return $"The lock screen message must be {ServerSettings.MaxLockMessageLength} characters or fewer.";
         }
 
-        if (WholeNumberOrNull(request.IdleTimeoutMinutes, ServerSettings.MinIdleTimeoutMinutes, ServerSettings.MaxIdleTimeoutMinutes) is not { } idleMinutes)
+        if (IdleTimeoutOrNull(request.IdleTimeoutMinutes) is not { } idleMinutes)
         {
-            return $"Idle timeout must be a whole number of minutes from {ServerSettings.MinIdleTimeoutMinutes} to {ServerSettings.MaxIdleTimeoutMinutes}.";
+            return $"Idle timeout must be {ServerSettings.NeverIdleTimeoutMinutes} (never) or a whole number of minutes from {ServerSettings.MinIdleTimeoutMinutes} to {ServerSettings.MaxIdleTimeoutMinutes}.";
         }
 
         if (WholeNumberOrNull(request.PowerCountdownSeconds, ServerSettings.MinPowerCountdownSeconds, ServerSettings.MaxPowerCountdownSeconds) is not { } powerCountdown)
@@ -149,6 +186,12 @@ public static class SettingsEndpoints
         settings.LockMessage = lockMessage;
         return null;
     }
+
+    // 0 means the admin is never signed out for being idle.
+    private static int? IdleTimeoutOrNull(double? minutes) =>
+        minutes == ServerSettings.NeverIdleTimeoutMinutes
+            ? ServerSettings.NeverIdleTimeoutMinutes
+            : WholeNumberOrNull(minutes, ServerSettings.MinIdleTimeoutMinutes, ServerSettings.MaxIdleTimeoutMinutes);
 
     private static int? WholeNumberOrNull(double? value, int min, int max) =>
         value is { } number && double.IsFinite(number) && number == Math.Floor(number) && number >= min && number <= max

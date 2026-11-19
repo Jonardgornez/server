@@ -419,6 +419,20 @@ public sealed partial class ScreenStreamHub(ScreenViewAudit audit, ScreenControl
         await Task.WhenAll(viewers.Select(viewer => CloseAsync(viewer, status, reason)));
     }
 
+    // Closes the views one administrator opened, when that administrator's sessions end.
+    // The epoch still moves on, so a view that is being opened while the sessions end is refused.
+    public async Task CloseAllOfAdminAsync(int adminId, WebSocketCloseStatus status, string reason)
+    {
+        IReadOnlyList<ScreenViewer> viewers;
+        lock (_sync)
+        {
+            _epoch++;
+            viewers = _viewersByPc.Values.Where(viewer => viewer.Owner.AdminId == adminId).ToList();
+        }
+
+        await Task.WhenAll(viewers.Select(viewer => CloseAsync(viewer, status, reason)));
+    }
+
     // Ends the control period if the condition still holds, then tells the browser, the attached PC and the streaming helper,
     // and records the end.
     // The state gate is held for the change and the sends, so the browser hears them in order. The audit write happens after it.

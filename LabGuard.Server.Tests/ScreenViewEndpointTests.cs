@@ -378,6 +378,44 @@ public class ScreenViewEndpointTests
         Assert.Null((await AuditRowsAsync(app)).Single().EndedAtUtc);
     }
 
+    [Fact]
+    public async Task Live_WithASessionThatNeverIdlesOut_OpensAndIsLeftOpenByTheMonitorDaysLater()
+    {
+        using var app = new TestApp();
+        var (id, token) = await LiveViewClient.AddPcAsync(app);
+        await SetIdleTimeoutAsync(app, 0);
+        var signedInAt = app.Time.GetUtcNow();
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        using var browser = await OpenViewAsync(app, id, cookie);
+
+        app.Time.Advance(TimeSpan.FromDays(30));
+        await LiveViewClient.HeartbeatAsync(app, token);
+        await app.Services.GetRequiredService<ScreenViewMonitor>().CheckOnceAsync(CancellationToken.None);
+
+        var viewer = app.Services.GetRequiredService<ScreenStreamHub>().CurrentFor(id);
+        Assert.NotNull(viewer);
+        // The cookie keeps its times to the whole second.
+        Assert.InRange(viewer.SessionDeadline, signedInAt.AddDays(400).AddSeconds(-1), signedInAt.AddDays(400));
+        Assert.Null((await AuditRowsAsync(app)).Single().EndedAtUtc);
+    }
+
+    [Fact]
+    public async Task Live_WithASessionThatNeverIdlesOut_ClosesWith4003WhenTheAccountIsDeleted()
+    {
+        using var app = new TestApp();
+        var (id, token) = await LiveViewClient.AddPcAsync(app);
+        await SetIdleTimeoutAsync(app, 0);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        using var browser = await OpenViewAsync(app, id, cookie);
+
+        app.Time.Advance(TimeSpan.FromDays(30));
+        await LiveViewClient.HeartbeatAsync(app, token);
+        await app.WithDbAsync(db => db.AdminAccounts.ExecuteDeleteAsync());
+        await app.Services.GetRequiredService<ScreenViewMonitor>().CheckOnceAsync(CancellationToken.None);
+
+        await AssertCloseAsync(browser, (WebSocketCloseStatus)4003, "The administrator session ended.");
+    }
+
     // Session lifetime: logout, password change, expiry and no renewal
 
     [Fact]
@@ -392,6 +430,51 @@ public class ScreenViewEndpointTests
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         await AssertCloseAsync(browser, (WebSocketCloseStatus)4003, "The administrator session ended.");
+    }
+
+    [Fact]
+    public async Task Live_AfterLogoutInAnotherBrowser_ClosesWith4003_AndTheViewCookieNoLongerWorks()
+    {
+        using var app = new TestApp();
+        var (id, _) = await LiveViewClient.AddPcAsync(app);
+        var viewCookie = await LiveViewClient.SignInCookieAsync(app);
+        var otherCookie = await LiveViewClient.SignInCookieAsync(app);
+        using var browser = await OpenViewAsync(app, id, viewCookie);
+
+        using var response = await AdminRequestAsync(app, HttpMethod.Post, "/api/auth/logout", otherCookie, new { });
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        await AssertCloseAsync(browser, (WebSocketCloseStatus)4003, "The administrator session ended.");
+        using var me = await AdminRequestAsync(app, HttpMethod.Get, "/api/auth/me", viewCookie);
+        Assert.Equal(HttpStatusCode.Unauthorized, me.StatusCode);
+    }
+
+    [Fact]
+    public async Task Live_WhenTheIdleTimeoutChangesFromNeverToMinutes_ClosesWith4003()
+    {
+        using var app = new TestApp();
+        var (id, _) = await LiveViewClient.AddPcAsync(app);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        using var browser = await OpenViewAsync(app, id, cookie);
+
+        await SetIdleTimeoutAsync(app, 5);
+
+        await AssertCloseAsync(browser, (WebSocketCloseStatus)4003, "The administrator session ended.");
+    }
+
+    [Fact]
+    public async Task Live_AnAnonymousLogout_LeavesTheViewOpen()
+    {
+        using var app = new TestApp();
+        var (id, _) = await LiveViewClient.AddPcAsync(app);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        using var browser = await OpenViewAsync(app, id, cookie);
+
+        using var client = app.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        using var response = await client.PostAsJsonAsync("/api/auth/logout", new { });
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.NotNull(app.Services.GetRequiredService<ScreenStreamHub>().CurrentFor(id));
     }
 
     [Fact]

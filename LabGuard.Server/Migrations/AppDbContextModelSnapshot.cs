@@ -621,7 +621,9 @@ namespace LabGuard.Server.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<int>("IdleTimeoutMinutes")
-                        .HasColumnType("INTEGER");
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0);
 
                     b.Property<string>("LockMessage")
                         .IsRequired()

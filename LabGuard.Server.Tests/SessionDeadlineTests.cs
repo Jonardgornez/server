@@ -46,6 +46,23 @@ public class SessionDeadlineTests
     }
 
     [Fact]
+    public void SessionDeadline_ForASessionThatNeverIdlesOut_IsTheCookieExpiry()
+    {
+        var cookieExpiry = Issued.AddDays(400);
+
+        var deadline = AuthServiceExtensions.SessionDeadlineUtc(Principal("0"), Properties(Issued, cookieExpiry));
+
+        Assert.Equal(cookieExpiry, deadline);
+    }
+
+    [Fact]
+    public void SessionDeadline_ForASessionThatNeverIdlesOut_IsNullWithoutACookieExpiryOrAnIssueTime()
+    {
+        Assert.Null(AuthServiceExtensions.SessionDeadlineUtc(Principal("0"), Properties(Issued)));
+        Assert.Null(AuthServiceExtensions.SessionDeadlineUtc(Principal("0"), Properties(null, Issued.AddDays(400))));
+    }
+
+    [Fact]
     public void SessionDeadline_UsesTheInvariantNumberFormat()
     {
         var principal = Principal(15.ToString(CultureInfo.InvariantCulture));
