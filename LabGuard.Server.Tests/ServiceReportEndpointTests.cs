@@ -117,7 +117,7 @@ public class ServiceReportEndpointTests
         var response = await ReportAsync(pc, registered, FullReport());
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null,"fastUserSwitchingDisabled":false}""", await response.Content.ReadAsStringAsync());
+        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null,"fastUserSwitchingDisabled":false,"taskManagerDisabled":false,"restrictedPolicies":[],"hiddenDrives":[],"disabledDrives":[],"explorerRestartGeneration":0}""", await response.Content.ReadAsStringAsync());
         var stored = await StoredReportAsync(app, registered.Id);
         Assert.Equal("0.23.0", stored!.ServiceVersion);
         Assert.True(stored.ClientRunning);
@@ -483,7 +483,7 @@ public class ServiceReportEndpointTests
 
         var response = await ReportAsync(pc, registered, new { clientVersion = "0.19.0" });
 
-        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null,"fastUserSwitchingDisabled":false}""", await response.Content.ReadAsStringAsync());
+        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null,"fastUserSwitchingDisabled":false,"taskManagerDisabled":false,"restrictedPolicies":[],"hiddenDrives":[],"disabledDrives":[],"explorerRestartGeneration":0}""", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -644,6 +644,56 @@ public class ServiceReportEndpointTests
         Assert.True((await JsonOf(await ReportAsync(pc, restricted, FullReport()))).GetProperty("fastUserSwitchingDisabled").GetBoolean());
         Assert.False((await JsonOf(await ReportAsync(pc, other, FullReport()))).GetProperty("fastUserSwitchingDisabled").GetBoolean());
     }
+
+    // Task Manager
+
+    // Offline PCs are changed too, and each PC gets only its own setting.
+    [Fact]
+    public async Task Report_AnswersTaskManagerDisabled_ForThatPcOnly()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var restricted = await AddPcAsync(app, "PC-01", seenAgo: TimeSpan.FromMinutes(5));
+        var other = await AddPcAsync(app, "PC-02");
+        Assert.Equal(1, await AffectedAsync(await admin.PostAsJsonAsync("/api/pcs/task-manager", new { ids = new[] { restricted.Id }, disabled = true })));
+
+        Assert.True((await JsonOf(await ReportAsync(pc, restricted, FullReport()))).GetProperty("taskManagerDisabled").GetBoolean());
+        Assert.False((await JsonOf(await ReportAsync(pc, other, FullReport()))).GetProperty("taskManagerDisabled").GetBoolean());
+    }
+
+    // Offline PCs are changed too, and each PC gets only its own policies, drives and Explorer restart count.
+    [Fact]
+    public async Task Report_AnswersRestrictions_ForThatPcOnly()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var restricted = await AddPcAsync(app, "PC-01", seenAgo: TimeSpan.FromMinutes(5));
+        var other = await AddPcAsync(app, "PC-02");
+        Assert.Equal(1, await AffectedAsync(await admin.PostAsJsonAsync("/api/pcs/restrictions", new
+        {
+            ids = new[] { restricted.Id },
+            policies = new Dictionary<string, bool> { ["control-panel"] = true, ["registry-editor"] = true },
+            hiddenDrives = new Dictionary<string, bool> { ["D"] = true },
+            disabledDrives = new Dictionary<string, bool> { ["E"] = true },
+            applyNow = true,
+        })));
+
+        var answer = await JsonOf(await ReportAsync(pc, restricted, FullReport()));
+        Assert.Equal(["registry-editor", "control-panel"], Strings(answer.GetProperty("restrictedPolicies")));
+        Assert.Equal(["D"], Strings(answer.GetProperty("hiddenDrives")));
+        Assert.Equal(["E"], Strings(answer.GetProperty("disabledDrives")));
+        Assert.Equal(1, answer.GetProperty("explorerRestartGeneration").GetInt32());
+
+        var otherAnswer = await JsonOf(await ReportAsync(pc, other, FullReport()));
+        Assert.Empty(Strings(otherAnswer.GetProperty("restrictedPolicies")));
+        Assert.Empty(Strings(otherAnswer.GetProperty("hiddenDrives")));
+        Assert.Empty(Strings(otherAnswer.GetProperty("disabledDrives")));
+        Assert.Equal(0, otherAnswer.GetProperty("explorerRestartGeneration").GetInt32());
+    }
+
+    private static string?[] Strings(JsonElement array) => array.EnumerateArray().Select(item => item.GetString()).ToArray();
 
     // The offer and the setting are answered together.
     [Fact]

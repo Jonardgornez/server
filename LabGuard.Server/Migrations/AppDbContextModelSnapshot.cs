@@ -158,11 +158,24 @@ namespace LabGuard.Server.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("DisabledDrives")
+                        .IsRequired()
+                        .HasMaxLength(26)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ExplorerRestartGeneration")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("FailedLoginCount")
                         .HasColumnType("INTEGER");
 
                     b.Property<bool>("FastUserSwitchingDisabled")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("HiddenDrives")
+                        .IsRequired()
+                        .HasMaxLength(26)
+                        .HasColumnType("TEXT");
 
                     b.Property<bool?>("InternetBlockApplied")
                         .HasColumnType("INTEGER");
@@ -212,10 +225,21 @@ namespace LabGuard.Server.Migrations
                     b.Property<long>("RegisteredAtUtc")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("RestrictedPolicies")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("RestrictionsVersion")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long?>("ShutdownDeliveredAtUtc")
                         .HasColumnType("INTEGER");
 
                     b.Property<long?>("ShutdownRequestedAtUtc")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("TaskManagerDisabled")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("TokenHash")
