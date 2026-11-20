@@ -20,10 +20,12 @@ public record ServiceReportRequest(
 // ClientUpdate is the offer the heartbeat would make: the stored installer, while the PC's pending update targets it and it is still behind.
 // Left out otherwise. KeepAwake is always written: while true, the service keeps the PC awake with the screen on.
 // UninstallPassword is always written too, null while no password is set: the service treats a missing one as no change, and null as removed.
+// FastUserSwitchingDisabled is always written: while true, the service hides Windows "Switch user".
 public record ServiceReportResponse(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ClientUpdateOffer? ClientUpdate,
     bool KeepAwake,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] UninstallPasswordHash? UninstallPassword);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] UninstallPasswordHash? UninstallPassword,
+    bool FastUserSwitchingDisabled);
 
 // The service report is a second source of the PC's version and update, next to the heartbeat. Only the latest report of a PC is kept.
 // It never changes LastSeenUtc, which stays with the client heartbeat.
@@ -57,9 +59,17 @@ public static partial class ClientEndpoints
         }
 
         var clientUpdate = await ClientUpdateHeartbeat.HandleServiceReportAsync(db, pcId, values.ClientVersion, HeartbeatProgress(values.Update), now, ct);
-        var keepAwake = await db.Pcs.AsNoTracking().Where(p => p.Id == pcId).Select(p => p.KeepAwake).FirstOrDefaultAsync(ct);
+        var pcSettings = await db.Pcs
+            .AsNoTracking()
+            .Where(p => p.Id == pcId)
+            .Select(p => new { p.KeepAwake, p.FastUserSwitchingDisabled })
+            .FirstOrDefaultAsync(ct);
         var settings = await ServerSettingsStore.GetAsync(db, ct);
-        return Results.Ok(new ServiceReportResponse(clientUpdate, keepAwake, UninstallPassword.StoredIn(settings)));
+        return Results.Ok(new ServiceReportResponse(
+            clientUpdate,
+            pcSettings?.KeepAwake ?? false,
+            UninstallPassword.StoredIn(settings),
+            pcSettings?.FastUserSwitchingDisabled ?? false));
     }
 
     // Only the update states the heartbeat also reports are recorded on the PC. The service's own pending and waiting stay in the

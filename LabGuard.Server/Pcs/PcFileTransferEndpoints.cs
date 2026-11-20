@@ -43,7 +43,8 @@ public static partial class PcEndpoints
 {
     private const string SharedFileNotFoundMessage = "File not found.";
     private const string UnknownPcsMessage = "One or more of the chosen PCs no longer exist.";
-    private const string FolderMessage = "Choose Desktop, Documents or Downloads.";
+    private const string NoOnlinePcsMessage = "None of these PCs are online.";
+    private const string FolderMessage ="Choose Desktop, Documents or Downloads.";
     private const string DecisionMessage = "Choose overwrite, keep both or skip.";
 
     private static IEndpointRouteBuilder MapFileTransferEndpoints(this RouteGroupBuilder group)
@@ -55,7 +56,8 @@ public static partial class PcEndpoints
         return group;
     }
 
-    // Creates one waiting transfer per PC. Each PC picks it up on its next heartbeat, so an offline PC gets it when it comes back within the hour.
+    // Creates one waiting transfer per online PC; offline PCs are skipped. Each PC picks it up on its next heartbeat, and one that
+    // drops offline before then still gets it if it comes back within the hour.
     private static async Task<IResult> SendFileAsync(HttpContext http, AppDbContext db, FileTransferProgress progress, TimeProvider clock)
     {
         var request = await AuthEndpoints.ReadBodyAsync<PcFileSendRequest>(http.Request);
@@ -91,19 +93,27 @@ public static partial class PcEndpoints
         }
 
         var file = await db.SharedFiles.AsNoTracking().SingleAsync(f => f.Id == sharedFileId, ct);
-        var pcNames = await db.Pcs
+        var pcs = await db.Pcs
             .AsNoTracking()
             .Where(p => pcIds.Contains(p.Id))
-            .ToDictionaryAsync(p => p.Id, p => p.Name, ct);
-        if (pcNames.Count != pcIds.Length)
+            .Select(p => new { p.Id, p.Name, p.LastSeenUtc })
+            .ToDictionaryAsync(p => p.Id, ct);
+        if (pcs.Count != pcIds.Length)
         {
             return AuthEndpoints.BadRequest(UnknownPcsMessage);
         }
 
-        var transfers = pcIds.Select(pcId => new PcFileTransfer
+        // Only an online PC gets the file. An offline one in the list is skipped, so a stale dashboard can't queue it.
+        var onlinePcIds = pcIds.Where(pcId => IsOnline(pcs[pcId].LastSeenUtc, now)).ToArray();
+        if (onlinePcIds.Length == 0)
+        {
+            return AuthEndpoints.BadRequest(NoOnlinePcsMessage);
+        }
+
+        var transfers = onlinePcIds.Select(pcId => new PcFileTransfer
         {
             PcId = pcId,
-            PcName = pcNames[pcId],
+            PcName = pcs[pcId].Name,
             SharedFileId = file.Id,
             FileName = file.Name,
             SizeBytes = file.SizeBytes,

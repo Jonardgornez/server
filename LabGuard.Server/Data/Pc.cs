@@ -42,6 +42,10 @@ public class Pc
     // Set by the administrator, only while the PC is online. The PC's background service keeps it awake with the screen on while it is true.
     public bool KeepAwake { get; set; }
 
+    // Set by the administrator under Restrictions. The PC's background service hides Windows "Switch user" while it is true, at any
+    // time, offline PCs too: the service picks it up from its next report.
+    public bool FastUserSwitchingDisabled { get; set; }
+
     // Lockout for user logins attempted from this PC.
     public int FailedLoginCount { get; set; }
     // Failures older than this are forgotten, so the count doesn't build up across days.

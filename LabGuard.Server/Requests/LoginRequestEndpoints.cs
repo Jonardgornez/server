@@ -22,13 +22,20 @@ public record LoginRequestResponse(
     DateTimeOffset? DecidedAt,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Reason = null);
 
-public record LoginRequestListResponse(List<LoginRequestResponse> Pending, List<LoginRequestResponse> History);
+// History is one page of decided requests, newest first. HistoryPage is the page actually sent: one past the end is clamped to the last.
+public record LoginRequestListResponse(
+    List<LoginRequestResponse> Pending,
+    List<LoginRequestResponse> History,
+    int HistoryTotal,
+    int HistoryPage,
+    int HistoryPageSize);
 public record DenyAllLoginRequestsResponse(List<LoginRequestResponse> Denied);
 
 public static class LoginRequestEndpoints
 {
-    public const int MaxHistoryEntries = 50;
+    public const int HistoryPageSize = 10;
     public const int MaxDenyAllIds = 500;
+    public const string HistoryPageMessage = "History page must be a whole number, 1 or more.";
 
     private const string ChooseTimeMessage = "Choose a time limit or open time.";
     private const string InvalidModeMessage = $"Time mode must be \"{AccountEndpoints.TimeLimitMode}\" or \"{AccountEndpoints.OpenTimeMode}\".";
@@ -43,8 +50,16 @@ public static class LoginRequestEndpoints
         return app;
     }
 
-    private static async Task<IResult> ListAsync(AppDbContext db, TimeProvider clock, CancellationToken cancellationToken)
+    private static async Task<IResult> ListAsync(string? historyPage, AppDbContext db, TimeProvider clock, CancellationToken cancellationToken)
     {
+        var requestedPage = 1L;
+        if (!string.IsNullOrWhiteSpace(historyPage)
+            && (!long.TryParse(historyPage.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out requestedPage)
+                || requestedPage < 1))
+        {
+            return AuthEndpoints.BadRequest(HistoryPageMessage);
+        }
+
         // Expired requests are closed first, so they appear in history and never as pending.
         try
         {
@@ -63,17 +78,22 @@ public static class LoginRequestEndpoints
             .ThenBy(r => r.Id)
             .ToListAsync(cancellationToken);
 
-        var history = await db.LoginRequests
-            .AsNoTracking()
-            .Where(r => r.Status != LoginRequestStatus.Pending)
+        var decided = db.LoginRequests.AsNoTracking().Where(r => r.Status != LoginRequestStatus.Pending);
+        var historyTotal = await decided.CountAsync(cancellationToken);
+        var page = Logs.SessionLogRules.ClampPage(requestedPage, historyTotal, HistoryPageSize);
+        var history = await decided
             .OrderByDescending(r => r.DecidedAtUtc)
             .ThenByDescending(r => r.Id)
-            .Take(MaxHistoryEntries)
+            .Skip((page - 1) * HistoryPageSize)
+            .Take(HistoryPageSize)
             .ToListAsync(cancellationToken);
 
         return Results.Ok(new LoginRequestListResponse(
             pending.Select(ToResponse).ToList(),
-            history.Select(ToResponse).ToList()));
+            history.Select(ToResponse).ToList(),
+            historyTotal,
+            page,
+            HistoryPageSize));
     }
 
     private static async Task<IResult> ApproveAsync(int id, HttpContext http, AppDbContext db, TimeProvider clock)

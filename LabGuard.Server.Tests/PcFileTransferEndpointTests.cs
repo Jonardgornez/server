@@ -53,7 +53,7 @@ public class PcFileTransferEndpointTests
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
         var first = await AddPcAsync(app, "PC-01");
-        var second = await AddPcAsync(app, "PC-02", seenAgo: TimeSpan.FromHours(1));
+        var second = await AddPcAsync(app, "PC-02");
         var bytes = Bytes("hello");
         var fileId = await UploadIdAsync(admin, bytes, "notes.pdf");
 
@@ -80,8 +80,40 @@ public class PcFileTransferEndpointTests
             Assert.Equal(System.Text.Json.JsonValueKind.Null, transfer.GetProperty("bytesSent").ValueKind);
         }
 
-        // The first PC is online but has reported no client version; the second has been offline for an hour.
-        Assert.Equal(["clientTooOld", "offline"], transfers.Select(t => t.GetProperty("waitingReason").GetString()));
+        // Both PCs are online but have reported no client version.
+        Assert.Equal(["clientTooOld", "clientTooOld"], transfers.Select(t => t.GetProperty("waitingReason").GetString()));
+    }
+
+    // The dashboard's rule: a PC not seen for 15 seconds is offline, and an offline PC gets no file.
+    [Fact]
+    public async Task Send_SkipsOfflinePcs_AndSendsToTheOnlineOnes()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var online = await AddPcAsync(app, "PC-01", seenAgo: TimeSpan.FromSeconds(14));
+        var offline = await AddPcAsync(app, "PC-02", seenAgo: TimeSpan.FromSeconds(15));
+        var fileId = await UploadIdAsync(admin, Bytes("abc"));
+
+        var transfers = await SendTransfersAsync(admin, fileId, online.Id, offline.Id);
+
+        Assert.Equal([online.Id], transfers.Select(t => t.GetProperty("pcId").GetInt32()));
+        Assert.Equal(0, await app.WithDbAsync(db => db.PcFileTransfers.CountAsync(t => t.PcId == offline.Id)));
+    }
+
+    [Fact]
+    public async Task Send_OnlyOfflinePcs_Returns400AndCreatesNothing()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        var first = await AddPcAsync(app, "PC-01", seenAgo: TimeSpan.FromHours(1));
+        var second = await AddPcAsync(app, "PC-02", seenAgo: TimeSpan.FromMinutes(1));
+        var fileId = await UploadIdAsync(admin, Bytes("abc"));
+
+        var response = await SendAsync(admin, new { ids = new[] { first.Id, second.Id }, sharedFileId = fileId });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("None of these PCs are online.", (await response.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>()).GetProperty("error").GetString());
+        Assert.Equal(0, await app.WithDbAsync(db => db.PcFileTransfers.CountAsync()));
     }
 
     [Fact]
@@ -157,9 +189,10 @@ public class PcFileTransferEndpointTests
     {
         using var app = new TestApp();
         using var admin = await SignedInAsync(app);
-        var pc = await AddPcAsync(app);
         var fileId = await UploadIdAsync(admin, Bytes("abc"));
         app.Time.Advance(TimeSpan.FromMinutes(50));
+        // Added now so it is online when the file is sent.
+        var pc = await AddPcAsync(app);
         // Signed in again: the first sign-in has passed its idle limit.
         using var laterAdmin = await SignedInAsync(app);
 

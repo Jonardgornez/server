@@ -180,7 +180,7 @@ public class LoginRequestEndpointTests
     }
 
     [Fact]
-    public async Task List_HistoryIsMostRecentlyDecidedFirstAndLimited()
+    public async Task List_HistoryIsMostRecentlyDecidedFirst_InPagesOfTen()
     {
         using var app = new TestApp();
         using var client = await SignedInAsync(app);
@@ -193,16 +193,49 @@ public class LoginRequestEndpointTests
 
         Assert.Equal([newer, older], Ids(body.GetProperty("history")));
         Assert.Equal([pending], Ids(body.GetProperty("pending")));
+        Assert.Equal(2, body.GetProperty("historyTotal").GetInt32());
+        Assert.Equal(1, body.GetProperty("historyPage").GetInt32());
+        Assert.Equal(LoginRequestEndpoints.HistoryPageSize, body.GetProperty("historyPageSize").GetInt32());
 
-        for (var i = 0; i < LoginRequestEndpoints.MaxHistoryEntries + 5; i++)
+        // 23 decided in all: oldest first here, so the last one added is the newest of these.
+        var added = new List<int>();
+        for (var i = 0; i < 21; i++)
         {
-            await AddAsync(app, status: LoginRequestStatus.Denied, decidedAt: now.AddMinutes(-100 + i));
+            added.Add(await AddAsync(app, status: LoginRequestStatus.Denied, decidedAt: now.AddMinutes(-100 + i)));
         }
 
-        body = await JsonOf(await client.GetAsync("/api/login-requests"));
-        var history = Ids(body.GetProperty("history"));
-        Assert.Equal(LoginRequestEndpoints.MaxHistoryEntries, history.Length);
-        Assert.Equal(newer, history[0]);
+        var first = await JsonOf(await client.GetAsync("/api/login-requests?historyPage=1"));
+        var firstIds = Ids(first.GetProperty("history"));
+        Assert.Equal(10, firstIds.Length);
+        Assert.Equal([newer, older], firstIds[..2]);
+        Assert.Equal(23, first.GetProperty("historyTotal").GetInt32());
+        Assert.Equal([pending], Ids(first.GetProperty("pending")));
+
+        var third = await JsonOf(await client.GetAsync("/api/login-requests?historyPage=3"));
+        Assert.Equal([added[2], added[1], added[0]], Ids(third.GetProperty("history")));
+        Assert.Equal(3, third.GetProperty("historyPage").GetInt32());
+
+        // A page past the end shows the last one, so a list that shrank between polls is never empty by mistake.
+        var beyond = await JsonOf(await client.GetAsync("/api/login-requests?historyPage=9"));
+        Assert.Equal(3, beyond.GetProperty("historyPage").GetInt32());
+        Assert.Equal(3, beyond.GetProperty("history").GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("%2B2")]
+    [InlineData("1.5")]
+    [InlineData("abc")]
+    public async Task List_BadHistoryPage_IsRefused(string historyPage)
+    {
+        using var app = new TestApp();
+        using var client = await SignedInAsync(app);
+
+        var response = await client.GetAsync($"/api/login-requests?historyPage={historyPage}");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(LoginRequestEndpoints.HistoryPageMessage, (await JsonOf(response)).GetProperty("error").GetString());
     }
 
     [Fact]

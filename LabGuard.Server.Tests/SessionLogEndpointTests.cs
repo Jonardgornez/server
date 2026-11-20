@@ -242,6 +242,35 @@ public class SessionLogEndpointTests
         Assert.Empty(PcNamesOf(await JsonOf(await admin.GetAsync($"{ListPath}?pc=lab&user=bob"))));
     }
 
+    [Fact]
+    public async Task ListAndExport_PcIdFilter_ShowOnlyThatPc()
+    {
+        using var app = NewApp();
+        var pc1 = Ended("PC-1", "alice", Local(9, 8), Local(9, 9));
+        pc1.PcId = 1;
+        var pc10 = Ended("PC-10", "bob", Local(9, 10), Local(9, 11));
+        pc10.PcId = 10;
+        var pc1Renamed = Ended("Old-Name", "carol", Local(9, 12), Local(9, 13));
+        pc1Renamed.PcId = 1;
+        await SaveAsync(app, [pc1, pc10, pc1Renamed]);
+        using var admin = await app.SignedInAdminAsync();
+
+        Assert.Equal(new[] { "Old-Name", "PC-1" }, PcNamesOf(await JsonOf(await admin.GetAsync($"{ListPath}?pcId=1"))));
+
+        var csv = Encoding.UTF8.GetString(await (await admin.GetAsync($"{ExportPath}?pcId=1")).Content.ReadAsByteArrayAsync());
+        Assert.Contains("PC-1,", csv);
+        Assert.DoesNotContain("PC-10", csv);
+    }
+
+    [Fact]
+    public async Task List_BadPcId_IsRefused()
+    {
+        using var app = NewApp();
+        using var admin = await app.SignedInAdminAsync();
+
+        await AssertErrorAsync(await admin.GetAsync($"{ListPath}?pcId=abc"), HttpStatusCode.BadRequest, "The PC id must be a whole number, 1 or more.");
+    }
+
     // List: paging
 
     [Fact]

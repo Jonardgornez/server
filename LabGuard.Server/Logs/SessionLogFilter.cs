@@ -6,10 +6,11 @@ using Microsoft.EntityFrameworkCore;
 namespace LabGuard.Server.Logs;
 
 // The query string of the session log list and its export, as sent. A missing or blank value is null.
-public sealed record SessionLogListQuery(string? From, string? To, string? Pc, string? User, string? Page, string? PageSize);
+// Pc is a "contains" search on the name; PcId keeps only that one PC's sessions.
+public sealed record SessionLogListQuery(string? From, string? To, string? Pc, string? User, string? Page, string? PageSize, string? PcId = null);
 
 // The checked filters and paging. From and To are local calendar days, both inclusive; null means no limit.
-public sealed record SessionLogFilter(DateOnly? From, DateOnly? To, string? PcName, string? UserName, long Page, int PageSize)
+public sealed record SessionLogFilter(DateOnly? From, DateOnly? To, string? PcName, string? UserName, long Page, int PageSize, int? PcId = null)
 {
     public const int DefaultPageSize = 10;
     public const int MaxPageSize = 100;
@@ -50,6 +51,18 @@ public sealed record SessionLogFilter(DateOnly? From, DateOnly? To, string? PcNa
             return false;
         }
 
+        int? pcId = null;
+        if (Trimmed(raw.PcId) is not null)
+        {
+            if (!TryReadNumber(raw.PcId, 0, 1, int.MaxValue, out var parsedPcId))
+            {
+                error = "The PC id must be a whole number, 1 or more.";
+                return false;
+            }
+
+            pcId = (int)parsedPcId;
+        }
+
         var userName = Trimmed(raw.User);
         if (userName?.Length > MaxTextLength)
         {
@@ -69,11 +82,11 @@ public sealed record SessionLogFilter(DateOnly? From, DateOnly? To, string? PcNa
             return false;
         }
 
-        filter = new SessionLogFilter(from, to, pcName, userName, page, (int)pageSize);
+        filter = new SessionLogFilter(from, to, pcName, userName, page, (int)pageSize, pcId);
         return true;
     }
 
-    // Keeps the sessions that started within the filter's local days, and that match the PC and user filters.
+    // Keeps the sessions that started within the filter's local days, and that match the PC id, PC name and user filters.
     public IQueryable<PcSession> ApplyTo(IQueryable<PcSession> sessions, TimeZoneInfo zone)
     {
         if (From is { } firstDay)
@@ -86,6 +99,11 @@ public sealed record SessionLogFilter(DateOnly? From, DateOnly? To, string? PcNa
         {
             var endUtc = SessionLogRules.LocalDayEndUtc(lastDay, zone);
             sessions = sessions.Where(s => s.StartedAtUtc < endUtc);
+        }
+
+        if (PcId is { } pcId)
+        {
+            sessions = sessions.Where(s => s.PcId == pcId);
         }
 
         if (PcName is { } pcName)
