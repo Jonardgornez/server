@@ -11,7 +11,8 @@ public class SessionLogFilterTests
         string? pc = null,
         string? user = null,
         string? page = null,
-        string? pageSize = null) => new(from, to, pc, user, page, pageSize);
+        string? pageSize = null,
+        string? pcId = null) => new(from, to, pc, user, page, pageSize, pcId);
 
     private static void AssertRejected(SessionLogListQuery query, string expectedError)
     {
@@ -94,6 +95,48 @@ public class SessionLogFilterTests
     public void TryParse_PcFilterOverTheLimit_IsRefused()
     {
         AssertRejected(Query(pc: new string('p', SessionLogFilter.MaxTextLength + 1)), "The PC filter can be at most 64 characters.");
+    }
+
+    [Fact]
+    public void TryParse_PcId_IsParsedAndTrimmed()
+    {
+        Assert.True(SessionLogFilter.TryParse(Query(pcId: " 7 "), out var filter, out _));
+        Assert.Equal(7, filter.PcId);
+    }
+
+    [Fact]
+    public void TryParse_BlankPcId_CountsAsNotGiven()
+    {
+        Assert.True(SessionLogFilter.TryParse(Query(pcId: "  "), out var filter, out _));
+        Assert.Null(filter.PcId);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("+2")]
+    [InlineData("1.5")]
+    [InlineData("abc")]
+    [InlineData("2147483648")]
+    public void TryParse_BadPcId_IsRefused(string pcId)
+    {
+        AssertRejected(Query(pcId: pcId), "The PC id must be a whole number, 1 or more.");
+    }
+
+    [Fact]
+    public void ApplyTo_PcId_KeepsOnlyThatPc()
+    {
+        var sessions = new[]
+        {
+            new PcSession { Id = 1, PcId = 1, PcName = "PC-1" },
+            new PcSession { Id = 2, PcId = 10, PcName = "PC-10" },
+            new PcSession { Id = 3, PcId = 1, PcName = "Old name" },
+        };
+        var filter = new SessionLogFilter(null, null, null, null, 1, 10, PcId: 1);
+
+        var kept = filter.ApplyTo(sessions.AsQueryable(), TimeZoneInfo.Utc).Select(s => s.Id).ToArray();
+
+        Assert.Equal(new[] { 1, 3 }, kept);
     }
 
     [Fact]

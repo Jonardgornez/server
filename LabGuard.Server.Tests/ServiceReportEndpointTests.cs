@@ -117,7 +117,7 @@ public class ServiceReportEndpointTests
         var response = await ReportAsync(pc, registered, FullReport());
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null}""", await response.Content.ReadAsStringAsync());
+        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null,"fastUserSwitchingDisabled":false}""", await response.Content.ReadAsStringAsync());
         var stored = await StoredReportAsync(app, registered.Id);
         Assert.Equal("0.23.0", stored!.ServiceVersion);
         Assert.True(stored.ClientRunning);
@@ -483,7 +483,7 @@ public class ServiceReportEndpointTests
 
         var response = await ReportAsync(pc, registered, new { clientVersion = "0.19.0" });
 
-        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null}""", await response.Content.ReadAsStringAsync());
+        Assert.Equal("""{"keepAwake":false,"uninstallPassword":null,"fastUserSwitchingDisabled":false}""", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -626,6 +626,23 @@ public class ServiceReportEndpointTests
         var response = await ReportAsync(pc, other, FullReport());
 
         Assert.False((await JsonOf(response)).GetProperty("keepAwake").GetBoolean());
+    }
+
+    // Fast user switching
+
+    // Offline PCs are changed too, and each PC gets only its own setting.
+    [Fact]
+    public async Task Report_AnswersFastUserSwitchingDisabled_ForThatPcOnly()
+    {
+        using var app = new TestApp();
+        using var admin = await SignedInAsync(app);
+        using var pc = app.CreatePcClient(OtherPcAddress);
+        var restricted = await AddPcAsync(app, "PC-01", seenAgo: TimeSpan.FromMinutes(5));
+        var other = await AddPcAsync(app, "PC-02");
+        Assert.Equal(1, await AffectedAsync(await admin.PostAsJsonAsync("/api/pcs/fast-user-switching", new { ids = new[] { restricted.Id }, disabled = true })));
+
+        Assert.True((await JsonOf(await ReportAsync(pc, restricted, FullReport()))).GetProperty("fastUserSwitchingDisabled").GetBoolean());
+        Assert.False((await JsonOf(await ReportAsync(pc, other, FullReport()))).GetProperty("fastUserSwitchingDisabled").GetBoolean());
     }
 
     // The offer and the setting are answered together.

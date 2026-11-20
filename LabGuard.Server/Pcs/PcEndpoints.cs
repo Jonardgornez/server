@@ -18,6 +18,7 @@ namespace LabGuard.Server.Pcs;
 // Wallpaper is the wallpaper the administrator gave this PC, null when it has none.
 // KeepAwake is whether the PC's background service keeps it awake with the screen on.
 // Service is the latest status report of the PC's background service, null when it has sent none.
+// FastUserSwitchingDisabled is whether the administrator wants Windows "Switch user" hidden on the PC.
 public record PcResponse(
     int Id,
     string Name,
@@ -35,7 +36,8 @@ public record PcResponse(
     PcClientUpdate? ClientUpdate,
     WallpaperRef? Wallpaper,
     bool KeepAwake,
-    PcServiceSummary? Service);
+    PcServiceSummary? Service,
+    bool FastUserSwitchingDisabled);
 
 // Username is null for an admin unlock, which has no account.
 public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
@@ -87,6 +89,7 @@ public static partial class PcEndpoints
         group.MapPost("/client-update/cancel", CancelClientUpdateAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/wallpaper", SetWallpaperAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/keep-awake", SetKeepAwakeAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/fast-user-switching", SetFastUserSwitchingAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapFileTransferEndpoints();
         return app;
     }
@@ -156,7 +159,8 @@ public static partial class PcEndpoints
                 ToClientUpdate(p),
                 p.WallpaperId is { } wallpaperId && wallpapers.TryGetValue(wallpaperId, out var wallpaper) ? wallpaper : null,
                 p.KeepAwake,
-                services.TryGetValue(p.Id, out var service) ? new PcServiceSummary(service.ReceivedAtUtc, service.ClientRunning) : null);
+                services.TryGetValue(p.Id, out var service) ? new PcServiceSummary(service.ReceivedAtUtc, service.ClientRunning) : null,
+                p.FastUserSwitchingDisabled);
         }));
     }
 

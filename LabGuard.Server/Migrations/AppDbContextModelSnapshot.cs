@@ -161,6 +161,9 @@ namespace LabGuard.Server.Migrations
                     b.Property<int>("FailedLoginCount")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("FastUserSwitchingDisabled")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool?>("InternetBlockApplied")
                         .HasColumnType("INTEGER");
 

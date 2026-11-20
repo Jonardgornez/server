@@ -30,7 +30,53 @@ public static class SessionLogEndpoints
         var group = app.MapGroup("/api/session-logs");
         group.MapGet("/", ListAsync).AddEndpointFilter<ClientStorageErrorFilter>();
         group.MapGet("/export", ExportAsync).AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapGet("/purge-preview", PurgePreviewAsync).AddEndpointFilter<ClientStorageErrorFilter>();
+        group.MapPost("/purge", PurgeAsync).AddEndpointFilter<ClientStorageErrorFilter>();
         return app;
+    }
+
+    // How many sessions a purge with the same choice would delete, so the administrator sees it before confirming.
+    private static async Task<IResult> PurgePreviewAsync(
+        string? olderThanDays,
+        HttpContext http,
+        AppDbContext db,
+        TimeProvider clock,
+        CancellationToken cancellationToken)
+    {
+        http.Response.Headers.CacheControl = "no-store";
+
+        if (!int.TryParse(olderThanDays, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var days)
+            || !SessionLogPurge.IsAllowed(days))
+        {
+            return AuthEndpoints.BadRequest(SessionLogPurge.DaysMessage);
+        }
+
+        var count = await SessionLogPurge.Matching(db.PcSessions, days, clock.GetUtcNow()).CountAsync(cancellationToken);
+        return Results.Ok(new SessionLogPurgePreviewResponse(count));
+    }
+
+    private static async Task<IResult> PurgeAsync(HttpContext http, AppDbContext db, TimeProvider clock, ILogger<SessionLogPurgeLog> logger)
+    {
+        var request = await AuthEndpoints.ReadBodyAsync<SessionLogPurgeRequest>(http.Request);
+        if (request is null)
+        {
+            return AuthEndpoints.InvalidRequest();
+        }
+
+        if (!SessionLogPurge.IsAllowed(request.OlderThanDays))
+        {
+            return AuthEndpoints.BadRequest(SessionLogPurge.DaysMessage);
+        }
+
+        var deleted = await SessionLogPurge
+            .Matching(db.PcSessions, request.OlderThanDays!.Value, clock.GetUtcNow())
+            .ExecuteDeleteAsync(http.RequestAborted);
+        logger.LogInformation(
+            "Purged {Deleted} session logs older than {Days} days by {Administrator}.",
+            deleted,
+            request.OlderThanDays,
+            ClientUpdates.ClientUpdateEndpoints.AdministratorName(http.User));
+        return Results.Ok(new SessionLogPurgeResponse(deleted));
     }
 
     private static async Task<IResult> ListAsync(
