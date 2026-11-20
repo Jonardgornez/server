@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using LabGuard.Server.Auth;
 using LabGuard.Server.ClientUpdates;
 using LabGuard.Server.Data;
+using LabGuard.Server.Pcs;
 using LabGuard.Server.Settings;
 using Microsoft.EntityFrameworkCore;
 
@@ -21,11 +22,19 @@ public record ServiceReportRequest(
 // Left out otherwise. KeepAwake is always written: while true, the service keeps the PC awake with the screen on.
 // UninstallPassword is always written too, null while no password is set: the service treats a missing one as no change, and null as removed.
 // FastUserSwitchingDisabled is always written: while true, the service hides Windows "Switch user".
+// TaskManagerDisabled is always written: while true, the service blocks Task Manager for the signed-in user.
+// RestrictedPolicies, HiddenDrives and DisabledDrives are always written: the service applies them for the signed-in user. When
+// ExplorerRestartGeneration differs from the last one the service handled, it restarts File Explorer once the policies are written.
 public record ServiceReportResponse(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ClientUpdateOffer? ClientUpdate,
     bool KeepAwake,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] UninstallPasswordHash? UninstallPassword,
-    bool FastUserSwitchingDisabled);
+    bool FastUserSwitchingDisabled,
+    bool TaskManagerDisabled,
+    string[] RestrictedPolicies,
+    string[] HiddenDrives,
+    string[] DisabledDrives,
+    int ExplorerRestartGeneration);
 
 // The service report is a second source of the PC's version and update, next to the heartbeat. Only the latest report of a PC is kept.
 // It never changes LastSeenUtc, which stays with the client heartbeat.
@@ -62,14 +71,28 @@ public static partial class ClientEndpoints
         var pcSettings = await db.Pcs
             .AsNoTracking()
             .Where(p => p.Id == pcId)
-            .Select(p => new { p.KeepAwake, p.FastUserSwitchingDisabled })
+            .Select(p => new
+            {
+                p.KeepAwake,
+                p.FastUserSwitchingDisabled,
+                p.TaskManagerDisabled,
+                p.RestrictedPolicies,
+                p.HiddenDrives,
+                p.DisabledDrives,
+                p.ExplorerRestartGeneration,
+            })
             .FirstOrDefaultAsync(ct);
         var settings = await ServerSettingsStore.GetAsync(db, ct);
         return Results.Ok(new ServiceReportResponse(
             clientUpdate,
             pcSettings?.KeepAwake ?? false,
             UninstallPassword.StoredIn(settings),
-            pcSettings?.FastUserSwitchingDisabled ?? false));
+            pcSettings?.FastUserSwitchingDisabled ?? false,
+            pcSettings?.TaskManagerDisabled ?? false,
+            PcRestrictionRules.ReadPolicies(pcSettings?.RestrictedPolicies ?? ""),
+            PcRestrictionRules.ReadDrives(pcSettings?.HiddenDrives ?? ""),
+            PcRestrictionRules.ReadDrives(pcSettings?.DisabledDrives ?? ""),
+            pcSettings?.ExplorerRestartGeneration ?? 0));
     }
 
     // Only the update states the heartbeat also reports are recorded on the PC. The service's own pending and waiting stay in the

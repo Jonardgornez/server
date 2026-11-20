@@ -19,6 +19,8 @@ namespace LabGuard.Server.Pcs;
 // KeepAwake is whether the PC's background service keeps it awake with the screen on.
 // Service is the latest status report of the PC's background service, null when it has sent none.
 // FastUserSwitchingDisabled is whether the administrator wants Windows "Switch user" hidden on the PC.
+// TaskManagerDisabled is whether the administrator wants Task Manager blocked on the PC.
+// Restrictions are the other Restrictions policies and drives the administrator chose for the PC.
 public record PcResponse(
     int Id,
     string Name,
@@ -37,7 +39,9 @@ public record PcResponse(
     WallpaperRef? Wallpaper,
     bool KeepAwake,
     PcServiceSummary? Service,
-    bool FastUserSwitchingDisabled);
+    bool FastUserSwitchingDisabled,
+    bool TaskManagerDisabled,
+    PcRestrictionsResponse Restrictions);
 
 // Username is null for an admin unlock, which has no account.
 public record PcSessionSummary(string? Username, DateTimeOffset StartedAt, DefaultTimeResponse Time, int? SecondsRemaining);
@@ -90,6 +94,8 @@ public static partial class PcEndpoints
         group.MapPost("/wallpaper", SetWallpaperAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/keep-awake", SetKeepAwakeAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapPost("/fast-user-switching", SetFastUserSwitchingAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/task-manager", SetTaskManagerAsync).AddEndpointFilter<PcStorageErrorFilter>();
+        group.MapPost("/restrictions", SetRestrictionsAsync).AddEndpointFilter<PcStorageErrorFilter>();
         group.MapFileTransferEndpoints();
         return app;
     }
@@ -160,7 +166,9 @@ public static partial class PcEndpoints
                 p.WallpaperId is { } wallpaperId && wallpapers.TryGetValue(wallpaperId, out var wallpaper) ? wallpaper : null,
                 p.KeepAwake,
                 services.TryGetValue(p.Id, out var service) ? new PcServiceSummary(service.ReceivedAtUtc, service.ClientRunning) : null,
-                p.FastUserSwitchingDisabled);
+                p.FastUserSwitchingDisabled,
+                p.TaskManagerDisabled,
+                ToRestrictions(p));
         }));
     }
 

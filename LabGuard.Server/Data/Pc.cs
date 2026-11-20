@@ -46,6 +46,24 @@ public class Pc
     // time, offline PCs too: the service picks it up from its next report.
     public bool FastUserSwitchingDisabled { get; set; }
 
+    // Set by the administrator under Restrictions. The PC's background service blocks Task Manager for the signed-in user while it is
+    // true, at any time, offline PCs too: the service picks it up from its next report. A locked PC blocks it regardless.
+    public bool TaskManagerDisabled { get; set; }
+
+    // Set by the administrator under Restrictions, at any time, offline PCs too: the PC's background service applies them for the
+    // signed-in user from its next report. RestrictedPolicies holds the policy ids, comma-separated in PcRestrictionRules order, and the
+    // drive fields hold drive letters in order ("CD"). Empty means none. Read and written only through PcRestrictionRules.
+    public string RestrictedPolicies { get; set; } = "";
+    public string HiddenDrives { get; set; } = "";
+    public string DisabledDrives { get; set; } = "";
+    // Raised each time the administrator applies restrictions "without restarting the computer". The PC's service restarts File Explorer
+    // for the signed-in user when it sees a value it has not handled yet, so Explorer's policies apply at once. It wraps to 0 after
+    // int.MaxValue, so it never goes negative.
+    public int ExplorerRestartGeneration { get; set; }
+    // Raised with every Restrictions change. The Restrictions route writes a PC only while it still has the version it read, so two
+    // administrators saving at once never lose each other's change. It is not an EF concurrency token, so other saves of a PC ignore it.
+    public int RestrictionsVersion { get; set; }
+
     // Lockout for user logins attempted from this PC.
     public int FailedLoginCount { get; set; }
     // Failures older than this are forgotten, so the count doesn't build up across days.

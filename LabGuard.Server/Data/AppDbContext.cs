@@ -98,6 +98,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             entity.Property(p => p.ClientUpdateTargetVersion).HasMaxLength(32);
             entity.Property(p => p.ClientUpdateState).HasMaxLength(16);
             entity.Property(p => p.ClientUpdateError).HasMaxLength(200);
+            entity.Property(p => p.RestrictedPolicies).HasMaxLength(256).IsRequired();
+            entity.Property(p => p.HiddenDrives).HasMaxLength(26).IsRequired();
+            entity.Property(p => p.DisabledDrives).HasMaxLength(26).IsRequired();
             entity.Property(p => p.ClientUpdateStateAtUtc).HasConversion(unixMilliseconds);
             entity.HasOne<Wallpaper>()
                 .WithMany()
