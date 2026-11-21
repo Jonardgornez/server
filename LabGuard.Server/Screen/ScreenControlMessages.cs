@@ -318,4 +318,6 @@ public static class ControlReasons
     public const string Unsupported = "unsupported";
     public const string Connection = "connection";
     public const string PcEnded = "pc-ended";
+    // Another view of the same PC is asking for or holding control. Only one view may control a PC at a time.
+    public const string InUse = "in-use";
 }

@@ -60,11 +60,11 @@ public class ScreenStreamHubTests
         var (_, browser) = await OpenAsync(hub, app);
 
         Assert.Equal("{\"state\":\"waiting\"}", Text(browser.Sent.Single().Payload));
-        Assert.NotNull(hub.CurrentFor(1));
+        Assert.Single(hub.ViewersFor(1));
     }
 
     [Fact]
-    public async Task OpenAsync_ANewViewerReplacesTheOldOneWith4001()
+    public async Task OpenAsync_ASecondFullView_JoinsTheSameStream_AndClosesNothing()
     {
         using var app = new TestApp();
         var hub = NewHub(app);
@@ -72,43 +72,61 @@ public class ScreenStreamHubTests
 
         var (second, _) = await OpenAsync(hub, app);
 
-        Assert.Equal(ScreenProtocol.ReplacedCloseStatus, firstBrowser.CloseSent!.Value.Status);
-        Assert.Same(second, hub.CurrentFor(1));
-        var linked = first.LinkLifetime(CancellationToken.None);
-        Assert.True(linked is null || linked.IsCancellationRequested);
-        linked?.Dispose();
+        Assert.Null(firstBrowser.CloseSent);
+        Assert.Equal(new[] { first, second }, hub.ViewersFor(1));
+        Assert.Same(first.Stream, second.Stream);
     }
 
     [Fact]
-    public async Task OpenAsync_ForAnotherPc_DoesNotReplaceTheFirst()
+    public async Task OpenAsync_ForAnotherPc_StartsItsOwnStream()
     {
         using var app = new TestApp();
         var hub = NewHub(app);
         var (first, firstBrowser) = await OpenAsync(hub, app, pcId: 1);
 
-        await OpenAsync(hub, app, pcId: 2);
+        var (other, _) = await OpenAsync(hub, app, pcId: 2);
 
         Assert.Null(firstBrowser.CloseSent);
-        Assert.Same(first, hub.CurrentFor(1));
+        Assert.Same(first, Assert.Single(hub.ViewersFor(1)));
+        Assert.NotSame(first.Stream, other.Stream);
     }
 
     private static Task<ScreenOpenResult> OpenPassiveAsync(ScreenStreamHub hub, TestApp app, FakeWebSocket browser, int auditId = 0) =>
         hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), auditId, new ScreenSocket(browser, ShortTimeout), hub.Epoch, new ScreenViewOwner(2, 1, "other"), "PC-01", isPassive: true);
 
     [Fact]
-    public async Task OpenAsync_Passive_WhileAViewIsOpen_IsBusy_LeavesItAlone_AndEndsTheAuditRow()
+    public async Task OpenAsync_Passive_WhileAViewIsOpen_Joins_AndLeavesItAlone()
     {
         using var app = new TestApp();
         var hub = NewHub(app);
         var (full, fullBrowser) = await OpenAsync(hub, app);
+
+        var result = await OpenPassiveAsync(hub, app, new FakeWebSocket());
+
+        Assert.Equal(ScreenOpenStatus.Opened, result.Status);
+        Assert.Null(fullBrowser.CloseSent);
+        Assert.Equal(new[] { full, result.Viewer! }, hub.ViewersFor(1));
+    }
+
+    [Fact]
+    public async Task OpenAsync_Passive_WhenTheStreamIsFull_IsBusy_LeavesTheViewsAlone_AndEndsTheAuditRow()
+    {
+        using var app = new TestApp();
+        var hub = NewHub(app);
+        var browsers = new List<FakeWebSocket>();
+        for (var index = 0; index < ScreenProtocol.MaxViewersPerPc; index++)
+        {
+            browsers.Add((await OpenAsync(hub, app)).Browser);
+        }
+
         var auditId = await InsertAuditRowAsync(app);
 
         var result = await OpenPassiveAsync(hub, app, new FakeWebSocket(), auditId);
 
         Assert.Equal(ScreenOpenStatus.Busy, result.Status);
         Assert.Null(result.Viewer);
-        Assert.Null(fullBrowser.CloseSent);
-        Assert.Same(full, hub.CurrentFor(1));
+        Assert.All(browsers, browser => Assert.Null(browser.CloseSent));
+        Assert.Equal(ScreenProtocol.MaxViewersPerPc, hub.ViewersFor(1).Count);
         Assert.NotNull((await StoredAuditAsync(app, auditId)).EndedAtUtc);
     }
 
@@ -121,16 +139,21 @@ public class ScreenStreamHubTests
         var result = await OpenPassiveAsync(hub, app, new FakeWebSocket());
 
         Assert.Equal(ScreenOpenStatus.Opened, result.Status);
-        Assert.Same(result.Viewer, hub.CurrentFor(1));
+        Assert.Same(result.Viewer, Assert.Single(hub.ViewersFor(1)));
     }
 
     [Fact]
-    public async Task OpenAsync_Passive_ReplacesAViewThatIsAlreadyClosing()
+    public async Task OpenAsync_Passive_DoesNotCountAViewThatIsAlreadyClosing()
     {
         using var app = new TestApp();
         var hub = NewHub(app);
-        var (full, _) = await OpenAsync(hub, app);
-        Assert.True(full.TryClose(out _, out _));
+        var (closing, _) = await OpenAsync(hub, app);
+        for (var index = 1; index < ScreenProtocol.MaxViewersPerPc; index++)
+        {
+            await OpenAsync(hub, app);
+        }
+
+        Assert.True(closing.TryClose());
 
         var result = await OpenPassiveAsync(hub, app, new FakeWebSocket());
 
@@ -138,20 +161,25 @@ public class ScreenStreamHubTests
     }
 
     [Fact]
-    public async Task OpenAsync_PassiveAndFullRacing_NeverReplaceTheFullView()
+    public async Task OpenAsync_Racing_NeverGoesPastTheCap_AndNeverClosesAFullView()
     {
         using var app = new TestApp();
-        for (var round = 0; round < 50; round++)
+        for (var round = 0; round < 20; round++)
         {
             var hub = NewHub(app);
-            var fullBrowser = new FakeWebSocket();
-            var full = hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), 0, new ScreenSocket(fullBrowser, ShortTimeout), hub.Epoch, new ScreenViewOwner(1, 1, "tester"), "PC-01");
-            var passive = OpenPassiveAsync(hub, app, new FakeWebSocket());
+            var fullBrowsers = Enumerable.Range(0, 3).Select(_ => new FakeWebSocket()).ToList();
+            var fulls = fullBrowsers
+                .Select(browser => hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), 0, new ScreenSocket(browser, ShortTimeout), hub.Epoch, new ScreenViewOwner(1, 1, "tester"), "PC-01"))
+                .ToList();
+            var passives = Enumerable.Range(0, 4).Select(_ => OpenPassiveAsync(hub, app, new FakeWebSocket())).ToList();
 
-            await Task.WhenAll(full, passive);
+            var openedFulls = await Task.WhenAll(fulls);
+            await Task.WhenAll(passives);
 
-            Assert.Same(await full, hub.CurrentFor(1));
-            Assert.Null(fullBrowser.CloseSent);
+            var viewers = hub.ViewersFor(1);
+            Assert.Equal(ScreenProtocol.MaxViewersPerPc, viewers.Count);
+            Assert.All(openedFulls, full => Assert.Contains(full!, viewers));
+            Assert.All(fullBrowsers, browser => Assert.Null(browser.CloseSent));
         }
     }
 
@@ -167,7 +195,7 @@ public class ScreenStreamHubTests
         var viewer = await hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), auditId, new ScreenSocket(new FakeWebSocket(), ShortTimeout), epoch, new ScreenViewOwner(1, 1, "tester"), "PC-01");
 
         Assert.Null(viewer);
-        Assert.Null(hub.CurrentFor(1));
+        Assert.Null(hub.StreamFor(1));
         Assert.NotNull((await StoredAuditAsync(app, auditId)).EndedAtUtc);
     }
 
@@ -182,7 +210,7 @@ public class ScreenStreamHubTests
         var viewer = await hub.OpenAsync(1, ScreenProtocol.NotifiedMode, Deadline(app), auditId, new ScreenSocket(browser, ShortTimeout), hub.Epoch, new ScreenViewOwner(1, 1, "tester"), "PC-01");
 
         Assert.Null(viewer);
-        Assert.Null(hub.CurrentFor(1));
+        Assert.Null(hub.StreamFor(1));
         Assert.NotNull((await StoredAuditAsync(app, auditId)).EndedAtUtc);
     }
 
@@ -194,9 +222,9 @@ public class ScreenStreamHubTests
         var (viewer, browser) = await OpenAsync(hub, app);
         var firstPc = new FakeWebSocket();
         var secondPc = new FakeWebSocket();
-        await hub.AttachPcAsync(viewer, new ScreenSocket(firstPc, ShortTimeout));
+        await hub.AttachPcAsync(viewer.Stream, new ScreenSocket(firstPc, ShortTimeout), viewer.Stream.ViewId);
 
-        var attached = await hub.AttachPcAsync(viewer, new ScreenSocket(secondPc, ShortTimeout));
+        var attached = await hub.AttachPcAsync(viewer.Stream, new ScreenSocket(secondPc, ShortTimeout), viewer.Stream.ViewId);
 
         Assert.True(attached);
         Assert.Equal(ScreenProtocol.ReplacedCloseStatus, firstPc.CloseSent!.Value.Status);
@@ -212,11 +240,11 @@ public class ScreenStreamHubTests
         var hub = NewHub(app);
         var (viewer, browser) = await OpenAsync(hub, app);
         var replaced = NewPc();
-        await hub.AttachPcAsync(viewer, replaced);
-        await hub.AttachPcAsync(viewer, NewPc());
+        await hub.AttachPcAsync(viewer.Stream, replaced, viewer.Stream.ViewId);
+        await hub.AttachPcAsync(viewer.Stream, NewPc(), viewer.Stream.ViewId);
 
-        await hub.RelayFrameAsync(viewer, replaced, LiveViewClient.Frame("stale"));
-        await hub.SetPcPausedAsync(viewer, replaced, isPaused: true);
+        await hub.RelayFrameAsync(viewer.Stream, replaced, LiveViewClient.Frame("stale"));
+        await hub.SetPcPausedAsync(viewer.Stream, replaced, isPaused: true);
 
         Assert.Empty(FramesSentTo(browser));
         Assert.DoesNotContain("{\"state\":\"paused\"}", StatesSentTo(browser));
@@ -230,7 +258,7 @@ public class ScreenStreamHubTests
         var (viewer, _) = await OpenAsync(hub, app);
         await hub.CloseAsync(viewer, ScreenProtocol.SessionEndedCloseStatus, "ended");
 
-        Assert.False(await hub.AttachPcAsync(viewer, NewPc()));
+        Assert.False(await hub.AttachPcAsync(viewer.Stream, NewPc(), viewer.Stream.ViewId));
     }
 
     [Fact]
@@ -240,12 +268,12 @@ public class ScreenStreamHubTests
         var hub = NewHub(app);
         var (viewer, browser) = await OpenAsync(hub, app);
         var pc = NewPc();
-        await hub.AttachPcAsync(viewer, pc);
+        await hub.AttachPcAsync(viewer.Stream, pc, viewer.Stream.ViewId);
 
-        await hub.DetachPcAsync(viewer, pc);
+        await hub.DetachPcAsync(viewer.Stream, pc);
 
         Assert.Equal("{\"state\":\"waiting\"}", Text(browser.Sent.Last().Payload));
-        Assert.Null(viewer.CurrentPc);
+        Assert.Null(viewer.Stream.CurrentPc);
     }
 
     [Fact]
@@ -255,11 +283,11 @@ public class ScreenStreamHubTests
         var hub = NewHub(app);
         var (viewer, browser) = await OpenAsync(hub, app);
         var pc = NewPc();
-        await hub.AttachPcAsync(viewer, pc);
+        await hub.AttachPcAsync(viewer.Stream, pc, viewer.Stream.ViewId);
 
-        await hub.RelayFrameAsync(viewer, pc, LiveViewClient.Frame("one"));
-        await hub.RelayFrameAsync(viewer, pc, LiveViewClient.Frame("two"));
-        await hub.RelayFrameAsync(viewer, pc, LiveViewClient.Frame("three"));
+        await hub.RelayFrameAsync(viewer.Stream, pc, LiveViewClient.Frame("one"));
+        await hub.RelayFrameAsync(viewer.Stream, pc, LiveViewClient.Frame("two"));
+        await hub.RelayFrameAsync(viewer.Stream, pc, LiveViewClient.Frame("three"));
 
         var frames = FramesSentTo(browser);
         Assert.Equal(2, frames.Count);
@@ -275,12 +303,12 @@ public class ScreenStreamHubTests
         var (viewer, browser) = await OpenAsync(hub, app);
         var pcSocket = new FakeWebSocket();
         var pc = new ScreenSocket(pcSocket, ShortTimeout);
-        await hub.AttachPcAsync(viewer, pc);
-        await hub.RelayFrameAsync(viewer, pc, LiveViewClient.Frame("one"));
-        await hub.RelayFrameAsync(viewer, pc, LiveViewClient.Frame("two"));
+        await hub.AttachPcAsync(viewer.Stream, pc, viewer.Stream.ViewId);
+        await hub.RelayFrameAsync(viewer.Stream, pc, LiveViewClient.Frame("one"));
+        await hub.RelayFrameAsync(viewer.Stream, pc, LiveViewClient.Frame("two"));
 
         await hub.RelayAckAsync(viewer);
-        await hub.RelayFrameAsync(viewer, pc, LiveViewClient.Frame("three"));
+        await hub.RelayFrameAsync(viewer.Stream, pc, LiveViewClient.Frame("three"));
 
         Assert.Equal("ack", Text(pcSocket.Sent.Single().Payload));
         var frames = FramesSentTo(browser);
@@ -295,7 +323,7 @@ public class ScreenStreamHubTests
         var hub = NewHub(app);
         var (viewer, _) = await OpenAsync(hub, app);
         var pcSocket = new FakeWebSocket();
-        await hub.AttachPcAsync(viewer, new ScreenSocket(pcSocket, ShortTimeout));
+        await hub.AttachPcAsync(viewer.Stream, new ScreenSocket(pcSocket, ShortTimeout), viewer.Stream.ViewId);
 
         await hub.RelayAckAsync(viewer);
         await hub.RelayAckAsync(viewer);
@@ -310,13 +338,13 @@ public class ScreenStreamHubTests
         var hub = NewHub(app);
         var (viewer, browser) = await OpenAsync(hub, app);
         var first = NewPc();
-        await hub.AttachPcAsync(viewer, first);
-        await hub.RelayFrameAsync(viewer, first, LiveViewClient.Frame("one"));
-        await hub.RelayFrameAsync(viewer, first, LiveViewClient.Frame("two"));
+        await hub.AttachPcAsync(viewer.Stream, first, viewer.Stream.ViewId);
+        await hub.RelayFrameAsync(viewer.Stream, first, LiveViewClient.Frame("one"));
+        await hub.RelayFrameAsync(viewer.Stream, first, LiveViewClient.Frame("two"));
         var second = NewPc();
-        await hub.AttachPcAsync(viewer, second);
+        await hub.AttachPcAsync(viewer.Stream, second, viewer.Stream.ViewId);
 
-        await hub.RelayFrameAsync(viewer, second, LiveViewClient.Frame("three"));
+        await hub.RelayFrameAsync(viewer.Stream, second, LiveViewClient.Frame("three"));
 
         Assert.Equal("three", LiveViewClient.LabelOf(FramesSentTo(browser)[2], 5));
     }
@@ -329,14 +357,14 @@ public class ScreenStreamHubTests
         var (viewer, browser) = await OpenAsync(hub, app);
         var pcSocket = new FakeWebSocket();
         var pc = new ScreenSocket(pcSocket, ShortTimeout);
-        await hub.AttachPcAsync(viewer, pc);
+        await hub.AttachPcAsync(viewer.Stream, pc, viewer.Stream.ViewId);
         browser.StallSends = true;
 
-        await hub.RelayFrameAsync(viewer, pc, LiveViewClient.Frame("stuck"));
+        await hub.RelayFrameAsync(viewer.Stream, pc, LiveViewClient.Frame("stuck"));
 
         Assert.Equal(WebSocketCloseStatus.PolicyViolation, browser.CloseSent!.Value.Status);
         Assert.Equal(WebSocketCloseStatus.PolicyViolation, pcSocket.CloseSent!.Value.Status);
-        Assert.Null(hub.CurrentFor(1));
+        Assert.Null(hub.StreamFor(1));
     }
 
     [Fact]
@@ -346,10 +374,10 @@ public class ScreenStreamHubTests
         var hub = NewHub(app);
         var (viewer, browser) = await OpenAsync(hub, app);
         var pc = NewPc();
-        await hub.AttachPcAsync(viewer, pc);
+        await hub.AttachPcAsync(viewer.Stream, pc, viewer.Stream.ViewId);
 
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
 
         Assert.Equal(1, StatesSentTo(browser).Count(state => state == "{\"state\":\"paused\"}"));
     }
@@ -361,7 +389,7 @@ public class ScreenStreamHubTests
         var hub = NewHub(app);
         var (viewer, browser) = await OpenAsync(hub, app);
         var pcSocket = new FakeWebSocket();
-        await hub.AttachPcAsync(viewer, new ScreenSocket(pcSocket, ShortTimeout));
+        await hub.AttachPcAsync(viewer.Stream, new ScreenSocket(pcSocket, ShortTimeout), viewer.Stream.ViewId);
 
         await hub.CloseAsync(viewer, ScreenProtocol.PcOfflineCloseStatus, "The PC is offline or was removed.");
         await hub.CloseAsync(viewer, ScreenProtocol.SessionEndedCloseStatus, "The administrator session ended.");
@@ -369,7 +397,7 @@ public class ScreenStreamHubTests
         Assert.Equal(ScreenProtocol.PcOfflineCloseStatus, browser.CloseSent!.Value.Status);
         Assert.Equal(ScreenProtocol.PcOfflineCloseStatus, pcSocket.CloseSent!.Value.Status);
         Assert.Equal("The PC is offline or was removed.", browser.CloseSent!.Value.Reason);
-        Assert.Null(hub.CurrentFor(1));
+        Assert.Null(hub.StreamFor(1));
     }
 
     [Fact]

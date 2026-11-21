@@ -26,7 +26,7 @@ public class ScreenSessionMonitorTests
 
         await app.Services.GetRequiredService<ScreenViewMonitor>().CheckOnceAsync(CancellationToken.None);
 
-        Assert.NotNull(app.Services.GetRequiredService<ScreenStreamHub>().CurrentFor(id));
+        Assert.Single(app.Services.GetRequiredService<ScreenStreamHub>().ViewersFor(id));
     }
 
     [Fact]

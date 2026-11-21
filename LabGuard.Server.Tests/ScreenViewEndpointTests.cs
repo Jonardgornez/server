@@ -315,7 +315,7 @@ public class ScreenViewEndpointTests
     }
 
     [Fact]
-    public async Task Live_ANewViewer_ReplacesTheOldOneWith4001()
+    public async Task Live_ASecondFullView_JoinsTheFirst_AndEachHasItsOwnAuditRow()
     {
         using var app = new TestApp();
         var (id, _) = await LiveViewClient.AddPcAsync(app);
@@ -324,27 +324,47 @@ public class ScreenViewEndpointTests
 
         using var second = await OpenViewAsync(app, id, cookie);
 
-        await AssertCloseAsync(first, (WebSocketCloseStatus)4001, "Replaced by another viewer.");
-        var rows = await AwaitAuditAsync(app, rows => rows.Count == 2 && rows[0].EndedAtUtc is not null);
+        Assert.Equal(2, app.Services.GetRequiredService<ScreenStreamHub>().ViewersFor(id).Count);
+        Assert.Equal(WebSocketState.Open, first.State);
+        var rows = await AuditRowsAsync(app);
         Assert.Equal(2, rows.Count);
-        Assert.NotNull(rows[0].EndedAtUtc);
-        Assert.Null(rows[1].EndedAtUtc);
+        Assert.All(rows, row => Assert.Null(row.EndedAtUtc));
     }
 
     [Fact]
-    public async Task Live_Passive_WhileAnotherViewIsOpen_IsRefused409_WithoutAnAuditRow()
+    public async Task Live_Passive_WhileAnotherViewIsOpen_Opens()
     {
         using var app = new TestApp();
         var (id, _) = await LiveViewClient.AddPcAsync(app);
         var cookie = await LiveViewClient.SignInCookieAsync(app);
         using var full = await OpenViewAsync(app, id, cookie);
 
+        using var passive = await OpenViewAsync(app, id, cookie, "?passive=1");
+
+        Assert.Equal(WebSocketState.Open, full.State);
+        Assert.Equal(2, app.Services.GetRequiredService<ScreenStreamHub>().ViewersFor(id).Count);
+    }
+
+    [Fact]
+    public async Task Live_Passive_WhenThePcHasTheMostViews_IsRefused409_WithoutAnAuditRow()
+    {
+        using var app = new TestApp();
+        var (id, _) = await LiveViewClient.AddPcAsync(app);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        var views = new List<WebSocket>();
+        for (var index = 0; index < ScreenProtocol.MaxViewersPerPc; index++)
+        {
+            views.Add(await OpenViewAsync(app, id, cookie));
+        }
+
         var status = await LiveViewClient.RefusedStatusAsync(() => LiveViewClient.OpenAdminAsync(app, id, cookie, "?passive=1"));
 
         Assert.Equal(409, status);
-        var row = Assert.Single(await AuditRowsAsync(app));
-        Assert.Null(row.EndedAtUtc);
-        Assert.Equal(WebSocketState.Open, full.State);
+        var rows = await AuditRowsAsync(app);
+        Assert.Equal(ScreenProtocol.MaxViewersPerPc, rows.Count);
+        Assert.All(rows, row => Assert.Null(row.EndedAtUtc));
+        Assert.All(views, view => Assert.Equal(WebSocketState.Open, view.State));
+        views.ForEach(view => view.Dispose());
     }
 
     [Fact]
@@ -360,16 +380,44 @@ public class ScreenViewEndpointTests
     }
 
     [Fact]
-    public async Task Live_AFullView_StillReplacesAPassiveOneWith4001()
+    public async Task Live_AFullView_WhenThePcHasTheMostViews_ReplacesTheOldestPassiveOneWith4001()
     {
         using var app = new TestApp();
         var (id, _) = await LiveViewClient.AddPcAsync(app);
         var cookie = await LiveViewClient.SignInCookieAsync(app);
-        using var passive = await OpenViewAsync(app, id, cookie, "?passive=1");
-
         using var full = await OpenViewAsync(app, id, cookie);
+        using var oldestPassive = await OpenViewAsync(app, id, cookie, "?passive=1");
+        using var newerPassive = await OpenViewAsync(app, id, cookie, "?passive=1");
+        using var newestPassive = await OpenViewAsync(app, id, cookie, "?passive=1");
 
-        await AssertCloseAsync(passive, (WebSocketCloseStatus)4001, "Replaced by another viewer.");
+        using var joining = await OpenViewAsync(app, id, cookie);
+
+        await AssertCloseAsync(oldestPassive, (WebSocketCloseStatus)4001, "A full view of this PC took this view's place.");
+        Assert.Equal(WebSocketState.Open, full.State);
+        Assert.Equal(WebSocketState.Open, newerPassive.State);
+        Assert.Equal(ScreenProtocol.MaxViewersPerPc, app.Services.GetRequiredService<ScreenStreamHub>().ViewersFor(id).Count);
+    }
+
+    [Fact]
+    public async Task Live_AFullView_WhenThePcHasTheMostFullViews_IsClosedWith4005_AndEndsItsAuditRow()
+    {
+        using var app = new TestApp();
+        var (id, _) = await LiveViewClient.AddPcAsync(app);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        var views = new List<WebSocket>();
+        for (var index = 0; index < ScreenProtocol.MaxViewersPerPc; index++)
+        {
+            views.Add(await OpenViewAsync(app, id, cookie));
+        }
+
+        using var refused = await LiveViewClient.OpenAdminAsync(app, id, cookie);
+
+        Assert.Equal("{\"state\":\"waiting\"}", await LiveViewClient.ReceiveStateAsync(refused));
+        await AssertCloseAsync(refused, (WebSocketCloseStatus)4005, "Too many views of this PC are open.");
+        var rows = await AwaitAuditAsync(app, rows => rows.Count == ScreenProtocol.MaxViewersPerPc + 1 && rows[^1].EndedAtUtc is not null);
+        Assert.All(rows.Take(ScreenProtocol.MaxViewersPerPc), row => Assert.Null(row.EndedAtUtc));
+        Assert.All(views, view => Assert.Equal(WebSocketState.Open, view.State));
+        views.ForEach(view => view.Dispose());
     }
 
     [Theory]
@@ -430,7 +478,7 @@ public class ScreenViewEndpointTests
         await LiveViewClient.HeartbeatAsync(app, token);
         await app.Services.GetRequiredService<ScreenViewMonitor>().CheckOnceAsync(CancellationToken.None);
 
-        Assert.NotNull(app.Services.GetRequiredService<ScreenStreamHub>().CurrentFor(id));
+        Assert.Single(app.Services.GetRequiredService<ScreenStreamHub>().ViewersFor(id));
         Assert.Null((await AuditRowsAsync(app)).Single().EndedAtUtc);
     }
 
@@ -448,8 +496,7 @@ public class ScreenViewEndpointTests
         await LiveViewClient.HeartbeatAsync(app, token);
         await app.Services.GetRequiredService<ScreenViewMonitor>().CheckOnceAsync(CancellationToken.None);
 
-        var viewer = app.Services.GetRequiredService<ScreenStreamHub>().CurrentFor(id);
-        Assert.NotNull(viewer);
+        var viewer = Assert.Single(app.Services.GetRequiredService<ScreenStreamHub>().ViewersFor(id));
         // The cookie keeps its times to the whole second.
         Assert.InRange(viewer.SessionDeadline, signedInAt.AddDays(400).AddSeconds(-1), signedInAt.AddDays(400));
         Assert.Null((await AuditRowsAsync(app)).Single().EndedAtUtc);
@@ -530,7 +577,7 @@ public class ScreenViewEndpointTests
         using var response = await client.PostAsJsonAsync("/api/auth/logout", new { });
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
-        Assert.NotNull(app.Services.GetRequiredService<ScreenStreamHub>().CurrentFor(id));
+        Assert.Single(app.Services.GetRequiredService<ScreenStreamHub>().ViewersFor(id));
     }
 
     [Fact]

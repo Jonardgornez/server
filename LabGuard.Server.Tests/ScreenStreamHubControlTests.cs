@@ -46,7 +46,7 @@ public class ScreenStreamHubControlTests
     {
         var socket = new FakeWebSocket();
         var pc = NewSocket(socket);
-        await hub.AttachPcAsync(viewer, pc);
+        await hub.AttachPcAsync(viewer.Stream, pc, viewer.Stream.ViewId);
         return (pc, socket);
     }
 
@@ -82,7 +82,7 @@ public class ScreenStreamHubControlTests
         var (viewer, browser) = await OpenAsync(hub, app);
         var (pc, pcSocket) = await AttachAsync(hub, viewer);
         await hub.RequestControlAsync(viewer, isServerPc: false);
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
         return (hub, viewer, browser, pc, pcSocket);
     }
 
@@ -101,7 +101,7 @@ public class ScreenStreamHubControlTests
         Assert.Contains(PcOn, TextsOf(pcSocket));
         Assert.DoesNotContain(TextsOf(browser), text => text.Contains("\"control\":\"off\""));
 
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
 
         Assert.Equal(ScreenControlState.On, viewer.ControlState);
     }
@@ -173,7 +173,7 @@ public class ScreenStreamHubControlTests
         await hub.RequestControlAsync(viewer, isServerPc: false);
 
         await hub.RequestControlAsync(viewer, isServerPc: false);
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
         await hub.RequestControlAsync(viewer, isServerPc: false);
 
         Assert.Single(TextsOf(pcSocket));
@@ -190,7 +190,7 @@ public class ScreenStreamHubControlTests
         var (pc, _) = await AttachAsync(hub, viewer);
         await hub.RequestControlAsync(viewer, isServerPc: false);
 
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
 
         Assert.Equal(On, TextsOf(browser).Last());
         Assert.Equal(ScreenControlState.On, viewer.ControlState);
@@ -209,7 +209,7 @@ public class ScreenStreamHubControlTests
         var (pc, _) = await AttachAsync(hub, viewer);
         await hub.RequestControlAsync(viewer, isServerPc: false);
 
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
 
         Assert.Equal(ScreenProtocol.NotifiedMode, Assert.Single(await ControlRowsAsync(app)).Mode);
     }
@@ -223,7 +223,7 @@ public class ScreenStreamHubControlTests
         var (pc, _) = await AttachAsync(hub, viewer);
         await hub.RequestControlAsync(viewer, isServerPc: false);
 
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
 
         Assert.Equal(ScreenProtocol.AnonymousMode, Assert.Single(await ControlRowsAsync(app)).Mode);
     }
@@ -236,7 +236,7 @@ public class ScreenStreamHubControlTests
         var (viewer, browser) = await OpenAsync(hub, app);
         var (pc, _) = await AttachAsync(hub, viewer);
 
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
 
         Assert.Equal(ScreenControlState.Off, viewer.ControlState);
         Assert.DoesNotContain(On, TextsOf(browser));
@@ -253,7 +253,7 @@ public class ScreenStreamHubControlTests
         await hub.RequestControlAsync(viewer, isServerPc: false);
         var stranger = NewSocket(new FakeWebSocket());
 
-        await hub.ConfirmControlAsync(viewer, stranger);
+        await hub.ConfirmControlAsync(viewer.Stream, stranger);
 
         Assert.Equal(ScreenControlState.Requesting, viewer.ControlState);
         Assert.DoesNotContain(On, TextsOf(browser));
@@ -270,7 +270,7 @@ public class ScreenStreamHubControlTests
         await hub.RequestControlAsync(viewer, isServerPc: false);
         await AttachAsync(hub, viewer);
 
-        await hub.ConfirmControlAsync(viewer, replaced);
+        await hub.ConfirmControlAsync(viewer.Stream, replaced);
 
         Assert.Equal(ScreenControlState.Off, viewer.ControlState);
         Assert.DoesNotContain(On, TextsOf(browser));
@@ -287,7 +287,7 @@ public class ScreenStreamHubControlTests
         await hub.RequestControlAsync(viewer, isServerPc: false);
         await app.WithDbAsync(db => db.Database.ExecuteSqlRawAsync("DROP TABLE \"ScreenControlEvents\""));
 
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
 
         Assert.Equal(ScreenControlState.Off, viewer.ControlState);
         Assert.Equal(OffMessage("unsupported"), TextsOf(browser).Last());
@@ -380,7 +380,7 @@ public class ScreenStreamHubControlTests
         var (viewer, browser) = await OpenAsync(hub, app);
         var (pc, _) = await AttachAsync(hub, viewer);
         await hub.RequestControlAsync(viewer, isServerPc: false);
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
 
         app.Time.Advance(TimeSpan.FromSeconds(30));
         await Task.Delay(100);
@@ -407,7 +407,7 @@ public class ScreenStreamHubControlTests
 
         Assert.Equal(ScreenControlState.Requesting, viewer.ControlState);
         Assert.DoesNotContain(OffMessage("unsupported"), TextsOf(browser));
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
         Assert.Equal(ScreenControlState.On, viewer.ControlState);
     }
 
@@ -424,7 +424,7 @@ public class ScreenStreamHubControlTests
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"move\",\"x\":1,\"y\":2}"));
         await hub.RequestControlAsync(viewer, isServerPc: false);
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"move\",\"x\":1,\"y\":2}"));
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
         await hub.RelayInputAsync(viewer, Input("{ \"y\": 20, \"x\": 10, \"t\": \"move\" }"));
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"key\",\"c\":\"KeyA\",\"d\":true}"));
 
@@ -525,7 +525,7 @@ public class ScreenStreamHubControlTests
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"sas\"}"));
         await hub.RequestControlAsync(viewer, isServerPc: false);
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"sas\"}"));
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
         app.Time.Advance(TimeSpan.FromSeconds(1));
         await hub.RelayInputAsync(viewer, Input("{ \"t\" : \"sas\" }"));
 
@@ -566,7 +566,7 @@ public class ScreenStreamHubControlTests
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"before\"}"));
         await hub.RequestControlAsync(viewer, isServerPc: false);
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"requesting\"}"));
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
         await hub.RelayInputAsync(viewer, Input("{ \"s\" : \"a\\u0062\\n\", \"t\" : \"text\" }"));
         await hub.StopControlAsync(viewer);
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"text\",\"s\":\"after\"}"));
@@ -628,14 +628,14 @@ public class ScreenStreamHubControlTests
         var (viewer, browser) = await OpenAsync(hub, app, deadline: app.Time.GetUtcNow().AddMinutes(10));
         var (pc, pcSocket) = await AttachAsync(hub, viewer);
         await hub.RequestControlAsync(viewer, isServerPc: false);
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
 
         app.Time.Advance(TimeSpan.FromMinutes(11));
         await hub.RelayInputAsync(viewer, Input("{\"t\":\"move\",\"x\":1,\"y\":1}"));
 
         Assert.Equal(ScreenProtocol.SessionEndedCloseStatus, browser.CloseSent!.Value.Status);
         Assert.DoesNotContain("{\"t\":\"move\",\"x\":1,\"y\":1}", TextsOf(pcSocket));
-        Assert.Null(hub.CurrentFor(1));
+        Assert.Empty(hub.ViewersFor(1));
     }
 
     [Fact]
@@ -675,7 +675,7 @@ public class ScreenStreamHubControlTests
         using var app = new TestApp();
         var (hub, viewer, browser, _, pcSocket) = await OnControlAsync(app);
 
-        await hub.EndControlAsync(viewer, ControlReasons.PcEnded);
+        await hub.EndControlAsync(viewer.Stream, ControlReasons.PcEnded);
 
         Assert.Equal(OffMessage("pc-ended"), TextsOf(browser).Last());
         Assert.Equal(PcOff, TextsOf(pcSocket).Last());
@@ -735,9 +735,9 @@ public class ScreenStreamHubControlTests
         var (viewer, browser) = await OpenAsync(hub, app);
         var (pc, pcSocket) = await AttachAsync(hub, viewer);
         await hub.RequestControlAsync(viewer, isServerPc: false);
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
 
-        await hub.DetachPcAsync(viewer, pc);
+        await hub.DetachPcAsync(viewer.Stream, pc);
 
         var texts = TextsOf(browser);
         Assert.Equal(new[] { OffMessage("connection"), "{\"state\":\"waiting\"}" }, texts.TakeLast(2));
@@ -754,7 +754,7 @@ public class ScreenStreamHubControlTests
         var (viewer, browser) = await OpenAsync(hub, app);
         var (pc, oldSocket) = await AttachAsync(hub, viewer);
         await hub.RequestControlAsync(viewer, isServerPc: false);
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
         var (_, newSocket) = await AttachAsync(hub, viewer);
 
         // The state is still live, so it is not sent again. The control end is the last thing the browser hears.

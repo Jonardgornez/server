@@ -177,17 +177,48 @@ public class ClientScreenEndpointTests
     }
 
     [Fact]
-    public async Task ScreenStream_AfterAReplacement_RefusesTheOldViewId()
+    public async Task ScreenStream_ASecondViewOfTheSameMode_KeepsTheViewId_AndBothBrowsersGetEachFrame()
     {
         using var app = new TestApp();
         var first = await OpenLiveViewAsync(app);
+        using var pc = await ConnectPcAsync(app, first);
         var cookie = await LiveViewClient.SignInCookieAsync(app);
         using var second = await LiveViewClient.OpenAdminAsync(app, first.PcId, cookie);
         Assert.Equal(BrowserWaiting, await LiveViewClient.ReceiveStateAsync(second));
+        Assert.Equal(BrowserLive, await LiveViewClient.ReceiveStateAsync(second));
+        var frame = LiveViewClient.Frame("shared");
 
-        var status = await LiveViewClient.RefusedStatusAsync(() => LiveViewClient.OpenPcAsync(app, first.Token, first.ViewId));
+        await LiveViewClient.SendAsync(pc, frame);
 
-        Assert.Equal(404, status);
+        Assert.Equal(first.ViewId, await ViewIdFromHeartbeatAsync(app, first.Token));
+        Assert.Equal(frame, (await LiveViewClient.ReceiveAsync(first.Browser)).Payload);
+        Assert.Equal(frame, (await LiveViewClient.ReceiveAsync(second)).Payload);
+    }
+
+    [Fact]
+    public async Task ScreenStream_WhenANotifiedViewJoinsAnAnonymousOne_ThePcIsClosedWith4001_AndTheOldViewIdIsRefused()
+    {
+        using var app = new TestApp();
+        var (id, token) = await LiveViewClient.AddPcAsync(app);
+        var cookie = await LiveViewClient.SignInCookieAsync(app);
+        using var anonymous = await LiveViewClient.OpenAdminAsync(app, id, cookie, "?mode=anonymous");
+        Assert.Equal(BrowserWaiting, await LiveViewClient.ReceiveStateAsync(anonymous));
+        var anonymousView = await LiveViewClient.HeartbeatAsync(app, token);
+        var anonymousViewId = anonymousView.GetProperty("screenView").GetProperty("viewId").GetString()!;
+        using var pc = await LiveViewClient.OpenPcAsync(app, token, anonymousViewId);
+        Assert.Equal(BrowserLive, await LiveViewClient.ReceiveStateAsync(anonymous));
+
+        using var notified = await LiveViewClient.OpenAdminAsync(app, id, cookie);
+
+        var pcClose = await LiveViewClient.ReceiveAsync(pc);
+        Assert.Equal((WebSocketCloseStatus)4001, pcClose.CloseStatus);
+        Assert.Equal(BrowserWaiting, await LiveViewClient.ReceiveStateAsync(anonymous));
+        var reply = await LiveViewClient.HeartbeatAsync(app, token);
+        Assert.Equal("anonymous", anonymousView.GetProperty("screenView").GetProperty("mode").GetString());
+        Assert.Equal("notified", reply.GetProperty("screenView").GetProperty("mode").GetString());
+        Assert.NotEqual(anonymousViewId, reply.GetProperty("screenView").GetProperty("viewId").GetString());
+        app.Time.Advance(ScreenProtocol.AttachCooldown);
+        Assert.Equal(404, await LiveViewClient.RefusedStatusAsync(() => LiveViewClient.OpenPcAsync(app, token, anonymousViewId)));
     }
 
     // Frames and state
