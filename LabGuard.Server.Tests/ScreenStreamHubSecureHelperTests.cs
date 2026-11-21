@@ -32,7 +32,7 @@ public class ScreenStreamHubSecureHelperTests
             new ScreenSocket(new FakeWebSocket(), ShortTimeout), hub.Epoch, new ScreenViewOwner(1, 1, "tester"), "PC-01"))!;
         var pcSocket = new FakeWebSocket();
         var pc = new ScreenSocket(pcSocket, ShortTimeout);
-        await hub.AttachPcAsync(viewer, pc);
+        await hub.AttachPcAsync(viewer.Stream, pc, viewer.Stream.ViewId);
         var helperSocket = new FakeWebSocket();
         var helper = new SecureHelperConnection(1, "hash", new ScreenSocket(helperSocket, ShortTimeout));
         await hub.AttachHelperAsync(helper);
@@ -42,7 +42,7 @@ public class ScreenStreamHubSecureHelperTests
     private static async Task TurnControlOnAsync(ScreenStreamHub hub, ScreenViewer viewer, ScreenSocket pc)
     {
         await hub.RequestControlAsync(viewer, isServerPc: false);
-        await hub.ConfirmControlAsync(viewer, pc);
+        await hub.ConfirmControlAsync(viewer.Stream, pc);
         Assert.Equal(ScreenControlState.On, viewer.ControlState);
     }
 
@@ -53,11 +53,11 @@ public class ScreenStreamHubSecureHelperTests
         var (hub, viewer, pc, pcSocket, _, _) = await SetUpAsync(app);
         await TurnControlOnAsync(hub, viewer, pc);
 
-        await viewer.InputGate.WaitAsync();
+        await viewer.Stream.InputGate.WaitAsync();
         var input = hub.RelayInputAsync(viewer, ScreenControlMessages.Parse(WebSocketMessageType.Text, Encoding.UTF8.GetBytes(KeyDown)));
-        var pause = hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        var pause = hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
         await Task.Delay(100);
-        viewer.InputGate.Release();
+        viewer.Stream.InputGate.Release();
         await Task.WhenAll(input, pause).WaitAsync(LiveViewClient.Patience);
 
         var texts = TextsOf(pcSocket);
@@ -73,7 +73,7 @@ public class ScreenStreamHubSecureHelperTests
         using var app = new TestApp();
         var (hub, viewer, pc, pcSocket, _, helperSocket) = await SetUpAsync(app);
         await TurnControlOnAsync(hub, viewer, pc);
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
 
         await hub.RelayInputAsync(viewer, ScreenControlMessages.Parse(WebSocketMessageType.Text, Encoding.UTF8.GetBytes(text)));
 
@@ -86,15 +86,15 @@ public class ScreenStreamHubSecureHelperTests
     {
         using var app = new TestApp();
         var (hub, viewer, pc, _, _, helperSocket) = await SetUpAsync(app);
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
-        await viewer.InputGate.WaitAsync();
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
+        await viewer.Stream.InputGate.WaitAsync();
 
         var clock = Stopwatch.StartNew();
         await hub.CloseAsync(viewer, WebSocketCloseStatus.NormalClosure, "bye").WaitAsync(LiveViewClient.Patience);
 
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5));
         Assert.Equal(Stop, TextsOf(helperSocket).Last());
-        viewer.InputGate.Release();
+        viewer.Stream.InputGate.Release();
     }
 
     [Fact]
@@ -103,12 +103,12 @@ public class ScreenStreamHubSecureHelperTests
         using var app = new TestApp();
         var (hub, viewer, pc, _, _, helperSocket) = await SetUpAsync(app);
 
-        await viewer.InputGate.WaitAsync();
-        var pause = hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        await viewer.Stream.InputGate.WaitAsync();
+        var pause = hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
         await Task.Delay(100);
         var close = hub.CloseAsync(viewer, WebSocketCloseStatus.NormalClosure, "bye");
         await Task.Delay(100);
-        viewer.InputGate.Release();
+        viewer.Stream.InputGate.Release();
         await Task.WhenAll(pause, close).WaitAsync(LiveViewClient.Patience);
 
         var texts = TextsOf(helperSocket);
@@ -121,10 +121,10 @@ public class ScreenStreamHubSecureHelperTests
         using var app = new TestApp();
         var (hub, viewer, pc, _, helper, _) = await SetUpAsync(app);
         Assert.False(hub.IsHelperFrameAllowed(helper));
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
         Assert.True(hub.IsHelperFrameAllowed(helper));
 
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: false);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: false);
         Assert.True(hub.IsHelperFrameAllowed(helper));
         app.Time.Advance(SecureHelperProtocol.StopGrace);
 
@@ -136,7 +136,7 @@ public class ScreenStreamHubSecureHelperTests
     {
         using var app = new TestApp();
         var (hub, viewer, pc, _, helper, _) = await SetUpAsync(app);
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
 
         var allowed = Enumerable.Range(0, SecureHelperProtocol.MaxFramesPerSecond + 1).Count(_ => hub.IsHelperFrameAllowed(helper));
         app.Time.Advance(TimeSpan.FromSeconds(1));

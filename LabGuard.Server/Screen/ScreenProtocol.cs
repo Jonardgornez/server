@@ -9,20 +9,24 @@ public static class ScreenProtocol
     public const string NotifiedMode = "notified";
     public const string AnonymousMode = "anonymous";
 
-    // Custom close codes. 4001: a newer viewer or PC connection took this one's place. 4002: the PC went offline or was removed.
-    // 4003: the administrator's session ended. 4005: a passive view found someone else viewing the PC, so it left that view alone.
+    // Custom close codes. 4001: another connection took this one's place: a newer PC connection, a full view taking a passive
+    // view's place in a full stream, or a PC dropped because the stream became notified. 4002: the PC went offline or was removed.
+    // 4003: the administrator's session ended. 4005: the PC already has as many views as it may have, so this one wasn't opened.
     public const WebSocketCloseStatus ReplacedCloseStatus = (WebSocketCloseStatus)4001;
     public const WebSocketCloseStatus PcOfflineCloseStatus = (WebSocketCloseStatus)4002;
     public const WebSocketCloseStatus SessionEndedCloseStatus = (WebSocketCloseStatus)4003;
     public const string SessionEndedReason = "The administrator session ended.";
     public const WebSocketCloseStatus BusyCloseStatus = (WebSocketCloseStatus)4005;
-    public const string BusyReason = "Someone else is viewing this PC.";
+    public const string BusyReason = "Too many views of this PC are open.";
 
     public const string WaitingState = "waiting";
     public const string LiveState = "live";
     public const string PausedState = "paused";
     // The PC is showing a protected screen, and the secure-desktop helper streams it in the PC's place.
     public const string SecureState = "secure";
+
+    // One PC's stream is watched by at most this many browsers. Each gets every frame it has room for.
+    public const int MaxViewersPerPc = 4;
 
     // The PC may have this many frames unacknowledged. Anything beyond that is dropped, never queued.
     public const int MaxFramesInFlight = 2;

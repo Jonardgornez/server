@@ -5,10 +5,17 @@ using LabGuard.Server.Screen;
 
 namespace LabGuard.Server.Clients;
 
-// The PC's end of a live view. It connects only while a heartbeat reports a viewer, and streams JPEG frames until the view ends.
+// The PC's end of a live view. It connects only while a heartbeat reports a stream, and streams JPEG frames until the stream ends.
+// Every view of the PC shares this one connection.
 public static partial class ClientEndpoints
 {
-    private static async Task<IResult> ScreenStreamAsync(string? viewId, HttpContext http, AppDbContext db, ScreenStreamHub hub, TimeProvider clock)
+    private static async Task<IResult> ScreenStreamAsync(
+        string? viewId,
+        HttpContext http,
+        AppDbContext db,
+        ScreenStreamHub hub,
+        TimeProvider clock,
+        ILoggerFactory loggerFactory)
     {
         if (ReadBearerToken(http.Request) is not { } token)
         {
@@ -26,8 +33,8 @@ public static partial class ClientEndpoints
             return AuthEndpoints.BadRequest("This address needs a WebSocket connection.");
         }
 
-        // Checked against this PC's own view only, so one PC can't join another PC's view.
-        if (hub.CurrentFor(pcId) is not { } viewer || !viewer.ViewIdMatches(viewId))
+        // Checked against this PC's own stream only, so one PC can't join another PC's stream.
+        if (hub.StreamFor(pcId) is not { } stream || !stream.ViewIdMatches(viewId))
         {
             return Results.Json(new ErrorResponse("No live view is open for this PC."), statusCode: StatusCodes.Status404NotFound);
         }
@@ -44,14 +51,19 @@ public static partial class ClientEndpoints
         var pc = new ScreenSocket(socket, ScreenProtocol.SendTimeout) { RemoteAddress = http.Connection.RemoteIpAddress };
         try
         {
-            if (await hub.AttachPcAsync(viewer, pc))
+            if (await hub.AttachPcAsync(stream, pc, viewId))
             {
-                await ReceivePcMessagesAsync(hub, viewer, pc, ct);
+                await ReceivePcMessagesAsync(hub, stream, pc, loggerFactory.CreateLogger(nameof(ClientEndpoints)), ct);
+            }
+            else
+            {
+                // The view mode changed since the id was checked, or the view ended. The PC waits for its next heartbeat.
+                await pc.CloseAsync(ScreenProtocol.ReplacedCloseStatus, "The view changed.");
             }
         }
         finally
         {
-            await hub.DetachPcAsync(viewer, pc);
+            await hub.DetachPcAsync(stream, pc);
             await pc.CloseAsync(WebSocketCloseStatus.NormalClosure, "The stream ended.");
             pc.Dispose();
         }
@@ -59,11 +71,12 @@ public static partial class ClientEndpoints
         return Results.Empty;
     }
 
-    // Frames are relayed one at a time, so a slow browser holds this loop back instead of a queue growing.
+    // A frame's sends to the browsers are not waited for, so one slow browser can't hold back the others. Nothing queues up: a
+    // frame goes out only within the credit windows, which bound what is in flight to each browser.
     // A connection that has been replaced stops here, so its frames and states are never relayed.
-    private static async Task ReceivePcMessagesAsync(ScreenStreamHub hub, ScreenViewer viewer, ScreenSocket pc, CancellationToken cancellationToken)
+    private static async Task ReceivePcMessagesAsync(ScreenStreamHub hub, ScreenStream stream, ScreenSocket pc, ILogger logger, CancellationToken cancellationToken)
     {
-        using var linked = viewer.LinkLifetime(cancellationToken);
+        using var linked = stream.LinkLifetime(cancellationToken);
         if (linked is null)
         {
             return;
@@ -71,7 +84,7 @@ public static partial class ClientEndpoints
 
         while (await pc.ReceiveAsync(ScreenProtocol.PcLimits, linked.Token) is { } message)
         {
-            if (!viewer.IsCurrentPc(pc))
+            if (!stream.IsCurrentPc(pc))
             {
                 return;
             }
@@ -80,22 +93,22 @@ public static partial class ClientEndpoints
             switch (read.Kind)
             {
                 case PcMessageKind.Frame:
-                    await hub.RelayFrameAsync(viewer, pc, message.Payload);
+                    _ = RelayObserver.ObserveAsync(hub.RelayFrameAsync(stream, pc, message.Payload), logger);
                     break;
                 case PcMessageKind.Paused:
-                    await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+                    await hub.SetPcPausedAsync(stream, pc, isPaused: true);
                     break;
                 case PcMessageKind.Resumed:
-                    await hub.SetPcPausedAsync(viewer, pc, isPaused: false);
+                    await hub.SetPcPausedAsync(stream, pc, isPaused: false);
                     break;
                 case PcMessageKind.ControlOn:
-                    await hub.ConfirmControlAsync(viewer, pc);
+                    await hub.ConfirmControlAsync(stream, pc);
                     break;
                 case PcMessageKind.ControlOff:
-                    await hub.EndControlFromAsync(viewer, pc);
+                    await hub.EndControlFromAsync(stream, pc);
                     break;
                 case PcMessageKind.Cursor when read.BrowserCursor is { } cursor:
-                    await hub.RelayCursorAsync(viewer, pc, cursor);
+                    await hub.RelayCursorAsync(stream, pc, cursor);
                     break;
                 case PcMessageKind.TooLarge:
                     await pc.CloseAsync(WebSocketCloseStatus.MessageTooBig, "Message too large.");
@@ -106,7 +119,12 @@ public static partial class ClientEndpoints
 
     // The PC's secure-desktop helper. It runs as SYSTEM in the console session, signs in with the PC's token, and stays connected
     // while idle. It streams only when told to, while a view is open and the PC's own stream is paused. One helper per PC.
-    private static async Task<IResult> SecureScreenStreamAsync(HttpContext http, AppDbContext db, ScreenStreamHub hub, TimeProvider clock)
+    private static async Task<IResult> SecureScreenStreamAsync(
+        HttpContext http,
+        AppDbContext db,
+        ScreenStreamHub hub,
+        TimeProvider clock,
+        ILoggerFactory loggerFactory)
     {
         if (ReadBearerToken(http.Request) is not { } token)
         {
@@ -140,7 +158,7 @@ public static partial class ClientEndpoints
         try
         {
             await hub.AttachHelperAsync(helper);
-            await ReceiveHelperMessagesAsync(hub, helper, ct);
+            await ReceiveHelperMessagesAsync(hub, helper, loggerFactory.CreateLogger(nameof(ClientEndpoints)), ct);
         }
         finally
         {
@@ -155,7 +173,7 @@ public static partial class ClientEndpoints
     }
 
     // Strict: anything but a relayable frame or a known text closes the helper. A replaced helper stops here.
-    private static async Task ReceiveHelperMessagesAsync(ScreenStreamHub hub, SecureHelperConnection helper, CancellationToken cancellationToken)
+    private static async Task ReceiveHelperMessagesAsync(ScreenStreamHub hub, SecureHelperConnection helper, ILogger logger, CancellationToken cancellationToken)
     {
         while (await helper.Socket.ReceiveAsync(ScreenProtocol.HelperLimits, cancellationToken) is { } message)
         {
@@ -178,17 +196,18 @@ public static partial class ClientEndpoints
                 return;
             }
 
-            var viewer = hub.CurrentFor(helper.PcId);
+            var stream = hub.StreamFor(helper.PcId);
             switch (kind)
             {
                 case HelperMessageKind.Frame:
-                    await hub.RelayHelperFrameAsync(helper, message.Payload);
+                    // Not waited for, like the PC's frames, so one slow browser can't hold back the others.
+                    _ = RelayObserver.ObserveAsync(hub.RelayHelperFrameAsync(helper, message.Payload), logger);
                     break;
-                case HelperMessageKind.ControlOn when viewer is not null:
-                    await hub.ConfirmControlAsync(viewer, helper.Socket);
+                case HelperMessageKind.ControlOn when stream is not null:
+                    await hub.ConfirmControlAsync(stream, helper.Socket);
                     break;
-                case HelperMessageKind.ControlOff when viewer is not null:
-                    await hub.EndControlFromAsync(viewer, helper.Socket);
+                case HelperMessageKind.ControlOff when stream is not null:
+                    await hub.EndControlFromAsync(stream, helper.Socket);
                     break;
             }
         }

@@ -66,10 +66,35 @@ public sealed class SecureHelperConnection(int pcId, string tokenHash, ScreenSoc
     private readonly Lock _sync = new();
     private readonly ScreenInputRateLimiter _frames = new(SecureHelperProtocol.MaxFramesPerSecond);
     private DateTimeOffset? _lastStoppedAt;
+    private ScreenStream? _streamingFor;
 
     public int PcId { get; } = pcId;
     public string TokenHash { get; } = tokenHash;
     public ScreenSocket Socket { get; } = socket;
+
+    // Held around each start or stop sent to the helper, together with the record of which stream it streams for. So the commands
+    // of an old stream of the PC and of a new one never cross: a late stop can't end the new stream's run, and a late start can't
+    // restart the helper in the old stream's mode.
+    public SemaphoreSlim CommandGate { get; } = new(1, 1);
+
+    // The stream the helper was last started for, until it is stopped. Changed only with the command gate held.
+    public ScreenStream? StreamingFor
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _streamingFor;
+            }
+        }
+        set
+        {
+            lock (_sync)
+            {
+                _streamingFor = value;
+            }
+        }
+    }
 
     public DateTimeOffset? LastStoppedAt
     {

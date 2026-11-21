@@ -3,7 +3,8 @@ using System.Net.WebSockets;
 namespace LabGuard.Server.Screen;
 
 // The secure-desktop helpers, at most one per PC: a newer connection replaces the older one. A helper idles until a view of its
-// PC is open and the PC's stream is paused. It then streams and takes input in the PC's place until the PC resumes.
+// PC is open and the PC's stream is paused. It then streams and takes input in the PC's place until the PC resumes. Its frames go
+// to every view of the PC, like the PC's own.
 public sealed partial class ScreenStreamHub
 {
     private readonly Dictionary<int, SecureHelperConnection> _helpersByPc = [];
@@ -24,7 +25,7 @@ public sealed partial class ScreenStreamHub
         }
     }
 
-    // Registers the helper in place of any older one for its PC. A paused view of the PC switches to the new helper first,
+    // Registers the helper in place of any older one for its PC. A paused stream of the PC switches to the new helper first,
     // then the older helper is closed with 4001.
     public async Task AttachHelperAsync(SecureHelperConnection helper)
     {
@@ -37,9 +38,9 @@ public sealed partial class ScreenStreamHub
 
         try
         {
-            if (CurrentFor(helper.PcId) is { } viewer)
+            if (StreamFor(helper.PcId) is { } stream)
             {
-                await SwitchSourceAsync(viewer);
+                await SwitchSourceAsync(stream);
             }
         }
         finally
@@ -52,7 +53,7 @@ public sealed partial class ScreenStreamHub
         }
     }
 
-    // The helper's connection ended. A view it was streaming for falls back to the PC's own state.
+    // The helper's connection ended. A stream it was streaming for falls back to the PC's own state.
     public async Task DetachHelperAsync(SecureHelperConnection helper)
     {
         lock (_sync)
@@ -63,9 +64,9 @@ public sealed partial class ScreenStreamHub
             }
         }
 
-        if (CurrentFor(helper.PcId) is { } viewer)
+        if (StreamFor(helper.PcId) is { } stream)
         {
-            await SwitchSourceAsync(viewer);
+            await SwitchSourceAsync(stream);
         }
     }
 
@@ -100,7 +101,7 @@ public sealed partial class ScreenStreamHub
         }
     }
 
-    // Unregisters the helper and closes its socket. Its receive loop then ends, and a view it was streaming for falls back.
+    // Unregisters the helper and closes its socket. Its receive loop then ends, and a stream it was streaming for falls back.
     public async Task CloseHelperAsync(SecureHelperConnection helper, WebSocketCloseStatus status, string reason)
     {
         lock (_sync)
@@ -111,9 +112,9 @@ public sealed partial class ScreenStreamHub
             }
         }
 
-        if (CurrentFor(helper.PcId) is { } viewer)
+        if (StreamFor(helper.PcId) is { } stream)
         {
-            await SwitchSourceAsync(viewer);
+            await SwitchSourceAsync(stream);
         }
 
         await CloseHelperSocketAsync(helper, status, reason);
@@ -123,18 +124,24 @@ public sealed partial class ScreenStreamHub
     public Task CloseAllHelpersAsync(WebSocketCloseStatus status, string reason) =>
         Task.WhenAll(HelperSnapshot().Select(helper => CloseHelperAsync(helper, status, reason)));
 
-    // A frame from a helper. Relayed only while it streams for an open view, with the same credits as the PC's frames.
+    // A frame from a helper. Relayed only while it streams for an open stream, with the same credits as the PC's frames.
     public async Task RelayHelperFrameAsync(SecureHelperConnection helper, ReadOnlyMemory<byte> frame)
     {
-        if (CurrentFor(helper.PcId) is { } viewer)
+        if (StreamFor(helper.PcId) is { } stream)
         {
-            await RelayFrameAsync(viewer, helper.Socket, frame);
+            await RelayFrameAsync(stream, helper.Socket, frame);
         }
     }
 
     // Whether a frame the helper sent is allowed at all. Within the frame cap, it is allowed while the helper streams for an open
-    // view, and for a short grace after it was told to stop, since frames already on the way are not its fault. Otherwise the
-    // helper is sending unasked, and the caller closes it.
+    // view, while it was started and its stop hasn't gone out yet (the stop may wait behind a gate for a while), and for a short
+    // grace after the stop, since frames already on the way are not its fault. Otherwise the helper is sending unasked, and the
+    // caller closes it. Allowed is not relayed: a frame reaches browsers only while the helper is its stream's current source.
+    //
+    // The helper's frames carry no run id, so the server can't tell a frame of an old run from one of the run it just started. The
+    // command gate keeps starts and stops in order, and a stream takes the helper's frames only while it is the source, so the gap
+    // left is theoretical: a frame captured under an old start that arrives after a newer start. Closing it fully needs the client:
+    // a run id in the start message that the helper echoes with each frame, so frames of any other run are dropped.
     public bool IsHelperFrameAllowed(SecureHelperConnection helper)
     {
         var now = clock.GetUtcNow();
@@ -143,7 +150,7 @@ public sealed partial class ScreenStreamHub
             return false;
         }
 
-        if (CurrentFor(helper.PcId) is { } viewer && viewer.IsCurrentSource(helper.Socket))
+        if (helper.StreamingFor is not null || (StreamFor(helper.PcId) is { } stream && stream.IsCurrentSource(helper.Socket)))
         {
             return true;
         }
@@ -159,60 +166,59 @@ public sealed partial class ScreenStreamHub
         }
     }
 
-    // Brings the view's source in line with its PC and helper, and sends what the change asks for. Everything is sent with the
-    // state gate held, so the browser and the sockets hear the changes in order. A control period the change ended is recorded after.
-    private async Task SwitchSourceAsync(ScreenViewer viewer)
+    // Brings the stream's source in line with its PC and helper, and sends what the change asks for. Everything is sent with the
+    // state gate held, so the browsers and the sockets hear the changes in order. Control messages go to the controller only, and
+    // the new state to every view. A control period the change ended is recorded after.
+    private async Task SwitchSourceAsync(ScreenStream stream)
     {
         ControlPeriodEnd? ended = null;
-        await viewer.StateGate.WaitAsync();
+        await stream.StateGate.WaitAsync();
         try
         {
             SourceSwitch change;
             // The switch and its messages happen under the input gate, so no input is chosen for the old source and sent after
             // that source was released or stopped.
-            await viewer.InputGate.WaitAsync();
+            await stream.InputGate.WaitAsync();
             try
             {
-                if (viewer.TrySwitchSource(ConnectedHelperFor(viewer.PcId)) is not { } switched)
+                if (stream.TrySwitchSource(ConnectedHelperFor(stream.PcId)) is not { } switched)
                 {
                     return;
                 }
 
                 change = switched;
-                await SendSwitchMessagesAsync(viewer, change);
-                // The view may have closed while the helper was being started. Its close might have told the helper to stop before
-                // the start went out, so the helper is told again and never stays started with no view.
-                if (change.StartedHelper is { } started && viewer.IsClosed)
-                {
-                    await StopHelperAsync(started);
-                }
+                await SendSwitchMessagesAsync(stream, change);
             }
             finally
             {
-                viewer.InputGate.Release();
+                stream.InputGate.Release();
             }
 
-            if (change.ResetCursor)
+            if (change.ResetCursor && stream.Controller is { } controller)
             {
-                await SendControlMessageAsync(viewer, PcCursorMessage.BrowserDefaultMessage);
+                await SendControlMessageAsync(controller, PcCursorMessage.BrowserDefaultMessage);
             }
 
             ended = change.EndedControl;
-            if (ended is not null)
+            if (ended is { } end)
             {
-                await SendCursorResetAsync(viewer, ended);
-                await SendControlMessageAsync(viewer, ScreenControlMessages.OffMessage(ControlReasons.Connection));
-                await SendPcControlOffAsync(ended);
+                if (end.Controller is { } previousController)
+                {
+                    await SendCursorResetAsync(previousController, end);
+                    await SendControlMessageAsync(previousController, ScreenControlMessages.OffMessage(ControlReasons.Connection));
+                }
+
+                await SendPcControlOffAsync(end);
             }
 
-            if (change.State is { } state && !await viewer.Browser.SendAsync(ScreenProtocol.StateMessage(state), WebSocketMessageType.Text))
+            if (change.State is { } state)
             {
-                await CloseStalledAsync(viewer);
+                await Task.WhenAll(stream.Viewers.Select(viewer => SendStateAsync(viewer, state)));
             }
         }
         finally
         {
-            viewer.StateGate.Release();
+            stream.StateGate.Release();
         }
 
         if (ended?.AuditId is { } auditId)
@@ -221,42 +227,93 @@ public sealed partial class ScreenStreamHub
         }
     }
 
-    // The helper's stop when its view closes. It waits, briefly, for a switch that is sending, so the stop goes out after that
-    // switch's start. A close never waits longer than that bound.
-    private async Task StopHelperOnCloseAsync(ScreenViewer viewer, ScreenSocket helper)
+    // The helper's stop when its stream closes. It waits, briefly, for a switch that is sending, so the stop goes out after that
+    // switch's start. A close never waits longer than that bound, and the helper's command gate keeps the order after it anyway.
+    private async Task StopHelperOnCloseAsync(ScreenStream stream, ScreenSocket helper)
     {
-        var isGated = await viewer.InputGate.WaitAsync(ScreenProtocol.ControlInputSendTimeout);
+        var isGated = await stream.InputGate.WaitAsync(ScreenProtocol.ControlInputSendTimeout);
         try
         {
-            await StopHelperAsync(helper);
+            await StopHelperAsync(stream, helper);
         }
         finally
         {
             if (isGated)
             {
-                viewer.InputGate.Release();
+                stream.InputGate.Release();
             }
         }
     }
 
-    // Tells the helper to stop, and notes when, so the frames it already had on the way are dropped rather than refused.
-    private async Task StopHelperAsync(ScreenSocket helper)
+    // Starts the helper for the stream, in the stream's mode, unless the stream has closed or is no longer the PC's stream by the
+    // time the helper's command gate is free. So an old stream's late start can't restart the helper in that stream's mode.
+    private async Task StartHelperAsync(ScreenStream stream, ScreenSocket helper)
     {
-        SecureHelperConnection? connection;
-        lock (_sync)
+        if (HelperConnectionFor(helper) is not { } connection)
         {
-            connection = _helpersByPc.Values.FirstOrDefault(candidate => ReferenceEquals(candidate.Socket, helper));
+            return;
         }
 
-        connection?.MarkStopped(clock.GetUtcNow());
-        await SendOrAbortAsync(helper, SecureHelperProtocol.StopMessage);
+        await connection.CommandGate.WaitAsync();
+        try
+        {
+            if (stream.IsClosed || !ReferenceEquals(StreamFor(stream.PcId), stream))
+            {
+                return;
+            }
+
+            connection.StreamingFor = stream;
+            await SendOrAbortAsync(helper, SecureHelperProtocol.StartMessage(stream.Mode));
+        }
+        finally
+        {
+            connection.CommandGate.Release();
+        }
     }
 
-    private async Task SendSwitchMessagesAsync(ScreenViewer viewer, SourceSwitch change)
+    // Tells the helper to stop for the stream, and notes when, so the frames it already had on the way are dropped rather than
+    // refused. Skipped when another stream of the PC has started the helper since, so an old stream's stop can't end its run.
+    private async Task StopHelperAsync(ScreenStream stream, ScreenSocket helper)
+    {
+        if (HelperConnectionFor(helper) is not { } connection)
+        {
+            // A helper that was replaced is being closed. It is still told to stop, so it stops streaming at once.
+            await SendOrAbortAsync(helper, SecureHelperProtocol.StopMessage);
+            return;
+        }
+
+        await connection.CommandGate.WaitAsync();
+        try
+        {
+            if (connection.StreamingFor is { } current && !ReferenceEquals(current, stream))
+            {
+                return;
+            }
+
+            // Noted right before the stop goes out, so the grace for frames already on the way starts with it.
+            connection.StreamingFor = null;
+            connection.MarkStopped(clock.GetUtcNow());
+            await SendOrAbortAsync(helper, SecureHelperProtocol.StopMessage);
+        }
+        finally
+        {
+            connection.CommandGate.Release();
+        }
+    }
+
+    private SecureHelperConnection? HelperConnectionFor(ScreenSocket helper)
+    {
+        lock (_sync)
+        {
+            return _helpersByPc.Values.FirstOrDefault(candidate => ReferenceEquals(candidate.Socket, helper));
+        }
+    }
+
+    private async Task SendSwitchMessagesAsync(ScreenStream stream, SourceSwitch change)
     {
         if (change.StoppedHelper is { } stopped)
         {
-            await StopHelperAsync(stopped);
+            await StopHelperAsync(stream, stopped);
         }
 
         if (change.ReleasedPc is { } released)
@@ -266,7 +323,7 @@ public sealed partial class ScreenStreamHub
 
         if (change.StartedHelper is { } started)
         {
-            await SendOrAbortAsync(started, SecureHelperProtocol.StartMessage(viewer.Mode));
+            await StartHelperAsync(stream, started);
         }
 
         if (change.ControlSource is { } source)

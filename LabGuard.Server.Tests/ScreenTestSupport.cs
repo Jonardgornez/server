@@ -9,6 +9,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using LabGuard.Server.Data;
 using LabGuard.Server.Network;
+using LabGuard.Server.Screen;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -286,5 +287,45 @@ internal static class LiveViewClient
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         return json.RootElement.Clone();
+    }
+}
+
+/// <summary>
+/// A stream with one viewer, as the tests of the stream's own rules (credits, source, control) use it. The calls name that one
+/// viewer for the test, so a test reads as it did when a viewer and its stream were one object.
+/// </summary>
+internal static class SingleViewerStream
+{
+    public static ScreenStream New(string mode = ScreenProtocol.NotifiedMode, int pcId = 7)
+    {
+        var stream = new ScreenStream(pcId, "PC-01", mode);
+        stream.TryJoin(NewViewer(stream, mode));
+        return stream;
+    }
+
+    public static ScreenViewer NewViewer(ScreenStream stream, string mode = ScreenProtocol.NotifiedMode, int adminId = 1, bool isPassive = false) =>
+        new(stream, mode, auditId: 1, DateTimeOffset.UtcNow.AddMinutes(30), new ScreenSocket(new FakeWebSocket(), TimeSpan.FromSeconds(1)),
+            new ScreenViewOwner(adminId, 1, "tester"), isPassive);
+
+    public static ScreenViewer OnlyViewer(this ScreenStream stream) => stream.Viewers.Single();
+
+    public static ControlRequest? TryBeginControlRequest(this ScreenStream stream) => stream.TryBeginControlRequest(stream.OnlyViewer()).Request;
+
+    public static ScreenSocket? TakeControlInputTarget(this ScreenStream stream, BrowserControlMessage input, DateTimeOffset now, ScreenSocket? connectedHelper = null) =>
+        stream.TakeControlInputTarget(stream.OnlyViewer(), input, now, connectedHelper);
+
+    public static bool TakesFrame(this ScreenStream stream, ScreenSocket sender) => stream.TryTakeFrameCredit(sender) is not null;
+
+    public static bool TryReturnFrameCredit(this ScreenStream stream, out ScreenSocket? ackTarget) =>
+        stream.TryReturnFrameCredit(stream.OnlyViewer(), out ackTarget);
+
+    public static bool IsAwaitingConfirmation(this ScreenStream stream, ScreenSocket pc) => stream.RequesterAwaiting(pc) is not null;
+
+    // The one viewer leaves, which closes the stream.
+    public static ViewerLeave CloseOnlyViewer(this ScreenStream stream)
+    {
+        var viewer = stream.OnlyViewer();
+        viewer.TryClose();
+        return stream.RemoveViewer(viewer);
     }
 }

@@ -12,7 +12,8 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LabGuard.Server.Screen;
 
-// The administrator's live view of one PC, over a WebSocket on the admin port. The PC streams only while a viewer is open.
+// The administrator's live view of one PC, over a WebSocket on the admin port. The PC streams only while a viewer is open, and
+// up to ScreenProtocol.MaxViewersPerPc browsers share its stream.
 public static class ScreenViewEndpoints
 {
     public static IServiceCollection AddScreenViewing(this IServiceCollection services)
@@ -71,7 +72,7 @@ public static class ScreenViewEndpoints
             return AuthEndpoints.BadRequest("Mode must be notified or anonymous.");
         }
 
-        // A passive view (a grid tile) never takes the place of a view that is already open.
+        // A passive view (a grid tile) never takes another view's place. A full view may take a passive view's place when the PC's stream is full.
         if (ScreenProtocol.ParsePassive(passive) is not { } isPassive)
         {
             return AuthEndpoints.BadRequest("Passive must be 0 or 1.");
@@ -103,7 +104,7 @@ public static class ScreenViewEndpoints
         }
 
         // Checked before the audit row starts and before the upgrade. The hub checks again, atomically, in case one opens meanwhile.
-        if (isPassive && hub.CurrentFor(id) is { IsClosed: false })
+        if (isPassive && hub.StreamFor(id) is { IsFull: true })
         {
             return PcEndpoints.ConflictResponse(ScreenProtocol.BusyReason);
         }
@@ -290,7 +291,7 @@ public static class ScreenViewEndpoints
             return true;
         }
 
-        return viewer.CurrentPc?.RemoteAddress is { } liveAddress
+        return viewer.Stream.CurrentPc?.RemoteAddress is { } liveAddress
             && ServerPcRule.IsServerPc(liveAddress.ToString(), machineAddresses);
     }
 }

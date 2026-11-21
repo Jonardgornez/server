@@ -572,7 +572,7 @@ public static partial class ClientEndpoints
 
         var settings = await ServerSettingsStore.GetAsync(db, ct);
         var backgrounds = await BackgroundEndpoints.HeartbeatHashesAsync(db, ct);
-        var screenView = screens.CurrentFor(pcId) is { } viewer ? new HeartbeatScreenView(viewer.ViewId, viewer.Mode) : null;
+        var screenView = screens.StreamFor(pcId)?.Describe() is { } stream ? new HeartbeatScreenView(stream.ViewId, stream.Mode) : null;
         var clientUpdate = await ClientUpdateHeartbeat.HandleAsync(db, pcId, request, now, ct);
         return Results.Ok(new HeartbeatResponse(
             active is null ? null : SessionLifecycle.ToInfo(active, now),

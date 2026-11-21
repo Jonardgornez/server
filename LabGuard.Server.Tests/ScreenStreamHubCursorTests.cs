@@ -36,14 +36,14 @@ public class ScreenStreamHubCursorTests
         var viewer = (await hub.OpenAsync(1, ScreenProtocol.NotifiedMode, app.Time.GetUtcNow().AddHours(1), 0,
             new ScreenSocket(browser, ShortTimeout), hub.Epoch, new ScreenViewOwner(1, 1, "tester"), "PC-01"))!;
         var pc = new ScreenSocket(new FakeWebSocket(), ShortTimeout);
-        await hub.AttachPcAsync(viewer, pc);
+        await hub.AttachPcAsync(viewer.Stream, pc, viewer.Stream.ViewId);
         return (hub, viewer, browser, pc);
     }
 
     private static async Task TurnControlOnAsync(ScreenStreamHub hub, ScreenViewer viewer, ScreenSocket source)
     {
         await hub.RequestControlAsync(viewer, isServerPc: false);
-        await hub.ConfirmControlAsync(viewer, source);
+        await hub.ConfirmControlAsync(viewer.Stream, source);
         Assert.Equal(ScreenControlState.On, viewer.ControlState);
     }
 
@@ -61,7 +61,7 @@ public class ScreenStreamHubCursorTests
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         await TurnControlOnAsync(hub, viewer, pc);
 
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
 
         Assert.Equal(Text, TextsOf(browser).Last());
     }
@@ -72,7 +72,7 @@ public class ScreenStreamHubCursorTests
         using var app = new TestApp();
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
 
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
 
         Assert.Empty(CursorsOf(browser));
     }
@@ -84,7 +84,7 @@ public class ScreenStreamHubCursorTests
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         await hub.RequestControlAsync(viewer, isServerPc: false);
 
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
 
         Assert.Empty(CursorsOf(browser));
     }
@@ -97,7 +97,7 @@ public class ScreenStreamHubCursorTests
         await TurnControlOnAsync(hub, viewer, pc);
         await hub.StopControlAsync(viewer);
 
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
 
         Assert.Empty(CursorsOf(browser));
     }
@@ -109,9 +109,9 @@ public class ScreenStreamHubCursorTests
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         await AttachHelperAsync(hub);
         await TurnControlOnAsync(hub, viewer, pc);
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
 
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
 
         Assert.Empty(CursorsOf(browser));
     }
@@ -122,10 +122,10 @@ public class ScreenStreamHubCursorTests
         using var app = new TestApp();
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         var helper = await AttachHelperAsync(hub);
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
         await TurnControlOnAsync(hub, viewer, helper.Socket);
 
-        await hub.RelayCursorAsync(viewer, helper.Socket, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, helper.Socket, Cursor(Text));
 
         Assert.Empty(CursorsOf(browser));
     }
@@ -137,7 +137,7 @@ public class ScreenStreamHubCursorTests
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         await TurnControlOnAsync(hub, viewer, pc);
 
-        await hub.RelayCursorAsync(viewer, new ScreenSocket(new FakeWebSocket(), ShortTimeout), Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, new ScreenSocket(new FakeWebSocket(), ShortTimeout), Cursor(Text));
 
         Assert.Empty(CursorsOf(browser));
     }
@@ -151,15 +151,15 @@ public class ScreenStreamHubCursorTests
 
         for (var i = 0; i < ScreenProtocol.MaxCursorsPerSecond; i++)
         {
-            await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+            await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
         }
 
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Move));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Move));
         Assert.Equal(20, CursorsOf(browser).Count);
         Assert.DoesNotContain(Move, CursorsOf(browser));
 
         app.Time.Advance(TimeSpan.FromSeconds(1));
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Move));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Move));
 
         Assert.Equal(Move, CursorsOf(browser).Last());
     }
@@ -170,7 +170,7 @@ public class ScreenStreamHubCursorTests
         using var app = new TestApp();
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         await TurnControlOnAsync(hub, viewer, pc);
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
 
         await hub.StopControlAsync(viewer);
 
@@ -185,9 +185,9 @@ public class ScreenStreamHubCursorTests
         using var app = new TestApp();
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         await TurnControlOnAsync(hub, viewer, pc);
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
 
-        await hub.EndControlFromAsync(viewer, pc);
+        await hub.EndControlFromAsync(viewer.Stream, pc);
 
         Assert.Equal(Default, CursorsOf(browser).Last());
     }
@@ -211,9 +211,9 @@ public class ScreenStreamHubCursorTests
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         await AttachHelperAsync(hub);
         await TurnControlOnAsync(hub, viewer, pc);
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
 
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
 
         Assert.Equal([Text, Default], CursorsOf(browser));
         Assert.Equal(ScreenControlState.On, viewer.ControlState);
@@ -226,10 +226,10 @@ public class ScreenStreamHubCursorTests
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         await AttachHelperAsync(hub);
         await TurnControlOnAsync(hub, viewer, pc);
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: true);
-        await hub.SetPcPausedAsync(viewer, pc, isPaused: false);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: true);
+        await hub.SetPcPausedAsync(viewer.Stream, pc, isPaused: false);
 
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Move));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Move));
 
         Assert.Equal([Move], CursorsOf(browser));
     }
@@ -240,9 +240,9 @@ public class ScreenStreamHubCursorTests
         using var app = new TestApp();
         var (hub, viewer, browser, pc) = await SetUpAsync(app);
         await TurnControlOnAsync(hub, viewer, pc);
-        await hub.RelayCursorAsync(viewer, pc, Cursor(Text));
+        await hub.RelayCursorAsync(viewer.Stream, pc, Cursor(Text));
 
-        await hub.DetachPcAsync(viewer, pc);
+        await hub.DetachPcAsync(viewer.Stream, pc);
 
         Assert.Equal(ScreenControlState.Off, viewer.ControlState);
         Assert.Equal([Text, Default], CursorsOf(browser));
